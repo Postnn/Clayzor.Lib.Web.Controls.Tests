@@ -48,4 +48,28 @@ public class ComplexColumnTypesTests
         Assert.Equal("test", desc.Format("test"));
         Assert.Equal("", desc.Format(null));
     }
+
+    /// <summary>Resolve(9) возвращает ClayIconColumnType.</summary>
+    [Fact]
+    public void Resolve_Type9_ReturnsIconDescriptor()
+    {
+        var desc = ClayColumnTypeMap.Resolve(9);
+        Assert.NotNull(desc);
+        Assert.IsType<ClayIconColumnType>(desc);
+    }
+
+    /// <summary>IsSupported(9) == true.</summary>
+    [Fact]
+    public void IsSupported_Type9_ReturnsTrue()
+    {
+        Assert.True(ClayColumnTypeMap.IsSupported(9));
+    }
+
+    /// <summary>ClayIconColumnType.DefaultOperator = Equals.</summary>
+    [Fact]
+    public void IconColumnType_DefaultOperator_IsEquals()
+    {
+        var desc = new ClayIconColumnType();
+        Assert.Equal(ColumnFilterOperator.Equals, desc.DefaultOperator);
+    }
 }

@@ -31,6 +31,7 @@ public class ColumnTypeMapTests
     [InlineData(4)]
     [InlineData(5)]
     [InlineData(7)]
+    [InlineData(9)]
     public void Resolve_SupportedTypes_ReturnsDescriptor(int type)
     {
         var d = ClayColumnTypeMap.Resolve(type);
@@ -41,7 +42,6 @@ public class ColumnTypeMapTests
     [Theory]
     [InlineData(6)]
     [InlineData(8)]
-    [InlineData(9)]
     [InlineData(10)]
     [InlineData(11)]
     [InlineData(12)]
