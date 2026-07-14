@@ -23,12 +23,13 @@ public class ColumnTypeMapTests
         Assert.Equal(expectedKind, d!.Kind);
     }
 
-    /// <summary>Resolve для поддерживаемых типов (1,2,3,4,7) не null.</summary>
+    /// <summary>Resolve для поддерживаемых типов (1,2,3,4,5,7) не null.</summary>
     [Theory]
     [InlineData(1)]
     [InlineData(2)]
     [InlineData(3)]
     [InlineData(4)]
+    [InlineData(5)]
     [InlineData(7)]
     public void Resolve_SupportedTypes_ReturnsDescriptor(int type)
     {
@@ -36,9 +37,8 @@ public class ColumnTypeMapTests
         Assert.NotNull(d);
     }
 
-    /// <summary>Resolve для неподдержанных типов (5,6,8–13) возвращает null.</summary>
+    /// <summary>Resolve для неподдержанных типов (6,8–13) возвращает null.</summary>
     [Theory]
-    [InlineData(5)]
     [InlineData(6)]
     [InlineData(8)]
     [InlineData(9)]
@@ -51,11 +51,11 @@ public class ColumnTypeMapTests
         Assert.Null(ClayColumnTypeMap.Resolve(type));
     }
 
-    /// <summary>IsSupported(5) == false.</summary>
+    /// <summary>IsSupported(5) == true.</summary>
     [Fact]
-    public void IsSupported_5_ReturnsFalse()
+    public void IsSupported_5_ReturnsTrue()
     {
-        Assert.False(ClayColumnTypeMap.IsSupported(5));
+        Assert.True(ClayColumnTypeMap.IsSupported(5));
     }
 
     /// <summary>IsSupported(1) == true.</summary>
