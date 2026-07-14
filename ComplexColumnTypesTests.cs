@@ -25,11 +25,13 @@ public class ComplexColumnTypesTests
         Assert.True(ClayColumnTypeMap.IsSupported(5));
     }
 
-    /// <summary>Resolve(6) всё ещё null — будет в G12.</summary>
+    /// <summary>Resolve(6) возвращает ClayConditionBoolColumnType.</summary>
     [Fact]
-    public void Resolve_Type6_StillNull()
+    public void Resolve_Type6_ReturnsConditionBoolDescriptor()
     {
-        Assert.Null(ClayColumnTypeMap.Resolve(6));
+        var desc = ClayColumnTypeMap.Resolve(6);
+        Assert.NotNull(desc);
+        Assert.IsType<ClayConditionBoolColumnType>(desc);
     }
 
     /// <summary>ClayListColumnType.DefaultOperator = Equals.</summary>
@@ -71,5 +73,29 @@ public class ComplexColumnTypesTests
     {
         var desc = new ClayIconColumnType();
         Assert.Equal(ColumnFilterOperator.Equals, desc.DefaultOperator);
+    }
+
+    /// <summary>Resolve(11) возвращает ClayConditionListColumnType.</summary>
+    [Fact]
+    public void Resolve_Type11_ReturnsConditionListDescriptor()
+    {
+        var desc = ClayColumnTypeMap.Resolve(11);
+        Assert.NotNull(desc);
+        Assert.IsType<ClayConditionListColumnType>(desc);
+    }
+
+    /// <summary>IsSupported(11) == true.</summary>
+    [Fact]
+    public void IsSupported_Type11_ReturnsTrue()
+    {
+        Assert.True(ClayColumnTypeMap.IsSupported(11));
+    }
+
+    /// <summary>ConditionBoolColumnType.Kind = Boolean.</summary>
+    [Fact]
+    public void ConditionBoolColumnType_Kind_IsBoolean()
+    {
+        var desc = new ClayConditionBoolColumnType();
+        Assert.Equal(ColumnType.Boolean, desc.Kind);
     }
 }
