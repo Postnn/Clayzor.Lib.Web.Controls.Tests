@@ -1,3 +1,4 @@
+using Clayzor.Lib.Entities.DynamicGrid;
 using Clayzor.Lib.Web.Controls.Components.Grid.Dynamic;
 using Microsoft.Extensions.Configuration;
 
