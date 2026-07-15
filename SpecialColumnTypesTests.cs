@@ -74,4 +74,55 @@ public class SpecialColumnTypesTests
         Assert.NotNull(desc);
         Assert.IsType<ClayLimitedTextColumnType>(desc);
     }
+
+    /// <summary>ConvertFromUtc: UTC 09:00 + смещение +03:00 → 12:00.</summary>
+    [Fact]
+    public void ConvertFromUtc_WithOffset_ReturnsLocalTime()
+    {
+        var utc    = new DateTime(2026, 1, 1, 9, 0, 0, DateTimeKind.Utc);
+        var offset = TimeSpan.FromHours(3);
+        var local  = ClayDateTimeConverter.ConvertFromUtc(utc, offset);
+
+        Assert.Equal(12, local!.Value.Hour);
+        Assert.Equal(1, local.Value.Day);
+    }
+
+    /// <summary>Format с offset: UTC 09:00 +03:00, формат "HH:mm" → "12:00".</summary>
+    [Fact]
+    public void Format_WithOffset_AppliesFormat()
+    {
+        var utc    = new DateTime(2026, 1, 1, 9, 0, 0, DateTimeKind.Utc);
+        var offset = TimeSpan.FromHours(3);
+        var result = ClayDateTimeConverter.Format(utc, "HH:mm", offset);
+
+        Assert.Equal("12:00", result);
+    }
+
+    /// <summary>Format без offset: возвращает как есть.</summary>
+    [Fact]
+    public void Format_NoOffset_ReturnsUtcAsIs()
+    {
+        var utc    = new DateTime(2026, 1, 1, 9, 0, 0);
+        var result = ClayDateTimeConverter.Format(utc, "HH:mm");
+
+        Assert.Equal("09:00", result);
+    }
+
+    /// <summary>Resolve(10) возвращает ClayDateTimeLocalColumnType.</summary>
+    [Fact]
+    public void Resolve_Type10_ReturnsDateTimeLocalDescriptor()
+    {
+        var desc = ClayColumnTypeMap.Resolve(10);
+        Assert.NotNull(desc);
+        Assert.IsType<ClayDateTimeLocalColumnType>(desc);
+    }
+
+    /// <summary>Resolve(13) возвращает ClayTimeLocalColumnType.</summary>
+    [Fact]
+    public void Resolve_Type13_ReturnsTimeLocalDescriptor()
+    {
+        var desc = ClayColumnTypeMap.Resolve(13);
+        Assert.NotNull(desc);
+        Assert.IsType<ClayTimeLocalColumnType>(desc);
+    }
 }

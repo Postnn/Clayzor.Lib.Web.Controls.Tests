@@ -36,19 +36,12 @@ public class ColumnTypeMapTests
     [InlineData(11)]
     [InlineData(8)]
     [InlineData(12)]
+    [InlineData(10)]
+    [InlineData(13)]
     public void Resolve_SupportedTypes_ReturnsDescriptor(int type)
     {
         var d = ClayColumnTypeMap.Resolve(type);
         Assert.NotNull(d);
-    }
-
-    /// <summary>Resolve для неподдержанных типов (10,13) возвращает null.</summary>
-    [Theory]
-    [InlineData(10)]
-    [InlineData(13)]
-    public void Resolve_UnsupportedTypes_ReturnsNull(int type)
-    {
-        Assert.Null(ClayColumnTypeMap.Resolve(type));
     }
 
     /// <summary>IsSupported(5) == true.</summary>
