@@ -44,7 +44,7 @@
 | `FilterModelTests.cs` | Модель фильтра: узлы дерева, глубокое копирование (`Clone`), инварианты `ColumnFilter`/`ValueFilter`. |
 | `GridStateSerializationTests.cs` | Сериализация/десериализация состояния грида (колонки, сортировка, группировка, фильтр, размер страницы). |
 | `UrlFilterParserTests.cs` | Разбор URL-фильтра вида `КлючURL=op~value` (`ClayGridUrlFilterParser`). |
-| `OptionsBindingTests.cs` | Биндинг опций динамического грида (`ClayGridDynamicOptions`) из конфигурации и их валидация. |
+| `OptionsBindingTests.cs` | Биндинг опций динамического грида (`ClayGridDynamicSettings`) из конфигурации и их валидация. |
 | `UserParamsTests.cs` | Пользовательские параметры грида (`ClayGridUserParamsData`): построение имён и SQL сохранения/загрузки. |
 
 ## Запуск

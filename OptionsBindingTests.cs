@@ -5,7 +5,7 @@ using Microsoft.Extensions.Configuration;
 namespace Clayzor.Lib.Web.Controls.Tests;
 
 /// <summary>
-/// Тесты опций динамического грида <see cref="ClayGridDynamicOptions"/>
+/// Тесты опций динамического грида <see cref="ClayGridDynamicSettings"/>
 /// и маппинга схемы <see cref="ClayGridSchemaMap"/>.
 /// </summary>
 public class OptionsBindingTests
@@ -32,7 +32,7 @@ public class OptionsBindingTests
         };
 
         var config = new ConfigurationBuilder().AddInMemoryCollection(dict).Build();
-        var opts = new ClayGridDynamicOptions();
+        var opts = new ClayGridDynamicSettings();
         config.GetSection("ClayGrid:Dynamic").Bind(opts);
 
         Assert.Equal("Main", opts.ConnectionStringName);
@@ -76,7 +76,7 @@ public class OptionsBindingTests
     [Fact]
     public void Validate_EmptyConnectionStringName_ThrowsInvalidOperationException()
     {
-        var opts = new ClayGridDynamicOptions
+        var opts = new ClayGridDynamicSettings
         {
             ConnectionStringName = "",
             SettingsTable = "T1",
@@ -92,7 +92,7 @@ public class OptionsBindingTests
     [Fact]
     public void Validate_EmptySettingsTable_ThrowsInvalidOperationException()
     {
-        var opts = new ClayGridDynamicOptions
+        var opts = new ClayGridDynamicSettings
         {
             ConnectionStringName = "Main",
             SettingsTable = "",
@@ -108,7 +108,7 @@ public class OptionsBindingTests
     [Fact]
     public void Validate_AllFieldsSet_DoesNotThrow()
     {
-        var opts = new ClayGridDynamicOptions
+        var opts = new ClayGridDynamicSettings
         {
             ConnectionStringName = "Main",
             SettingsTable = "T1",
