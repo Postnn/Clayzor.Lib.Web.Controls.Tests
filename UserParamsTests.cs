@@ -1,4 +1,5 @@
 using Clayzor.Lib.Entities.DynamicGrid;
+using Clayzor.Lib.Web.Controls.Components.Grid.Dynamic;
 
 namespace Clayzor.Lib.Web.Controls.Tests;
 
@@ -67,5 +68,60 @@ public class UserParamsTests
         var sql = ClayGridUserParamsData.BuildLoadSql("T", s, 0);
 
         Assert.Contains("IN ()", sql);
+    }
+
+    // ── SH4: ClayGridParamRegistry ──────────────────────────────────────────
+
+    /// <summary>GetGridParamNames для gridId=140 возвращает ровно 6 имён со стандартными префиксами.</summary>
+    [Fact]
+    public void GetGridParamNames_ReturnsSixNames()
+    {
+        var settings = new ClayGridDynamicSettings();
+        var names = ClayGridParamRegistry.GetGridParamNames(settings, 140);
+
+        Assert.Equal(6, names.Count);
+        Assert.Contains("cols140", names);
+        Assert.Contains("flt140", names);
+        Assert.Contains("grp140", names);
+        Assert.Contains("srt140", names);
+        Assert.Contains("pgs140", names);
+        Assert.Contains("qks140", names);
+    }
+
+    /// <summary>GetGridParamNames для двух разных gridId возвращает непересекающиеся множества.</summary>
+    [Fact]
+    public void GetGridParamNames_DifferentGrids_NoOverlap()
+    {
+        var settings = new ClayGridDynamicSettings();
+        var names140 = ClayGridParamRegistry.GetGridParamNames(settings, 140);
+        var names141 = ClayGridParamRegistry.GetGridParamNames(settings, 141);
+
+        Assert.Empty(names140.Intersect(names141));
+    }
+
+    /// <summary>Все имена из GetGridParamNames укладываются в 20 символов при большом gridId.</summary>
+    [Fact]
+    public void GetGridParamNames_AllNamesWithin20Chars()
+    {
+        var settings = new ClayGridDynamicSettings();
+        var names = ClayGridParamRegistry.GetGridParamNames(settings, 9999999);
+
+        foreach (var name in names)
+            Assert.True(name.Length <= 20, $"Имя \"{name}\" длиннее 20 символов: {name.Length}");
+    }
+
+    /// <summary>GetGridParamNames с длинным префиксом бросает InvalidOperationException с именем свойства.</summary>
+    [Fact]
+    public void GetGridParamNames_LongPrefix_ThrowsWithPropertyName()
+    {
+        var settings = new ClayGridDynamicSettings
+        {
+            ColumnsParamPrefix = "verylongprefix" // 14 chars + "9999999" = 21 chars > 20
+        };
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => ClayGridParamRegistry.GetGridParamNames(settings, 9999999));
+
+        Assert.Contains("ClayGridDynamicSettings.ColumnsParamPrefix", ex.Message);
     }
 }
