@@ -28,7 +28,10 @@ public class OptionsBindingTests
             ["ClayGrid:Dynamic:GroupingParamPrefix"] = "g",
             ["ClayGrid:Dynamic:SortingParamPrefix"] = "s",
             ["ClayGrid:Dynamic:PageSizeParamPrefix"] = "p",
-            ["ClayGrid:Dynamic:ClientIdQueryParam"] = "cid"
+            ["ClayGrid:Dynamic:QuickSearchParamPrefix"] = "q",
+            ["ClayGrid:Dynamic:ClientIdQueryParam"] = "cid",
+            ["ClayGrid:Dynamic:UserSharedParamsTable"] = "CustShared",
+            ["ClayGrid:Dynamic:UserParamsShared"] = "CustSharedFn"
         };
 
         var config = new ConfigurationBuilder().AddInMemoryCollection(dict).Build();
@@ -45,7 +48,10 @@ public class OptionsBindingTests
         Assert.Equal("g", opts.GroupingParamPrefix);
         Assert.Equal("s", opts.SortingParamPrefix);
         Assert.Equal("p", opts.PageSizeParamPrefix);
+        Assert.Equal("q", opts.QuickSearchParamPrefix);
         Assert.Equal("cid", opts.ClientIdQueryParam);
+        Assert.Equal("CustShared", opts.UserSharedParamsTable);
+        Assert.Equal("CustSharedFn", opts.UserParamsShared);
     }
 
     /// <summary>Дефолты схемы: Settings.Title == "Запрос".</summary>
@@ -70,6 +76,14 @@ public class OptionsBindingTests
     {
         var map = new ClayGridSchemaMap();
         Assert.Equal("Параметр", map.UserParams.Name);
+    }
+
+    /// <summary>Дефолты схемы: UserParams.SharedId == "КодНастройкиОбщей".</summary>
+    [Fact]
+    public void Schema_Defaults_UserParamsSharedId()
+    {
+        var map = new ClayGridSchemaMap();
+        Assert.Equal("КодНастройкиОбщей", map.UserParams.SharedId);
     }
 
     /// <summary>Validate() при пустом ConnectionStringName бросает InvalidOperationException.</summary>
@@ -113,10 +127,48 @@ public class OptionsBindingTests
             ConnectionStringName = "Main",
             SettingsTable = "T1",
             ColumnsTable = "T2",
-            UserParamsTable = "T3"
+            UserParamsTable = "T3",
+            UserSharedParamsTable = "T4",
+            UserParamsShared = "T5"
         };
 
         var ex = Record.Exception(() => opts.Validate());
         Assert.Null(ex);
+    }
+
+    /// <summary>Validate() при пустом UserSharedParamsTable бросает InvalidOperationException.</summary>
+    [Fact]
+    public void Validate_EmptyUserSharedParamsTable_ThrowsInvalidOperationException()
+    {
+        var opts = new ClayGridDynamicSettings
+        {
+            ConnectionStringName = "Main",
+            SettingsTable = "T1",
+            ColumnsTable = "T2",
+            UserParamsTable = "T3",
+            UserSharedParamsTable = "",
+            UserParamsShared = "T5"
+        };
+
+        var ex = Assert.Throws<InvalidOperationException>(() => opts.Validate());
+        Assert.Contains("UserSharedParamsTable", ex.Message);
+    }
+
+    /// <summary>Validate() при пустом UserParamsShared бросает InvalidOperationException.</summary>
+    [Fact]
+    public void Validate_EmptyUserParamsShared_ThrowsInvalidOperationException()
+    {
+        var opts = new ClayGridDynamicSettings
+        {
+            ConnectionStringName = "Main",
+            SettingsTable = "T1",
+            ColumnsTable = "T2",
+            UserParamsTable = "T3",
+            UserSharedParamsTable = "T4",
+            UserParamsShared = ""
+        };
+
+        var ex = Assert.Throws<InvalidOperationException>(() => opts.Validate());
+        Assert.Contains("UserParamsShared", ex.Message);
     }
 }
