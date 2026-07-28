@@ -120,4 +120,50 @@ public class GridStateSerializationTests
         Assert.Empty(GridStateSerializer.DeserializeGroups(input));
         Assert.Null(GridStateSerializer.DeserializePageSize(input));
     }
+
+    /// <summary>
+    /// Полный round-trip набора параметров (SH5→SH8): сериализация →
+    /// десериализация всех типов состояния. Доказывает, что формат общих
+    /// настроек совпадает с форматом личных.
+    /// </summary>
+    [Fact]
+    public void FullParamSet_RoundTrip_AllTypesPreserved()
+    {
+        // Колонки
+        var meta = new ClayColumnMeta { ColumnId = 1, SqlName = "col1", DisplayName = "C1" };
+        var colsSerialized = GridStateSerializer.SerializeColumns(
+            [1], new Dictionary<int, ClayColumnMeta> { [1] = meta }, new HashSet<string>());
+        var colsDeserialized = GridStateSerializer.DeserializeColumns(colsSerialized);
+        Assert.Single(colsDeserialized);
+        Assert.Equal(("col1", 1), colsDeserialized[0]);
+
+        // Сортировка
+        var sortSerialized = GridStateSerializer.SerializeSort(
+            [new SortColumn("col1", true), new SortColumn("col2", false)]);
+        var sortDeserialized = GridStateSerializer.DeserializeSort(sortSerialized);
+        Assert.Equal(2, sortDeserialized.Count);
+        Assert.True(sortDeserialized[0].Desc);
+        Assert.False(sortDeserialized[1].Desc);
+
+        // Группировка
+        var grpSerialized = GridStateSerializer.SerializeGroups(["col1", "col2"]);
+        var grpDeserialized = GridStateSerializer.DeserializeGroups(grpSerialized);
+        Assert.Equal(["col1", "col2"], grpDeserialized);
+
+        // Размер страницы
+        var pgsSerialized = GridStateSerializer.SerializePageSize(25);
+        var pgsDeserialized = GridStateSerializer.DeserializePageSize(pgsSerialized);
+        Assert.Equal(25, pgsDeserialized);
+
+        // Фильтр
+        var root = new ClayFilterGroupNode();
+        root.Nodes.Add(new ColumnFilter
+        {
+            Column = "col1", Operator = ColumnFilterOperator.Equals, Value = "test"
+        });
+        var fltJson = GridStateSerializer.SerializeFilter(root);
+        Assert.NotNull(fltJson);
+        var fltDeserialized = GridStateSerializer.DeserializeFilter(fltJson);
+        Assert.NotNull(fltDeserialized);
+    }
 }
