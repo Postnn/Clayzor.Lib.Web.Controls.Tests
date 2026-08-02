@@ -1,5 +1,6 @@
 using Clayzor.Lib.Entities.DynamicGrid;
 using Clayzor.Lib.Web.Controls.Components.Grid.Dynamic;
+using Clayzor.Lib.Web.Controls.Components.Tree;
 using Microsoft.Extensions.Configuration;
 
 namespace Clayzor.Lib.Web.Controls.Tests;
@@ -170,5 +171,64 @@ public class OptionsBindingTests
 
         var ex = Assert.Throws<InvalidOperationException>(() => opts.Validate());
         Assert.Contains("UserParamsShared", ex.Message);
+    }
+
+    // ── ClayTreeDynamicSettings ──────────────────────────────────────────────────
+
+    /// <summary>
+    /// Байнд ClayTreeDynamicSettings из in-memory IConfiguration заполняет все поля.
+    /// </summary>
+    [Fact]
+    public void Bind_TreeSettings_FromInMemoryConfig_AllFieldsPopulated()
+    {
+        var dict = new Dictionary<string, string?>
+        {
+            ["ClayTree:Dynamic:FilterParamPrefix"] = "Flt_",
+            ["ClayTree:Dynamic:StateParamPrefix"] = "St_",
+            ["ClayTree:Dynamic:FilterQueryPrefix"] = "q_"
+        };
+
+        var config = new ConfigurationBuilder().AddInMemoryCollection(dict).Build();
+        var opts = new ClayTreeDynamicSettings();
+        config.GetSection("ClayTree:Dynamic").Bind(opts);
+
+        Assert.Equal("Flt_", opts.FilterParamPrefix);
+        Assert.Equal("St_", opts.StateParamPrefix);
+        Assert.Equal("q_", opts.FilterQueryPrefix);
+    }
+
+    /// <summary>
+    /// ClayTreeDynamicSettings.Validate() при пустом FilterParamPrefix бросает InvalidOperationException.
+    /// </summary>
+    [Fact]
+    public void Validate_TreeSettings_EmptyFilterParamPrefix_Throws()
+    {
+        var opts = new ClayTreeDynamicSettings
+        {
+            FilterParamPrefix = "",
+            StateParamPrefix = "St_",
+            FilterQueryPrefix = "q_"
+        };
+
+        var ex = Assert.Throws<InvalidOperationException>(() => opts.Validate());
+        Assert.Contains("ClayTreeDynamicSettings", ex.Message);
+        Assert.Contains("FilterParamPrefix", ex.Message);
+    }
+
+    /// <summary>
+    /// ClayTreeDynamicSettings.Validate() при заполненных обязательных полях не бросает исключение.
+    /// </summary>
+    [Fact]
+    public void Validate_TreeSettings_AllFieldsSet_DoesNotThrow()
+    {
+        var opts = new ClayTreeDynamicSettings
+        {
+            FilterParamPrefix = "Flt_",
+            StateParamPrefix = "St_",
+            FilterQueryPrefix = "q_"
+        };
+
+        var ex = Record.Exception(() => opts.Validate());
+        Assert.Null(ex);
     }
 }
