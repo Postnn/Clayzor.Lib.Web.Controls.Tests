@@ -226,8 +226,9 @@ public class ClayTreeSqlBuilderTests
         Assert.Contains("INNER JOIN Chain", sql);
         Assert.Contains("[_ismatch]", sql);
         Assert.Contains("[_hasmatchchildren]", sql);
-        // ParentKey: не-совпадение в цепочке = предок совпавшего
-        Assert.Contains("CASE WHEN a.IsMatch = 0 THEN 1 ELSE 0 END", sql);
+        // ParentKey: _hasmatchchildren через EXISTS по Chain (узел с совпавшими потомками)
+        Assert.Contains("EXISTS (SELECT 1 FROM Chain", sql);
+        Assert.Contains("c.IsMatchSeed = 1", sql);
     }
 
     /// <summary>BuildFilterSql ParentKey: все идентификаторы в квадратных скобках.</summary>
