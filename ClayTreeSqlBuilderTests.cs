@@ -181,4 +181,79 @@ public class ClayTreeSqlBuilderTests
         Assert.Equal(2, result.Nodes.Count);
         Assert.Equal(2L, result.NextCursor);
     }
+
+    // ── TF_E: BuildFilterSql ─────────────────────────────────────────────────────
+
+    /// <summary>BuildFilterSql NestedSet: нет рекурсии, предки через диапазон [L]/[R].</summary>
+    [Fact]
+    public void BuildFilterSql_NestedSet_UsesRangeNotRecursion()
+    {
+        var src = CreateNestedSetSource(withLevelColumn: true);
+        var sql = ClayTreeSqlBuilder.BuildFilterSql(src, "[Name] LIKE @p0", 100);
+
+        Assert.DoesNotContain("UNION ALL", sql);
+        Assert.Contains("TOP (@max + 1)", sql);
+        Assert.Contains("ORDER BY s.[L]", sql); // Matches
+        Assert.Contains("[_ismatch]", sql);
+        Assert.Contains("[_hasmatchchildren]", sql);
+        Assert.Contains("m.L > s.[L]", sql);     // диапазонный предок
+        Assert.Contains("m.R < s.[R]", sql);
+    }
+
+    /// <summary>BuildFilterSql NestedSet: условие WHERE только в Matches, не дублируется.</summary>
+    [Fact]
+    public void BuildFilterSql_NestedSet_WhereClauseOnce()
+    {
+        var src = CreateNestedSetSource(withLevelColumn: true);
+        var sql = ClayTreeSqlBuilder.BuildFilterSql(src, "[Name] LIKE @p0", 100);
+
+        var idx = sql.IndexOf("[Name] LIKE @p0", StringComparison.Ordinal);
+        Assert.True(idx >= 0, "whereClause must appear in SQL");
+        var secondIdx = sql.IndexOf("[Name] LIKE @p0", idx + 1, StringComparison.Ordinal);
+        Assert.True(secondIdx < 0, "whereClause must appear exactly once (in Matches)");
+    }
+
+    /// <summary>BuildFilterSql ParentKey: содержит WITH, UNION ALL, соединение вверх.</summary>
+    [Fact]
+    public void BuildFilterSql_ParentKey_UsesRecursiveCte()
+    {
+        var src = CreateParentKeySource();
+        var sql = ClayTreeSqlBuilder.BuildFilterSql(src, "[Name] LIKE @p0", 100);
+
+        Assert.Contains("WITH", sql);
+        Assert.Contains("UNION ALL", sql);
+        Assert.Contains("TOP (@max + 1)", sql);
+        Assert.Contains("INNER JOIN Chain", sql);
+        Assert.Contains("[_ismatch]", sql);
+        Assert.Contains("[_hasmatchchildren]", sql);
+        // ParentKey: не-совпадение в цепочке = предок совпавшего
+        Assert.Contains("CASE WHEN a.IsMatch = 0 THEN 1 ELSE 0 END", sql);
+    }
+
+    /// <summary>BuildFilterSql ParentKey: все идентификаторы в квадратных скобках.</summary>
+    [Fact]
+    public void BuildFilterSql_ParentKey_BracketedIdentifiers()
+    {
+        var src = CreateParentKeySource();
+        var sql = ClayTreeSqlBuilder.BuildFilterSql(src, "[Name] LIKE @p0", 100);
+
+        Assert.Contains("[Id]", sql);
+        Assert.Contains("[Name]", sql);
+        Assert.Contains("[Parent]", sql);
+        Assert.Contains("[_id]", sql);
+        Assert.Contains("[_text]", sql);
+        Assert.Contains("[_parent]", sql);
+    }
+
+    private static ClayTreeSource CreateParentKeySource()
+    {
+        var schema = new ClayTreeSchema
+        {
+            IdColumn     = "Id",
+            TextColumn   = "Name",
+            ParentColumn = "Parent",
+        };
+        return new ClayTreeSource(
+            "SELECT Id, Name, Parent FROM Tree", ClayTreeHierarchyMode.ParentKey, schema);
+    }
 }
