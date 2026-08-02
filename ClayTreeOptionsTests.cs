@@ -41,15 +41,6 @@ public class ClayTreeOptionsTests
         Assert.Empty(opts.FilterDefaults);
     }
 
-    /// <summary>Дефолт FilterQueryParamMap — не-null, пустой.</summary>
-    [Fact]
-    public void Defaults_FilterQueryParamMap_NotNullAndEmpty()
-    {
-        var opts = new ClayTreeOptions();
-        Assert.NotNull(opts.FilterQueryParamMap);
-        Assert.Empty(opts.FilterQueryParamMap);
-    }
-
     /// <summary>Дефолт FilterColumns — null (фильтр недоступен, пока страница не задаст колонки).</summary>
     [Fact]
     public void Defaults_FilterColumns_IsNull()

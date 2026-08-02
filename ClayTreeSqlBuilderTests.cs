@@ -245,6 +245,21 @@ public class ClayTreeSqlBuilderTests
         Assert.Contains("[_parent]", sql);
     }
 
+    /// <summary>BuildLevelSql с ExtraWhere добавляет AND (extra) в WHERE.</summary>
+    [Fact]
+    public void BuildLevelSql_WithExtraWhere_AppendsAndClause()
+    {
+        var src = CreateNestedSetSource(withLevelColumn: true) with
+        {
+            ExtraWhere = "[Active] = 1"
+        };
+
+        var sql = ClayTreeSqlBuilder.BuildLevelSql(src, isRoot: true);
+
+        Assert.Contains("AND ([Active] = 1)", sql);
+        Assert.Contains("ORDER BY", sql);
+    }
+
     private static ClayTreeSource CreateParentKeySource()
     {
         var schema = new ClayTreeSchema

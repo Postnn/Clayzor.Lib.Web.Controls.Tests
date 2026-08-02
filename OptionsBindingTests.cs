@@ -184,8 +184,7 @@ public class OptionsBindingTests
         var dict = new Dictionary<string, string?>
         {
             ["ClayTree:Dynamic:FilterParamPrefix"] = "Flt_",
-            ["ClayTree:Dynamic:StateParamPrefix"] = "St_",
-            ["ClayTree:Dynamic:FilterQueryPrefix"] = "q_"
+            ["ClayTree:Dynamic:StateParamPrefix"] = "St_"
         };
 
         var config = new ConfigurationBuilder().AddInMemoryCollection(dict).Build();
@@ -194,7 +193,6 @@ public class OptionsBindingTests
 
         Assert.Equal("Flt_", opts.FilterParamPrefix);
         Assert.Equal("St_", opts.StateParamPrefix);
-        Assert.Equal("q_", opts.FilterQueryPrefix);
     }
 
     /// <summary>
@@ -206,8 +204,7 @@ public class OptionsBindingTests
         var opts = new ClayTreeDynamicSettings
         {
             FilterParamPrefix = "",
-            StateParamPrefix = "St_",
-            FilterQueryPrefix = "q_"
+            StateParamPrefix = "St_"
         };
 
         var ex = Assert.Throws<InvalidOperationException>(() => opts.Validate());
@@ -224,8 +221,7 @@ public class OptionsBindingTests
         var opts = new ClayTreeDynamicSettings
         {
             FilterParamPrefix = "Flt_",
-            StateParamPrefix = "St_",
-            FilterQueryPrefix = "q_"
+            StateParamPrefix = "St_"
         };
 
         var ex = Record.Exception(() => opts.Validate());
