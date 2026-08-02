@@ -32,7 +32,7 @@ public class ClayShareUrlBuilderTests
         var result = ClayShareUrlBuilder.BuildShareUrl(url, "id", 99);
 
         // Ровно одно вхождение sharedId
-        Assert.Single(result.Split('&').Where(p => p.StartsWith("sharedId=")));
+        Assert.Single(result.Split('&'), p => p.StartsWith("sharedId="));
         Assert.Contains("sharedId=99", result);
         Assert.DoesNotContain("sharedId=5", result);
     }
