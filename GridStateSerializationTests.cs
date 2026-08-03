@@ -48,6 +48,30 @@ public class GridStateSerializationTests
         Assert.True(deserialized[1].Desc);
     }
 
+    /// <summary>DeserializeSort с белым списком: неизвестные колонки отсеиваются.</summary>
+    [Fact]
+    public void DeserializeSort_WithAllowedColumns_FiltersUnknown()
+    {
+        var allowed = new HashSet<string> { "Name" };
+
+        var result = GridStateSerializer.DeserializeSort("Evil:asc,Name:desc", allowed);
+
+        Assert.Single(result);
+        Assert.Equal("Name", result[0].Column);
+        Assert.True(result[0].Desc);
+    }
+
+    /// <summary>DeserializeSort без белого списка: поведение не меняется (регрессия).</summary>
+    [Fact]
+    public void DeserializeSort_AllowedColumnsNull_NoFiltering()
+    {
+        var result = GridStateSerializer.DeserializeSort("Evil:asc,Name:desc", null);
+
+        Assert.Equal(2, result.Count);
+        Assert.Equal("Evil", result[0].Column);
+        Assert.Equal("Name", result[1].Column);
+    }
+
     /// <summary>Round-trip группировки.</summary>
     [Fact]
     public void Groups_RoundTrip_PreservesList()
