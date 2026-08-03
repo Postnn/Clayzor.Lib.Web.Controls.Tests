@@ -190,4 +190,101 @@ public class GridStateSerializationTests
         var fltDeserialized = GridStateSerializer.DeserializeFilter(fltJson);
         Assert.NotNull(fltDeserialized);
     }
+
+    // ── GA3: экранирование разделителей в именах колонок с , : % ──
+
+    /// <summary>Round-trip колонок с запятой в SqlName.</summary>
+    [Fact]
+    public void Columns_RoundTrip_WithCommaInName()
+    {
+        var meta = new ClayColumnMeta { ColumnId = 1, SqlName = "Дата, время", DisplayName = "D" };
+        var columnOrder = new List<int> { 1 };
+        var columnById  = new Dictionary<int, ClayColumnMeta> { [1] = meta };
+        var hidden       = new HashSet<string>();
+
+        var serialized   = GridStateSerializer.SerializeColumns(columnOrder, columnById, hidden);
+        var deserialized = GridStateSerializer.DeserializeColumns(serialized);
+
+        Assert.Single(deserialized);
+        Assert.Equal("Дата, время", deserialized[0].SqlName);
+        Assert.Equal(1, deserialized[0].Visible);
+    }
+
+    /// <summary>Round-trip колонок с двоеточием в SqlName.</summary>
+    [Fact]
+    public void Columns_RoundTrip_WithColonInName()
+    {
+        var meta = new ClayColumnMeta { ColumnId = 1, SqlName = "CONVERT(varchar, Колонка):код", DisplayName = "C" };
+        var columnOrder = new List<int> { 1 };
+        var columnById  = new Dictionary<int, ClayColumnMeta> { [1] = meta };
+        var hidden       = new HashSet<string> { "CONVERT(varchar, Колонка):код" };
+
+        var serialized   = GridStateSerializer.SerializeColumns(columnOrder, columnById, hidden);
+        var deserialized = GridStateSerializer.DeserializeColumns(serialized);
+
+        Assert.Single(deserialized);
+        Assert.Equal("CONVERT(varchar, Колонка):код", deserialized[0].SqlName);
+        Assert.Equal(0, deserialized[0].Visible);
+    }
+
+    /// <summary>Round-trip колонок с процентом в SqlName.</summary>
+    [Fact]
+    public void Columns_RoundTrip_WithPercentInName()
+    {
+        var meta = new ClayColumnMeta { ColumnId = 1, SqlName = "100% готово", DisplayName = "P" };
+        var columnOrder = new List<int> { 1 };
+        var columnById  = new Dictionary<int, ClayColumnMeta> { [1] = meta };
+        var hidden       = new HashSet<string>();
+
+        var serialized   = GridStateSerializer.SerializeColumns(columnOrder, columnById, hidden);
+        var deserialized = GridStateSerializer.DeserializeColumns(serialized);
+
+        Assert.Single(deserialized);
+        Assert.Equal("100% готово", deserialized[0].SqlName);
+    }
+
+    /// <summary>Round-trip сортировки с запятой и двоеточием в Column.</summary>
+    [Fact]
+    public void Sort_RoundTrip_WithSpecialChars()
+    {
+        var sort = new List<SortColumn>
+        {
+            new("Дата, время", false),
+            new("Expr:кол", true)
+        };
+
+        var serialized   = GridStateSerializer.SerializeSort(sort);
+        var deserialized = GridStateSerializer.DeserializeSort(serialized);
+
+        Assert.Equal(2, deserialized.Count);
+        Assert.Equal("Дата, время", deserialized[0].Column);
+        Assert.False(deserialized[0].Desc);
+        Assert.Equal("Expr:кол", deserialized[1].Column);
+        Assert.True(deserialized[1].Desc);
+    }
+
+    /// <summary>Round-trip группировки с запятой в SqlName.</summary>
+    [Fact]
+    public void Groups_RoundTrip_WithCommaInName()
+    {
+        var groups = new List<string> { "Дата, время", "Колонка" };
+
+        var serialized   = GridStateSerializer.SerializeGroups(groups);
+        var deserialized = GridStateSerializer.DeserializeGroups(serialized);
+
+        Assert.Equal(2, deserialized.Count);
+        Assert.Equal("Дата, время", deserialized[0]);
+        Assert.Equal("Колонка", deserialized[1]);
+    }
+
+    /// <summary>Обратная совместимость: старые значения без спецсимволов читаются как прежде.</summary>
+    [Fact]
+    public void DeserializeColumns_BackwardCompatible_PlainNames()
+    {
+        var result = GridStateSerializer.DeserializeColumns("a:1,b:0");
+
+        Assert.Equal(2, result.Count);
+        Assert.Equal(("a", 1), result[0]);
+        Assert.Equal(("b", 0), result[1]);
+    }
 }
