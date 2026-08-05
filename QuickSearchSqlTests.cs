@@ -35,15 +35,37 @@ public class QuickSearchSqlTests
         Assert.Equal(@"CAST(КодИсследования AS nvarchar(50)) LIKE @q ESCAPE '\'", expr);
     }
 
-    /// <summary>Дата → CONVERT с форматом 104 (dd.mm.yyyy).</summary>
-    [Theory]
-    [InlineData(3)]   // Date
-    [InlineData(10)]  // DateTimeLocal
-    [InlineData(13)]  // TimeLocal
-    public void BuildSearchLikeExpr_DateColumn_Convert104(int type)
+    /// <summary>Дата без времени → CONVERT с форматом 104 (dd.mm.yyyy).</summary>
+    [Fact]
+    public void BuildSearchLikeExpr_DateColumn_Convert104()
     {
-        var expr = ClayGrid<object>.BuildSearchLikeExpr("ДатаСоздания", type, "dd.MM.yyyy");
+        var expr = ClayGrid<object>.BuildSearchLikeExpr("ДатаСоздания", 3, "dd.MM.yyyy");
         Assert.Equal(@"CONVERT(nvarchar(30), ДатаСоздания, 104) LIKE @q ESCAPE '\'", expr);
+    }
+
+    /// <summary>Дата+время → CONVERT с форматом 121 (yyyy-mm-dd hh:mi:ss).</summary>
+    [Fact]
+    public void BuildSearchLikeExpr_DateTimeLocal_Convert121()
+    {
+        var expr = ClayGrid<object>.BuildSearchLikeExpr("ДатаВремя", 10, "dd.MM.yyyy HH:mm");
+        Assert.Equal(@"CONVERT(nvarchar(30), ДатаВремя, 121) LIKE @q ESCAPE '\'", expr);
+    }
+
+    /// <summary>Время → CONVERT с форматом 121.</summary>
+    [Fact]
+    public void BuildSearchLikeExpr_TimeLocal_Convert121()
+    {
+        var expr = ClayGrid<object>.BuildSearchLikeExpr("Время", 13, "HH:mm");
+        Assert.Equal(@"CONVERT(nvarchar(30), Время, 121) LIKE @q ESCAPE '\'", expr);
+    }
+
+    /// <summary>Дробное (decimal) покрывается Number → CAST в nvarchar.</summary>
+    [Fact]
+    public void BuildSearchLikeExpr_DecimalViaNumber_Cast()
+    {
+        // Number = 1 покрывает int/long/decimal
+        var expr = ClayGrid<object>.BuildSearchLikeExpr("Цена", 1, null);
+        Assert.Equal(@"CAST(Цена AS nvarchar(50)) LIKE @q ESCAPE '\'", expr);
     }
 
     /// <summary>Ссылка (тип 4) — текстовое выражение без CAST.</summary>
