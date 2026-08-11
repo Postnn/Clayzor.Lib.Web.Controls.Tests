@@ -1,13 +1,15 @@
 using System.Data;
 using System.Data.Common;
+using System.Reflection;
 using Clayzor.Lib.DALC;
 using Microsoft.Data.SqlClient;
 
 namespace Clayzor.Lib.Web.Controls.Tests;
 
 /// <summary>
-/// Behavioral tests через CTFR3.3 connection factory seam (Func&lt;DbConnection&gt;).
+/// Behavioral tests через CTFR3.3/3.4 connection factory seam.
 /// Fake DbConnection/DbCommand контролирует execution без реального SQL Server.
+/// Gate-release tests используют ОДИН DbManager instance.
 /// </summary>
 public class DbManagerSeamTests
 {
@@ -18,29 +20,26 @@ public class DbManagerSeamTests
             string commandText, IReadOnlyList<(string Name, object? Value)> parameters) => CallCount++;
     }
 
-    /// <summary>Fake DbConnection — открывается успешно, возвращает controlled FakeCommand.</summary>
     private sealed class FakeConnection : DbConnection
     {
-        private readonly FakeCommand _command;
+        private readonly Queue<FakeCommand> _commands;
         private ConnectionState _state;
 
-        public FakeConnection(FakeCommand command) { _command = command; }
+        public FakeConnection(Queue<FakeCommand> commands) { _commands = commands; }
         public override string ConnectionString { get; set; } = "";
         public override string Database => "";
         public override string DataSource => "";
         public override string ServerVersion => "1.0";
         public override ConnectionState State => _state;
-
         public override void Open() => _state = ConnectionState.Open;
         public override Task OpenAsync(CancellationToken ct) { Open(); return Task.CompletedTask; }
         public override void Close() => _state = ConnectionState.Closed;
-        protected override DbCommand CreateDbCommand() => _command;
+        protected override DbCommand CreateDbCommand() => _commands.Dequeue();
         protected override DbTransaction BeginDbTransaction(IsolationLevel il) => throw new NotSupportedException();
         public override void ChangeDatabase(string name) => throw new NotSupportedException();
         protected override void Dispose(bool disposing) { _state = ConnectionState.Closed; }
     }
 
-    /// <summary>Fake DbCommand с контролируемым результатом ExecuteNonQueryAsync.</summary>
     private sealed class FakeCommand : DbCommand
     {
         private readonly int _affectedRows;
@@ -61,23 +60,14 @@ public class DbManagerSeamTests
         public override int ExecuteNonQuery() => _exception is not null ? throw _exception : _affectedRows;
         public override object? ExecuteScalar() => _exception is not null ? throw _exception : _affectedRows;
         public override void Prepare() { }
-
         protected override DbParameter CreateDbParameter() => new FakeParameter();
         protected override DbDataReader ExecuteDbDataReader(CommandBehavior behavior) => throw new NotSupportedException();
 
         public override async Task<int> ExecuteNonQueryAsync(CancellationToken ct)
-        {
-            await Task.Yield();
-            if (_exception is not null) throw _exception;
-            return _affectedRows;
-        }
+        { await Task.Yield(); if (_exception is not null) throw _exception; return _affectedRows; }
 
         public override async Task<object?> ExecuteScalarAsync(CancellationToken ct)
-        {
-            await Task.Yield();
-            if (_exception is not null) throw _exception;
-            return _affectedRows;
-        }
+        { await Task.Yield(); if (_exception is not null) throw _exception; return _affectedRows; }
 
         protected override Task<DbDataReader> ExecuteDbDataReaderAsync(CommandBehavior behavior, CancellationToken ct)
             => throw new NotSupportedException();
@@ -96,16 +86,16 @@ public class DbManagerSeamTests
         public override void CopyTo(Array array, int index) => _list.CopyTo((DbParameter[])array, index);
         public override IEnumerator<DbParameter> GetEnumerator() => _list.GetEnumerator();
         public override int IndexOf(object value) => _list.IndexOf((DbParameter)value);
-        public override int IndexOf(string parameterName) => _list.FindIndex(p => p.ParameterName == parameterName);
+        public override int IndexOf(string n) => _list.FindIndex(p => p.ParameterName == n);
         public override void Insert(int index, object value) => _list.Insert(index, (DbParameter)value);
         public override void Remove(object value) => _list.Remove((DbParameter)value);
         public override void RemoveAt(int index) => _list.RemoveAt(index);
-        public override void RemoveAt(string parameterName) => _list.RemoveAll(p => p.ParameterName == parameterName);
+        public override void RemoveAt(string n) => _list.RemoveAll(p => p.ParameterName == n);
         protected override DbParameter GetParameter(int index) => _list[index];
-        protected override DbParameter GetParameter(string parameterName) => _list.First(p => p.ParameterName == parameterName);
+        protected override DbParameter GetParameter(string n) => _list.First(p => p.ParameterName == n);
         protected override void SetParameter(int index, DbParameter value) => _list[index] = value;
-        protected override void SetParameter(string parameterName, DbParameter value)
-        { var idx = IndexOf(parameterName); if (idx >= 0) _list[idx] = value; else Add(value); }
+        protected override void SetParameter(string n, DbParameter value)
+        { var idx = IndexOf(n); if (idx >= 0) _list[idx] = value; else Add(value); }
     }
 
     private sealed class FakeParameter : DbParameter
@@ -122,11 +112,9 @@ public class DbManagerSeamTests
         public override void ResetDbType() { }
     }
 
-    private static DbManager CreateDb(CountingHandler handler, FakeCommand command)
-    {
-        var factory = () => (DbConnection)new FakeConnection(command);
-        return new DbManager("Server=test", handler, factory);
-    }
+    private static DbManager CreateDb(
+        CountingHandler handler, Func<DbConnection> factory)
+        => new("Server=test", handler, factory);
 
     // ═══ Zero affected rows ═══
 
@@ -134,7 +122,8 @@ public class DbManagerSeamTests
     public async Task ExecuteAsync_ZeroAffectedRows_ReturnsZeroWithoutError()
     {
         var handler = new CountingHandler();
-        var db = CreateDb(handler, new FakeCommand(affectedRows: 0));
+        var db = CreateDb(handler,
+            () => new FakeConnection(new Queue<FakeCommand>([new(affectedRows: 0)])));
 
         var result = await db.ExecuteAsync("DELETE FROM t", new { id = 1 }, CommandType.Text);
 
@@ -142,7 +131,7 @@ public class DbManagerSeamTests
         Assert.Equal(0, handler.CallCount);
     }
 
-    // ═══ Ordinary non-connectivity SqlException ═══
+    // ═══ Ordinary non-connectivity SqlException + gate release (SAME instance) ═══
 
     [Fact]
     public async Task ExecuteAsync_NonConnectivitySqlException_ThrowsAndReleasesGate()
@@ -151,39 +140,61 @@ public class DbManagerSeamTests
         var ex = SqlExceptionFactory.Create(number: 547, message: "CHECK constraint violation");
         Assert.False(DbManager.IsConnectivityError(ex));
 
-        var db = CreateDb(handler, new FakeCommand(exception: ex));
+        // Queue: 1-й вызов → throw, 2-й → успех
+        var queue = new Queue<FakeCommand>([
+            new(exception: ex),
+            new(affectedRows: 5)
+        ]);
+        var db = CreateDb(handler, () => new FakeConnection(queue));
 
+        // 1-я операция — бросает
         var thrown = await Assert.ThrowsAsync<SqlException>(() =>
             db.ExecuteAsync("DELETE FROM t", new { id = 1 }, CommandType.Text));
-
         Assert.Equal(547, thrown.Number);
         Assert.Equal(1, handler.CallCount);
 
-        // Gate освобождён — следующая операция выполняется
-        var db2 = CreateDb(handler, new FakeCommand(affectedRows: 5));
-        var result = await db2.ExecuteAsync("DELETE FROM t");
+        // 2-я операция — тот же db, gate освобождён
+        var result = await db.ExecuteAsync("DELETE FROM t");
         Assert.Equal(5, result);
+        Assert.Equal(1, handler.CallCount); // handler не вызван повторно
     }
 
-    // ═══ Cancellation ═══
+    // ═══ Cancellation + gate release (SAME instance) ═══
 
     [Fact]
     public async Task RunAsync_Cancellation_PropagatesAndReleasesGate()
     {
         var handler = new CountingHandler();
-        var command = new FakeCommand(exception: new OperationCanceledException());
-        var db = CreateDb(handler, command);
+        // Queue: после cancellation ExecuteAsync должен выполниться
+        var queue = new Queue<FakeCommand>([new(affectedRows: 42)]);
+        var db = CreateDb(handler, () => new FakeConnection(queue));
 
-        // RunAsync напрямую — cancellation из action
-        // (Wrapper ExecuteAsync использует Dapper, который не пробрасывает OCE из нашего fake)
-        try { await db.RunAsync<int>(_ => throw new OperationCanceledException()); }
-        catch (OperationCanceledException) { }
+        // Cancellation через RunDbAsync (internal seam на том же gate)
+        await Assert.ThrowsAsync<OperationCanceledException>(() =>
+            db.RunDbAsync<int>(_ => throw new OperationCanceledException()));
 
         Assert.Equal(0, handler.CallCount);
 
-        // Gate освобождён
-        var db2 = CreateDb(handler, new FakeCommand(affectedRows: 42));
-        var result = await db2.ExecuteScalarAsync<int>("SELECT 42", null, CommandType.Text);
+        // Тот же db — gate освобождён, операция успешна
+        var result = await db.ExecuteAsync("DELETE FROM t");
         Assert.Equal(42, result);
+        Assert.Equal(0, handler.CallCount);
+    }
+
+    // ═══ API compatibility (CTFR3.4) ═══
+
+    [Fact]
+    public void Connection_PublicContract_IsSqlConnection()
+    {
+        var prop = typeof(DbManager).GetProperty(nameof(DbManager.Connection))!;
+        Assert.Equal(typeof(SqlConnection), prop.PropertyType);
+    }
+
+    [Fact]
+    public void RunAsync_PublicContract_AcceptsSqlConnectionLambda()
+    {
+        // Proof: компиляция этого метода подтверждает сигнатуру
+        static Task<int> UseLegacyApi(DbManager db)
+            => db.RunAsync<int>((SqlConnection c) => Task.FromResult(1));
     }
 }
