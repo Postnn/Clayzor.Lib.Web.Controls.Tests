@@ -258,6 +258,10 @@ public class ClayTreePagingRestoreTests : IDisposable
 
         var aCalls = ds.LoadCallCounts.GetValueOrDefault("A");
         Assert.True(aCalls <= 2, $"Expected ≤2 loads for A (boundary=4), got {aCalls}");
+
+        // CTFR2.5: X removed from _expanded
+        Assert.DoesNotContain("X", GetExpanded(view));
+        Assert.Contains("A", GetExpanded(view));
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -292,6 +296,7 @@ public class ClayTreePagingRestoreTests : IDisposable
         Assert.Equal(4, aNode.Children.Count);
         Assert.DoesNotContain(aNode.Children, c => c.Id == "X");
         Assert.True(ds.LoadCallCounts.GetValueOrDefault("A") <= 2);
+        Assert.DoesNotContain("X", GetExpanded(view));
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -406,11 +411,114 @@ public class ClayTreePagingRestoreTests : IDisposable
     }
 
     // ═══════════════════════════════════════════════════════════════
+    // Test 8 — unaffected sibling branches preserved (CTFR2.5)
+    // ═══════════════════════════════════════════════════════════════
+
+    [Fact]
+    public async Task ReloadNonRoot_CleansOnlyReloadedSubtreeExpandedIds()
+    {
+        var ds = new FakePagingDataSource(2);
+        ds.AddChild(null, "A", hasChildren: true);
+        ds.AddChild("A", "X", hasChildren: false);
+        ds.AddChild(null, "B", hasChildren: true);
+        ds.AddChild("B", "Y", hasChildren: false);
+
+        var (view, cut) = CreateView(ds, levelPageSize: 0);
+        await cut.InvokeAsync(view.LoadRootsAsync);
+
+        var roots = ((IReadOnlyList<ClayTreeNode>)view.RootNodes);
+        var aNode = roots.First(r => r.Id == "A");
+        var bNode = roots.First(r => r.Id == "B");
+        aNode.IsExpanded = true;
+        bNode.IsExpanded = true;
+        SetExpanded(view, "A");
+        SetExpanded(view, "B");
+
+        await cut.InvokeAsync(() => view.EnsureChildrenLoadedAsync(aNode));
+        await cut.InvokeAsync(() => view.EnsureChildrenLoadedAsync(bNode));
+
+        var xNode = aNode.Children.First(c => c.Id == "X");
+        xNode.IsExpanded = true;
+        SetExpanded(view, "X");
+        var yNode = bNode.Children.First(c => c.Id == "Y");
+        yNode.IsExpanded = true;
+        SetExpanded(view, "Y");
+
+        // Delete X
+        ds.RemoveChild("A", "X");
+        ds.LoadCallCounts.Clear();
+
+        // Reload only A's level
+        await cut.InvokeAsync(() => view.ReloadLevelAsync(aNode));
+
+        // A subtree: A present, X absent
+        Assert.Contains("A", GetExpanded(view));
+        Assert.DoesNotContain("X", GetExpanded(view));
+        Assert.True(aNode.IsExpanded);
+
+        // B subtree: unaffected — both B and Y still expanded
+        Assert.Contains("B", GetExpanded(view));
+        Assert.Contains("Y", GetExpanded(view));
+        Assert.True(bNode.IsExpanded);
+        Assert.True(yNode.IsExpanded);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Test 9 — surviving descendants restored into _expanded (CTFR2.5)
+    // ═══════════════════════════════════════════════════════════════
+
+    [Fact]
+    public async Task ReloadNonRoot_SurvivingExpandedDescendants_AreRestored()
+    {
+        var ds = new FakePagingDataSource(2);
+        ds.AddChild(null, "A", hasChildren: true);
+        ds.AddChild("A", "X", hasChildren: true);
+        ds.AddChild("X", "X1", hasChildren: false);
+        ds.AddChild("A", "Z", hasChildren: true);
+        ds.AddChild("Z", "Z1", hasChildren: false);
+
+        var (view, cut) = CreateView(ds, levelPageSize: 2);
+        await cut.InvokeAsync(view.LoadRootsAsync);
+
+        var aNode = ((IReadOnlyList<ClayTreeNode>)view.RootNodes)[0];
+        aNode.IsExpanded = true;
+        SetExpanded(view, "A");
+        await cut.InvokeAsync(() => view.EnsureChildrenLoadedAsync(aNode));
+        Assert.Equal(2, aNode.Children.Count); // page1: X, Z
+
+        var xNode = aNode.Children.First(c => c.Id == "X");
+        xNode.IsExpanded = true;
+        xNode.HasChildren = true;
+        SetExpanded(view, "X");
+        await cut.InvokeAsync(() => view.EnsureChildrenLoadedAsync(xNode));
+        var zNode = aNode.Children.First(c => c.Id == "Z");
+        zNode.IsExpanded = true;
+        zNode.HasChildren = true;
+        SetExpanded(view, "Z");
+        await cut.InvokeAsync(() => view.EnsureChildrenLoadedAsync(zNode));
+
+        ds.LoadCallCounts.Clear();
+        await cut.InvokeAsync(() => view.ReloadLevelAsync(aNode));
+
+        // Both X and Z survived — restored via RestoreExpandedAsync
+        Assert.Contains("A", GetExpanded(view));
+        Assert.Contains("X", GetExpanded(view));
+        Assert.Contains("Z", GetExpanded(view));
+        Assert.True(aNode.IsExpanded);
+        Assert.Contains(aNode.Children, c => c.Id == "X" && c.IsExpanded);
+        Assert.Contains(aNode.Children, c => c.Id == "Z" && c.IsExpanded);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
 
     private static void SetExpanded(ClayTreeView view, string id)
     {
-        if (typeof(ClayTreeView).GetField("_expanded", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .GetValue(view) is HashSet<string> set)
-            set.Add(id);
+        GetExpanded(view).Add(id);
+    }
+
+    private static HashSet<string> GetExpanded(ClayTreeView view)
+    {
+        return (HashSet<string>)typeof(ClayTreeView).GetField("_expanded",
+            BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(view)!;
     }
 }
