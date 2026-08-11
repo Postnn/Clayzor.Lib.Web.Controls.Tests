@@ -181,6 +181,46 @@ public class DbManagerSeamTests
         Assert.Equal(0, handler.CallCount);
     }
 
+    // ═══ Reentrant handler — доказывает handler outside gate (CTFR3.5) ═══
+
+    private sealed class ReentrantHandler : ISqlErrorHandler
+    {
+        public DbManager Db { get; set; } = null!;
+        public bool ReentrantSucceeded { get; private set; }
+
+        public void HandleSqlError(SqlException exception, string connectionString,
+            string commandText, IReadOnlyList<(string Name, object? Value)> parameters)
+        {
+            // Handler должен мочь войти в тот же _gate → доказывает release до handler
+            var task = Db.RunDbAsync<int>(_ => Task.FromResult(123));
+            ReentrantSucceeded = task.Wait(TimeSpan.FromSeconds(2)) && task.Result == 123;
+        }
+    }
+
+    [Fact]
+    public async Task ConnectivityHandler_ExecutesOutsideGate_ReentrantSucceeds()
+    {
+        var ex = SqlExceptionFactory.Create(number: 53, message: "connection error");
+        Assert.True(DbManager.IsConnectivityError(ex));
+
+        // Queue: 1 → connectivity throw, 2 → success (для reentrant probe)
+        var queue = new Queue<FakeCommand>([
+            new(exception: ex),
+            new(affectedRows: 123)
+        ]);
+
+        var handler = new ReentrantHandler();
+        var db = new DbManager("Server=test", handler,
+            () => new FakeConnection(queue));
+        handler.Db = db;
+
+        await Assert.ThrowsAsync<SqlException>(() =>
+            db.ExecuteAsync("DELETE FROM t", new { id = 1 }, CommandType.Text));
+
+        Assert.True(handler.ReentrantSucceeded,
+            "Handler must be able to enter the same gate — proves handler executes AFTER gate release");
+    }
+
     // ═══ API compatibility (CTFR3.4) ═══
 
     [Fact]
