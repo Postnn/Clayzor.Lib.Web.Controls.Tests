@@ -137,32 +137,35 @@ public class DbManagerConnectivityBehavioralTests
     // ═══ DynamicSql read tests ═══
 
     [Fact]
-    public async Task DynamicSql_QueryRowsAsync_Connectivity_ReturnsEmpty()
+    public async Task DynamicSql_QueryRowsAsync_Connectivity_ReturnsEmpty_HandlerOnce()
     {
         var handler = new CountingHandler();
         var db = CreateDb(handler);
 
         var result = await Clayzor.Lib.Entities.DynamicGrid.DynamicSql.QueryRowsAsync(db, "SELECT 1");
         Assert.Empty(result);
+        Assert.Equal(1, handler.CallCount);
     }
 
     [Fact]
-    public async Task DynamicSql_QueryCountAsync_Connectivity_ReturnsZero()
+    public async Task DynamicSql_QueryCountAsync_Connectivity_ReturnsZero_HandlerOnce()
     {
         var handler = new CountingHandler();
         var db = CreateDb(handler);
 
         var result = await Clayzor.Lib.Entities.DynamicGrid.DynamicSql.QueryCountAsync(db, "SELECT 1", null);
         Assert.Equal(0, result);
+        Assert.Equal(1, handler.CallCount);
     }
 
     [Fact]
-    public async Task DynamicSql_ExecuteAsync_Connectivity_Throws()
+    public async Task DynamicSql_ExecuteAsync_Connectivity_Throws_HandlerOnce()
     {
         var handler = new CountingHandler();
         var db = CreateDb(handler);
 
         await Assert.ThrowsAsync<SqlException>(() =>
             Clayzor.Lib.Entities.DynamicGrid.DynamicSql.ExecuteAsync(db, "DELETE FROM t"));
+        Assert.Equal(1, handler.CallCount);
     }
 }

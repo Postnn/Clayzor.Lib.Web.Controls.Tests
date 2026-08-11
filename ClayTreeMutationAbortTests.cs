@@ -12,9 +12,6 @@ using MudBlazor.Services;
 
 namespace Clayzor.Lib.Web.Controls.Tests;
 
-/// <summary>
-/// SqlException factory через reflection.
-/// </summary>
 internal static class SqlExceptionFactory
 {
     public static SqlException Create(int number = 547, string message = "test")
@@ -33,7 +30,8 @@ internal static class SqlExceptionFactory
 }
 
 /// <summary>
-/// Тесты прерывания success-path при mutation SqlException (CTFR3.1).
+/// Тесты прерывания success-path при mutation SqlException (CTFR3.1 / CTFR3.2).
+/// Fake IClayTreeMutations — через DI (TableName=null), не через _mutationsCached.
 /// </summary>
 public class ClayTreeMutationAbortTests : IDisposable
 {
@@ -69,6 +67,8 @@ public class ClayTreeMutationAbortTests : IDisposable
     {
         public bool AddChildCalled { get; private set; }
         public bool DeleteCalled { get; private set; }
+        public bool ReorderCalled { get; private set; }
+        public bool ReparentCalled { get; private set; }
 
         public Task AddChildAsync(object? parentId, string editColumn, string value, CancellationToken ct = default)
         { AddChildCalled = true; throw SqlExceptionFactory.Create(); }
@@ -80,10 +80,10 @@ public class ClayTreeMutationAbortTests : IDisposable
         { DeleteCalled = true; throw SqlExceptionFactory.Create(); }
 
         public Task ReorderAsync(object nodeId, object? parentId, long newLeftValue, CancellationToken ct = default)
-            => throw SqlExceptionFactory.Create();
+        { ReorderCalled = true; throw SqlExceptionFactory.Create(); }
 
         public Task ReparentAsync(object nodeId, object? newParentId, CancellationToken ct = default)
-            => throw SqlExceptionFactory.Create();
+        { ReparentCalled = true; throw SqlExceptionFactory.Create(); }
 
         public Task<string> GetNodePathAsync(object nodeId, string functionName,
             ClayTreePathDirection direction, CancellationToken ct = default)
@@ -94,7 +94,6 @@ public class ClayTreeMutationAbortTests : IDisposable
             => Task.FromResult(false);
     }
 
-    /// <summary>Fake data source с одним ребёнком.</summary>
     private sealed class FakeDs : IClayTreeDataSource
     {
         public int LoadCallCount { get; set; }
@@ -102,80 +101,70 @@ public class ClayTreeMutationAbortTests : IDisposable
         {
             LoadCallCount++;
             if (request.Parent is null)
-            {
                 return Task.FromResult(new ClayTreeLoadResult([
                     new ClayTreeNode { Id = "A", Text = "A", HasChildren = true }
                 ]));
-            }
             return Task.FromResult(new ClayTreeLoadResult([
                 new ClayTreeNode { Id = "B", Text = "B", HasChildren = false }
             ]));
         }
     }
 
-    private (ClayTreeView View, IRenderedComponent<ClayTreeView> Cut) CreateView()
+    private (ClayTreeView View, IRenderedComponent<ClayTreeView> Cut) CreateView(
+        ThrowingMutations mutations)
     {
         var options = new ClayTreeOptions
         {
-            TreeId = "test", SelectSql = "SELECT 1", TableName = "dbo.T",
+            TreeId = "test", SelectSql = "SELECT 1",
+            TableName = null, // DI path — CTFR3.2
             EnableAddChild = true, EnableDelete = true, EnableEdit = true,
+            EnableDragDrop = true,
             EditColumn = "Name",
-            ShowBusyOverlay = false, PersistExpandedState = false,
+            ShowBusyOverlay = false, PersistExpandedState = true,
             Schema = new ClayTreeSchema { IdColumn = "Id", TextColumn = "Text" },
         };
-        var cut = _ctx.Render<ClayTreeView>(p => p
-            .Add(c => c.Options, options));
+        _ctx.Services.AddSingleton<IClayTreeMutations>(mutations);
+        var cut = _ctx.Render<ClayTreeView>(p => p.Add(c => c.Options, options));
         return (cut.Instance, cut);
     }
 
-    // ═══ AddChild — SqlException прерывает success-path ═══
+    // ═══ AddChild ═══
 
     [Fact]
     public async Task AddChild_SqlException_DoesNotRunSuccessPath()
     {
-        var ds = new FakeDs();
         var mutations = new ThrowingMutations();
-        var (view, cut) = CreateView();
-
-        // Inject fake data source + mutations
+        var ds = new FakeDs();
+        var (view, cut) = CreateView(mutations);
         SetField(view, "_dataSource", ds);
-        typeof(ClayTreeView).GetField("_mutationsCached", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .SetValue(view, mutations);
 
         await cut.InvokeAsync(view.LoadRootsAsync);
         var aNode = ((IReadOnlyList<ClayTreeNode>)view.RootNodes)[0];
-        bool hadChildren = aNode.HasChildren;
-        aNode.HasChildren = false; // pre-condition: no children
+        aNode.HasChildren = false;
         aNode.IsExpanded = true;
 
         ds.LoadCallCount = 0;
 
-        // Invoke real AddChildAsync (будет использовать ThrowingMutations)
-        var addChildMethod = typeof(ClayTreeView).GetMethod("InvokeAddChildAsync",
+        var method = typeof(ClayTreeView).GetMethod("InvokeAddChildAsync",
             BindingFlags.Instance | BindingFlags.NonPublic)!;
 
-        try { await cut.InvokeAsync(() => (Task)addChildMethod.Invoke(view, [aNode])!); }
-        catch (TargetInvocationException) { /* SqlException from mutations */ }
+        try { await cut.InvokeAsync(() => (Task)method.Invoke(view, [aNode])!); }
+        catch (TargetInvocationException) { }
 
-        // Success-path НЕ выполнился:
-        Assert.False(aNode.HasChildren, "HasChildren must remain false after failed AddChild");
-        Assert.True(mutations.AddChildCalled, "AddChild must have been called");
-        // Reload не вызван (datasource count not increased beyond initial load)
-        Assert.Equal(1, ds.LoadCallCount); // only LoadRootsAsync
+        Assert.True(mutations.AddChildCalled);
+        Assert.False(aNode.HasChildren);
+        Assert.Equal(0, ds.LoadCallCount);
     }
 
-    // ═══ Delete — SqlException не меняет selection ═══
+    // ═══ Delete ═══
 
     [Fact]
     public async Task Delete_SqlException_DoesNotRunSuccessPath()
     {
-        var ds = new FakeDs();
         var mutations = new ThrowingMutations();
-        var (view, cut) = CreateView();
-
+        var ds = new FakeDs();
+        var (view, cut) = CreateView(mutations);
         SetField(view, "_dataSource", ds);
-        typeof(ClayTreeView).GetField("_mutationsCached", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .SetValue(view, mutations);
 
         await cut.InvokeAsync(view.LoadRootsAsync);
         var aNode = ((IReadOnlyList<ClayTreeNode>)view.RootNodes)[0];
@@ -185,47 +174,79 @@ public class ClayTreeMutationAbortTests : IDisposable
 
         ds.LoadCallCount = 0;
 
-        var deleteMethod = typeof(ClayTreeView).GetMethod("InvokeDeleteAsync",
+        var method = typeof(ClayTreeView).GetMethod("InvokeDeleteAsync",
             BindingFlags.Instance | BindingFlags.NonPublic)!;
 
-        try { await cut.InvokeAsync(() => (Task)deleteMethod.Invoke(view, [aNode])!); }
+        try { await cut.InvokeAsync(() => (Task)method.Invoke(view, [aNode])!); }
         catch (TargetInvocationException) { }
 
         Assert.True(mutations.DeleteCalled);
-        // Reload НЕ вызван
         Assert.Equal(0, ds.LoadCallCount);
     }
 
-    // ═══ SaveState — best-effort, SqlException не роняет UI ═══
+    // ═══ DnD (Reorder) — CTFR3.2 ═══
+
+    [Fact]
+    public async Task DragDrop_SqlException_DoesNotRunSuccessPath()
+    {
+        var mutations = new ThrowingMutations();
+        var ds = new FakeDs();
+        var (view, cut) = CreateView(mutations);
+        SetField(view, "_dataSource", ds);
+
+        await cut.InvokeAsync(view.LoadRootsAsync);
+        var aNode = ((IReadOnlyList<ClayTreeNode>)view.RootNodes)[0];
+        aNode.HasChildren = true;
+        aNode.IsExpanded = true;
+        await cut.InvokeAsync(() => view.EnsureChildrenLoadedAsync(aNode));
+
+        ds.LoadCallCount = 0;
+
+        // Вызвать DoReorderAsync через reflection
+        var reorderMethod = typeof(ClayTreeView).GetMethod("DoReorderAsync",
+            BindingFlags.Instance | BindingFlags.NonPublic)!;
+
+        try
+        {
+            await cut.InvokeAsync(() => (Task)reorderMethod.Invoke(view,
+                [aNode, aNode.Children[0], "after"])!);
+        }
+        catch (TargetInvocationException) { }
+
+        Assert.True(mutations.ReorderCalled);
+        Assert.Equal(0, ds.LoadCallCount);
+    }
+
+    // ═══ SaveState best-effort ═══
 
     [Fact]
     public async Task SaveState_SqlException_SwallowedAsBestEffort()
     {
+        var mutations = new ThrowingMutations();
         var ds = new FakeDs();
-        var stateStore = new FakeStateStore();
-        var (view, cut) = CreateView();
-
+        var store = new ThrowingStateStore();
+        var (view, cut) = CreateView(mutations);
         SetField(view, "_dataSource", ds);
         typeof(ClayTreeView).GetProperty("StateStore", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .SetValue(view, new ThrowingStateStore());
+            .SetValue(view, store);
 
         await cut.InvokeAsync(view.LoadRootsAsync);
-        // Ловим ошибку через try — в production сохраняется через try/catch
-        // Validate that SaveStateAsync doesn't throw
+
         var saveState = typeof(ClayTreeView).GetMethod("SaveStateAsync",
             BindingFlags.Instance | BindingFlags.NonPublic)!;
 
-        // В production уже обёрнуто try/catch — тест проверяет, что не падает
         await cut.InvokeAsync(() => (Task)saveState.Invoke(view, [])!);
         // Не упало = best-effort работает
+        Assert.True(store.SaveCalled);
     }
 
     private sealed class ThrowingStateStore : IClayTreeStateStore
     {
+        public bool SaveCalled { get; private set; }
         public Task<ClayTreeState?> LoadAsync(string treeId, CancellationToken ct = default)
             => Task.FromResult<ClayTreeState?>(null);
         public Task SaveAsync(string treeId, ClayTreeState state, CancellationToken ct = default)
-            => throw SqlExceptionFactory.Create();
+        { SaveCalled = true; throw SqlExceptionFactory.Create(); }
     }
 
     private static void SetField(object target, string name, object value)
