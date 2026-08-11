@@ -4,7 +4,7 @@ using Clayzor.Lib.Web.Controls.Components.Tree.Models;
 namespace Clayzor.Lib.Web.Controls.Tests;
 
 /// <summary>
-/// Тесты сохранения/восстановления раскрытости при reload дерева (CTFR2 / CTFR2.1).
+/// Тесты сохранения/восстановления раскрытости при reload дерева (CTFR2 / CTFR2.1 / CTFR2.2).
 /// </summary>
 public class ClayTreeReloadExpandedTests
 {
@@ -22,7 +22,7 @@ public class ClayTreeReloadExpandedTests
     }
 
     /// <summary>
-    /// CollectExpandedSnapshot собирает childId→parentId для раскрытых потомков.
+    /// CollectExpandedSnapshot собирает childId→parentId (string?) для раскрытых потомков.
     /// Дерево: A → A1 (expanded) → A2 (expanded). B → B1 (expanded).
     /// Ожидается: A1→A, A2→A1, B1→B.
     /// </summary>
@@ -36,7 +36,7 @@ public class ClayTreeReloadExpandedTests
         var b1 = Node("B1", expanded: true, hasChildren: false);
         var b = Node("B", children: [b1]);
 
-        var snapshot = new Dictionary<string, string>();
+        var snapshot = new Dictionary<string, string?>();
         ClayTreeView.CollectExpandedSnapshot(a, snapshot);
         ClayTreeView.CollectExpandedSnapshot(b, snapshot);
 
@@ -58,10 +58,9 @@ public class ClayTreeReloadExpandedTests
         ]);
         var root = Node("R", children: [collapsed]);
 
-        var snapshot = new Dictionary<string, string>();
+        var snapshot = new Dictionary<string, string?>();
         ClayTreeView.CollectExpandedSnapshot(root, snapshot);
 
-        // X не раскрыт → CollectExpandedSnapshot не заходит в X.Children.
         Assert.Empty(snapshot);
     }
 
@@ -72,7 +71,7 @@ public class ClayTreeReloadExpandedTests
     public void CollectExpandedSnapshot_EmptyChildren_NoException()
     {
         var leaf = Node("L", expanded: false, hasChildren: false);
-        var snapshot = new Dictionary<string, string>();
+        var snapshot = new Dictionary<string, string?>();
         ClayTreeView.CollectExpandedSnapshot(leaf, snapshot);
         Assert.Empty(snapshot);
     }
@@ -90,7 +89,7 @@ public class ClayTreeReloadExpandedTests
         var b = Node("B", expanded: true, children: [c]);
         var a = Node("A", children: [b]);
 
-        var snapshot = new Dictionary<string, string>();
+        var snapshot = new Dictionary<string, string?>();
         ClayTreeView.CollectExpandedSnapshot(a, snapshot);
 
         Assert.Equal(3, snapshot.Count);
@@ -100,7 +99,7 @@ public class ClayTreeReloadExpandedTests
     }
 
     /// <summary>
-    /// Раскрытый лист попадает в snapshot (IsExpanded=true), parentId корректен.
+    /// Раскрытый лист: parentId корректен.
     /// </summary>
     [Fact]
     public void CollectExpandedSnapshot_ExpandedLeaf_ParentRecorded()
@@ -108,7 +107,7 @@ public class ClayTreeReloadExpandedTests
         var leaf = Node("L", expanded: true, hasChildren: false);
         var root = Node("R", children: [leaf]);
 
-        var snapshot = new Dictionary<string, string>();
+        var snapshot = new Dictionary<string, string?>();
         ClayTreeView.CollectExpandedSnapshot(root, snapshot);
 
         Assert.Single(snapshot);
@@ -116,8 +115,7 @@ public class ClayTreeReloadExpandedTests
     }
 
     /// <summary>
-    /// Две независимые раскрытые root-ветки глубиной ≥2.
-    /// Симуляция корневого сбора: для раскрытых корней добавляем маркер "".
+    /// Две независимые раскрытые root-ветки. Root marker = null (CTFR2.2).
     /// </summary>
     [Fact]
     public void CollectExpandedSnapshot_TwoDeepRootBranches_AllCollected()
@@ -130,25 +128,25 @@ public class ClayTreeReloadExpandedTests
         var b1 = Node("B1", expanded: true, children: [b2]);
         var rootB = Node("B", expanded: true, children: [b1]);
 
-        var snapshot = new Dictionary<string, string>();
+        var snapshot = new Dictionary<string, string?>();
         foreach (var root in new[] { rootA, rootB })
         {
             if (root.IsExpanded)
             {
-                snapshot[root.Id] = ""; // маркер корня (как в ReloadLevelAsync)
+                snapshot[root.Id] = null; // CTFR2.2: root marker = null
                 ClayTreeView.CollectExpandedSnapshot(root, snapshot);
             }
         }
 
         Assert.Equal(4, snapshot.Count);
-        Assert.Equal("", snapshot["A"]);
+        Assert.Null(snapshot["A"]);
         Assert.Equal("A", snapshot["A1"]);
-        Assert.Equal("", snapshot["B"]);
+        Assert.Null(snapshot["B"]);
         Assert.Equal("B", snapshot["B1"]);
     }
 
     /// <summary>
-    /// Только один root раскрыт из двух — в snapshot только его ветка.
+    /// Только один root раскрыт — root marker = null.
     /// </summary>
     [Fact]
     public void CollectExpandedSnapshot_OneOfTwoRootsExpanded_OnlyExpandedCollected()
@@ -157,17 +155,17 @@ public class ClayTreeReloadExpandedTests
         var rootA = Node("A", expanded: true, children: [a1]);
         var rootB = Node("B", expanded: false, children: [Node("B1")]);
 
-        var snapshot = new Dictionary<string, string>();
+        var snapshot = new Dictionary<string, string?>();
         foreach (var root in new[] { rootA, rootB })
         {
             if (root.IsExpanded)
             {
-                snapshot[root.Id] = "";
+                snapshot[root.Id] = null;
                 ClayTreeView.CollectExpandedSnapshot(root, snapshot);
             }
         }
 
         Assert.Single(snapshot);
-        Assert.Equal("", snapshot["A"]);
+        Assert.Null(snapshot["A"]);
     }
 }
