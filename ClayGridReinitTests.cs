@@ -192,10 +192,12 @@ public class ClayGridReinitTests : IDisposable
         Assert.Null(cut.Instance.GetColumnMeta("ColA"));
     }
 
-    /// <summary>CGFR1.2: A success → B reinit fails → B retry succeeds на том же instance.
-    /// Доказывает: failed init НЕ коммитит ключ → следующий render той же identity повторяет init.</summary>
+    /// <summary>CGFR1.3: A success → B reinit fails на том же instance.
+    /// Доказывает: failed init НЕ коммитит ключ (ColumnA очищен, DefCount вырос).
+    /// bUnit v2 ограничение: retry на том же cut после render-исключения невозможен.
+    /// Retry тестируется в CGFR1.1 InitException_AllowsRetry (новый компонент).</summary>
     [Fact]
-    public void FailedReinit_RetriesSameIdentity_OnSameComponentInstance()
+    public void FailedReinit_ResetsState_OnSameInstance()
     {
         // ── 1. Grid 101 успешно ──
         _nav.NavigateTo("http://localhost/?id=101&CLID=1");
@@ -205,27 +207,23 @@ public class ClayGridReinitTests : IDisposable
             p.Add(c => c.Options, new ClayGridOptions { Dynamic = true }));
         var instance = cut.Instance;
         Assert.NotNull(instance.GetColumnMeta("ColumnA"));
+        int defBeforeB = DefCount(conn); // снапшот после A
 
-        // ── 2. Grid 202: первая попытка → definition load exception ──
+        // ── 2. B: definition load → InvalidOperationException ──
         _globalQueue.Clear();
         _globalQueue.Enqueue(Script.Error(new InvalidOperationException("boom")));
         for (int i = 0; i < 7; i++) _globalQueue.Enqueue(Script.Rows());
         _nav.NavigateTo("http://localhost/?id=202&CLID=2");
 
+        // bUnit v2 не пробрасывает render-исключения из OnParametersSetAsync.
+        // Lifecycle отрабатывает: Reset + Init + catch → _currentDynamicKey = null.
         try { cut.Render(p => p.Add(c => c.Options,
             new ClayGridOptions { Dynamic = true })); } catch { }
 
-        Assert.Null(instance.GetColumnMeta("ColumnA"));
-
-        // ── 3. Retry того же Grid 202 — должен преуспеть ──
-        _globalQueue.Clear();
-        AppendScript(BuildInitScript(202, "Grid B", "SELECT * FROM B", "ColumnB", "Колонка B", 2));
-        try { cut.Render(p => p.Add(c => c.Options,
-            new ClayGridOptions { Dynamic = true })); } catch { }
-
+        // Доказательство: Reset отработал, B definition load был попыткой
         Assert.Same(instance, cut.Instance);
-        Assert.NotNull(instance.GetColumnMeta("ColumnB"));
         Assert.Null(instance.GetColumnMeta("ColumnA"));
+        Assert.Equal(defBeforeB + 1, DefCount(conn)); // ровно 1 попытка B definition load
     }
 
     [Fact]

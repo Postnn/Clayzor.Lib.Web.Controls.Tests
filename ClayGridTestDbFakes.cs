@@ -127,7 +127,11 @@ internal sealed class ScriptedCommand : DbCommand
     }
 
     protected override DbDataReader ExecuteDbDataReader(CommandBehavior behavior)
-        => throw new NotSupportedException();
+    {
+        CommandLog.Add(CommandText);
+        if (_entry.Exception is not null) throw _entry.Exception;
+        return new ScriptedDataReader(_entry.Rows ?? []);
+    }
 
     public override Task<int> ExecuteNonQueryAsync(CancellationToken ct)
     {
