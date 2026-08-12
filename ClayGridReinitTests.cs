@@ -1,12 +1,12 @@
-using System.Collections.Specialized;
+using System.Data.Common;
 using System.Reflection;
-using System.Web;
 using Clayzor.Lib.DALC;
 using Clayzor.Lib.Entities.DynamicGrid;
 using Clayzor.Lib.Web.Controls.Components.Filter;
 using Clayzor.Lib.Web.Controls.Components.Grid;
 using Clayzor.Lib.Web.Controls.Components.Grid.Dynamic;
 using Clayzor.Lib.Web.Settings;
+using Bunit;
 using Microsoft.AspNetCore.Components;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -18,15 +18,14 @@ using MudBlazor.Services;
 namespace Clayzor.Lib.Web.Controls.Tests;
 
 /// <summary>
-/// CGFR1 lifecycle tests (CGFR1 §28–§34).
-/// Тестируют OnParametersSetAsync, ResetDynamicRuntimeState и Query cache
-/// через ручной инжект + рефлексию. Полный MudBlazor render pipeline (MudDataGrid,
-/// PopoverService) требует Blazor Dispatcher, недоступного в unit-тестах без
-/// сложной инфраструктуры; CGFR1 §34 разрешает internal seam + reflection.
+/// CGFR1.1 bUnit lifecycle tests (CGFR1.1 §8–§15).
+/// Реальный Blazor render через <c>_ctx.Render&lt;T&gt;()</c> + <c>cut.Render(p =&gt; ...)</c>.
+/// Фейковый DB через <c>ScriptedConnection</c> + internal seam <c>DbManager</c>.
+/// Все сервисы регистрируются ДО первого render.
 /// </summary>
 public class ClayGridReinitTests : IDisposable
 {
-    private readonly ServiceProvider _sp;
+    private readonly TestContext _ctx = new();
     private readonly FakeNavigationManager _nav;
     private readonly ClayErrorService _errorService = new();
     private readonly ClayGridDynamicSettings _settings = new()
@@ -40,254 +39,211 @@ public class ClayGridReinitTests : IDisposable
         GridIdQueryParam = "id",
         ClientIdQueryParam = "CLID",
     };
+    private static readonly ClayGridSchemaMap Schema = new();
+
+    // Один ScriptedConnection на тест — обе очереди (A + B) кладутся в него подряд.
+    // DbManager кеширует DbConnection → переиспользование одного экземпляра корректно.
+    private ScriptedConnection? _currentConn;
+    private Queue<ScriptEntry> _globalQueue = new();
 
     public ClayGridReinitTests()
     {
+        _ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+        _ctx.Services.AddMudServices();
+        _ctx.Services.AddMudExtensions();
+        _ctx.Services.AddSingleton<ISqlErrorHandler>(_errorService);
+        _ctx.Services.AddSingleton<ClayErrorService>(_errorService);
+        _ctx.Services.AddSingleton(new ClayAppSettings());
+        _ctx.Services.AddSingleton<IConfiguration>(new ConfigurationBuilder().Build());
+        _ctx.Services.AddSingleton(Options.Create(_settings));
+        _ctx.Services.AddSingleton<IJSRuntime>(new FakeJSRuntime());
         _nav = new FakeNavigationManager();
-        var services = new ServiceCollection();
-        services.AddMudServices();
-        services.AddMudExtensions();
-        services.AddSingleton<ISqlErrorHandler>(_errorService);
-        services.AddSingleton<ClayErrorService>(_errorService);
-        services.AddSingleton(new ClayAppSettings());
-        services.AddSingleton<IConfiguration>(new ConfigurationBuilder().Build());
-        services.AddSingleton(Options.Create(_settings));
-        services.AddSingleton<NavigationManager>(_nav);
-        services.AddSingleton<IJSRuntime>(new FakeJSRuntime());
-        _sp = services.BuildServiceProvider();
+        _ctx.Services.AddSingleton<NavigationManager>(_nav);
+        var conn = new ScriptedConnection(_globalQueue);
+        _currentConn = conn;
+        _ctx.Services.AddSingleton<DbManager>(_ =>
+            new DbManager("Server=test", _errorService, () => conn));
     }
 
-    public void Dispose() => _sp.Dispose();
+    public void Dispose()
+    {
+        try { _ctx.Dispose(); } catch { }
+    }
 
-    // ═══ Reflection ════════════════════════════════════════════════════════════
+    // ═══ DB scripting ═══════════════════════════════════════════════════════════
+
+    private static List<ScriptEntry> BuildInitScript(int gridId, string title, string selectSql,
+        string columnName, string columnHeader, int columnId, int totalCount = 0)
+    {
+        var s = Schema.Settings;
+        var c = Schema.Columns;
+        return new List<ScriptEntry>
+        {
+            Script.Rows(Script.Row((s.GridId, gridId), (s.Title, title), (s.Icon, DBNull.Value),
+                (s.Sql, selectSql), (s.Id, "ID"), (s.IdName, DBNull.Value),
+                (s.EditForm, DBNull.Value), (s.NewForm, DBNull.Value), (s.SqlDelete, DBNull.Value))),
+            Script.Rows(Script.Row(("Column1", 0))),
+            Script.Rows(Script.Row((c.ColumnId, columnId), (c.GridId, gridId), (c.Column, columnName),
+                (c.Header, columnHeader), (c.UrlKey, DBNull.Value), (c.Order, 1),
+                (c.Format, DBNull.Value), (c.Type, 2))),
+            Script.Rows(), // user params
+            Script.Rows(), // shared check
+            Script.Rows(Script.Row(("cnt", totalCount))),
+            Script.Rows(),
+            Script.NonQuery(),
+        };
+    }
+
+    /// <summary>Добавляет записи в глобальную очередь и возвращает shared-connection для CommandLog.</summary>
+    private ScriptedConnection AppendScript(IEnumerable<ScriptEntry> entries)
+    {
+        foreach (var e in entries)
+            _globalQueue.Enqueue(e);
+        return _currentConn!;
+    }
+
+    // ═══ Reflection ═════════════════════════════════════════════════════════════
 
     private static T? GetFld<T>(object instance, string name)
     {
         var flags = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
         for (var t = instance.GetType(); t is not null; t = t.BaseType)
-        {
-            var f = t.GetField(name, flags);
-            if (f is null) continue;
-            var v = f.GetValue(instance);
-            if (v is T tv) return tv;
-            // unbox value types
-            if (v is not null && typeof(T).IsValueType)
-            {
-                try { return (T)v; } catch { return default; }
-            }
-            return default;
-        }
+            if (t.GetField(name, flags)?.GetValue(instance) is T tv) return tv;
         return default;
     }
 
-    private static T? GetProp<T>(object instance, string name)
-    {
-        var flags = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
-        for (var t = instance.GetType(); t is not null; t = t.BaseType)
-        {
-            var p = t.GetProperty(name, flags);
-            if (p is null) continue;
-            var v = p.GetValue(instance);
-            if (v is T tv) return tv;
-            return default;
-        }
-        return default;
-    }
-
-    private static void SetFld(object instance, string name, object value)
-    {
-        var flags = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
-        for (var t = instance.GetType(); t is not null; t = t.BaseType)
-        {
-            var f = t.GetField(name, flags);
-            var p = t.GetProperty(name, flags);
-            if (f is not null) { f.SetValue(instance, value); return; }
-            if (p is not null) { p.SetValue(instance, value); return; }
-        }
-    }
-
-    private static async Task CallOnParamsSetAsync(object instance)
-    {
-        var flags = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
-        for (var t = instance.GetType(); t is not null; t = t.BaseType)
-        {
-            var m = t.GetMethod("OnParametersSetAsync", flags);
-            if (m is null) continue;
-            var r = m.Invoke(instance, null);
-            if (r is Task task) await task;
-            return;
-        }
-    }
-
-    private static void CallReset(object instance)
-    {
-        var flags = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
-        var t = instance.GetType();
-        var m = t.GetMethod("ResetDynamicRuntimeState", flags)
-                ?? t.BaseType?.GetMethod("ResetDynamicRuntimeState", flags);
-        m?.Invoke(instance, null);
-    }
-
-    private ClayGrid<ClayDynamicRow> CreateGrid(ClayGridOptions options)
-    {
-        var grid = ActivatorUtilities.CreateInstance<ClayGrid<ClayDynamicRow>>(_sp);
-        SetFld(grid, "DynamicOpts", _sp.GetRequiredService<IOptions<ClayGridDynamicSettings>>());
-        SetFld(grid, "Nav", _nav);
-        SetFld(grid, "Config", _sp.GetRequiredService<IConfiguration>());
-        SetFld(grid, "ClaySettings", _sp.GetRequiredService<ClayAppSettings>());
-        SetFld(grid, "ErrorService", _errorService);
-        SetFld(grid, "_opt", options);
-
-        // Db НЕ инжектим — InitDynamicMode будет падать на первом же DB-вызове,
-        // но OnParametersSetAsync всё равно строит ключ и проверяет до вызова InitDynamicMode.
-        // Для тестов, проверяющих reset/reinit без БД, Db не нужен.
-
-        return grid;
-    }
+    /// <summary>Definition load count из ScriptedConnection.CommandLog.</summary>
+    private static int DefCount(ScriptedConnection conn) =>
+        conn.CommandLog.Count(c => c.Contains("FROM [ClayGridSettings]"));
 
     // ═══ Тесты ═════════════════════════════════════════════════════════════════
 
     [Fact]
-    public async Task KeyChanged_TriggersReset()
+    public void AtoB_SameInstance_ColumnsReplaced()
     {
+        var connA = AppendScript(BuildInitScript(101, "Grid A", "SELECT * FROM A", "ColumnA", "Колонка A", 1));
         _nav.NavigateTo("http://localhost/?id=101&CLID=1");
-        var grid = CreateGrid(new ClayGridOptions { Dynamic = true, DynamicGridId = 101 });
-        SetFld(grid, "_dynamicDef", new ClayGridDefinition(101, "A", null, "SELECT 1", null, null, null, null, null, false));
-        SetFld(grid, "_columnBySqlName", new Dictionary<string, ClayColumnMeta> { ["ColA"] = new() { ColumnId = 1, SqlName = "ColA", DisplayName = "ColumnA" } });
 
-        var before = GetFld<object>(grid, "_dynamicDef");
-        Assert.NotNull(before);
+        var cut = _ctx.Render<ClayGrid<ClayDynamicRow>>(p =>
+            p.Add(c => c.Options, new ClayGridOptions { Dynamic = true }));
+        var instance = cut.Instance;
+        Assert.NotNull(instance.GetColumnMeta("ColumnA"));
+        Assert.Equal(1, DefCount(connA));
+        Assert.NotNull(instance.GetColumnMeta("ColumnA"));
 
-        // Меняем ключ
+        var connB = AppendScript(BuildInitScript(202, "Grid B", "SELECT * FROM B", "ColumnB", "Колонка B", 2));
         _nav.NavigateTo("http://localhost/?id=202&CLID=2");
+        cut.Render(p => p.Add(c => c.Options, new ClayGridOptions { Dynamic = true }));
 
-        // OnParametersSetAsync должен задетектить смену ключа и вызвать Reset
-        // Но без Db вызов InitDynamicMode упадёт на DB-вызове.
-        // Проверяем, что Reset отработал до попытки InitDynamicMode.
-        try { await CallOnParamsSetAsync(grid); }
-        catch (NullReferenceException) { } // ожидаемо: нет Db
-
-        // После reset _dynamicDef должен быть null
-        var after = GetFld<object>(grid, "_dynamicDef");
-        Assert.Null(after);
-        Assert.Empty(GetFld<Dictionary<string, ClayColumnMeta>>(grid, "_columnBySqlName") ?? []);
+        Assert.Same(instance, cut.Instance);
+        Assert.Null(instance.GetColumnMeta("ColumnA"));
+        Assert.NotNull(instance.GetColumnMeta("ColumnB"));
     }
 
     [Fact]
-    public async Task SameKey_NoReset()
+    public void SameKey_PresentationChange_NoReinit()
     {
+        var conn = AppendScript(BuildInitScript(101, "Original", "SELECT * FROM T", "ColA", "Колонка A", 1, totalCount: 5));
         _nav.NavigateTo("http://localhost/?id=101&CLID=1");
-        var grid = CreateGrid(new ClayGridOptions { Dynamic = true, DynamicGridId = 101 });
-        SetFld(grid, "_dynamicDef", new ClayGridDefinition(101, "A", null, "SELECT 1", null, null, null, null, null, false));
 
-        try { await CallOnParamsSetAsync(grid); } catch { } // первый вызов
+        var cut = _ctx.Render<ClayGrid<ClayDynamicRow>>(p =>
+            p.Add(c => c.Options, new ClayGridOptions { Dynamic = true, DynamicGridId = 101 }));
+        Assert.Equal(1, DefCount(conn));
 
-        var def = GetFld<object>(grid, "_dynamicDef");
-        Assert.Null(def); // сброшен, т.к. первый вызов был с null key → reset + init (падает)
-
-        // Устанавливаем _currentDynamicKey вручную — симулируем, что уже инициализировались
-        var key = ClayGridDynamicKey.Create(101, 1, null, _settings);
-        SetFld(grid, "_currentDynamicKey", key);
-        SetFld(grid, "_dynamicDef", new ClayGridDefinition(101, "A", null, "SELECT 1", null, null, null, null, null, false));
-
-        // Вызываем снова с тем же ключом
-        await CallOnParamsSetAsync(grid);
-
-        // _dynamicDef НЕ сброшен
-        Assert.NotNull(GetFld<object>(grid, "_dynamicDef"));
-        Assert.NotNull(GetFld<ClayGridDynamicKey?>(grid, "_currentDynamicKey"));
+        cut.Render(p => p.Add(c => c.Options,
+            new ClayGridOptions { Dynamic = true, DynamicGridId = 101, Title = "Changed" }));
+        Assert.Equal(1, DefCount(conn));
     }
 
     [Fact]
-    public void ResetDynamicRuntimeState_ClearsAllFields()
+    public void UrlChange_QueryCache_Refreshes()
     {
-        var grid = CreateGrid(new ClayGridOptions { Dynamic = true });
-        // Заполняем поля ненулевыми значениями
-        SetFld(grid, "_dynamicGridId", 101);
-        SetFld(grid, "_dynamicClid", 1);
-        SetFld(grid, "_dynamicDef", new ClayGridDefinition(101, "T", null, "S", null, null, null, null, null, false));
-        SetFld(grid, "_dynamicCols", new List<ClayColumnDefinition> { new(1, 101, "C", "H", null, 1, null, 2, false) });
-        SetFld(grid, "_dynamicKnownColumns", new HashSet<string> { "C" });
-        SetFld(grid, "_dynamicLookups", new Dictionary<string, IReadOnlyDictionary<string, string>> { ["k"] = new Dictionary<string, string>() });
-        SetFld(grid, "_dynamicError", "error");
-        SetFld(grid, "_dynamicEditUrl", "/edit");
-        SetFld(grid, "_dynamicSavedParams", new Dictionary<string, string> { ["p"] = "v" });
-        SetFld(grid, "_searchText", "search");
-        SetFld(grid, "_sortState", new List<SortColumn> { new("C", true) });
-        SetFld(grid, "_filterRoot", new ClayFilterGroupNode());
-        SetFld(grid, "_selectedIds", new HashSet<int> { 1, 2, 3 });
-        SetFld(grid, "_selectMode", true);
-        SetFld(grid, "_selectAllChecked", true);
-        SetFld(grid, "_pageNumber", 5);
-
-        CallReset(grid);
-
-        // Всё очищено
-        Assert.Equal(0, GetFld<int>(grid, "_dynamicGridId"));
-        Assert.Null(GetFld<object>(grid, "_dynamicDef"));
-        Assert.Empty(GetFld<IReadOnlyList<ClayColumnDefinition>>(grid, "_dynamicCols") ?? []);
-        Assert.Empty(GetFld<HashSet<string>>(grid, "_dynamicKnownColumns") ?? []);
-        Assert.Empty(GetFld<Dictionary<string, IReadOnlyDictionary<string, string>>>(grid, "_dynamicLookups") ?? []);
-        Assert.Null(GetFld<string?>(grid, "_dynamicError"));
-        Assert.Null(GetFld<string?>(grid, "_dynamicEditUrl"));
-        Assert.Empty(GetFld<Dictionary<string, string>>(grid, "_dynamicSavedParams") ?? []);
-        Assert.Null(GetFld<string>(grid, "_searchText"));
-        Assert.Empty(GetFld<List<SortColumn>>(grid, "_sortState") ?? []);
-        Assert.Empty(GetFld<HashSet<int>>(grid, "_selectedIds") ?? []);
-        Assert.False(GetFld<bool>(grid, "_selectMode"));
-        Assert.False(GetFld<bool>(grid, "_selectAllChecked"));
-        Assert.Equal(1, GetFld<int>(grid, "_pageNumber"));
-    }
-
-    [Fact]
-    public async Task DynamicToStatic_ResetsKey()
-    {
+        var connA = AppendScript(BuildInitScript(101, "Grid 101", "SELECT * FROM T101", "Col101", "Колонка 101", 1));
         _nav.NavigateTo("http://localhost/?id=101&CLID=1");
-        var grid = CreateGrid(new ClayGridOptions { Dynamic = true, DynamicGridId = 101 });
-        SetFld(grid, "_currentDynamicKey", ClayGridDynamicKey.Create(101, 1, null, _settings));
 
-        // Переключаем в static
-        var opt = GetFld<ClayGridOptions>(grid, "_opt");
-        Assert.NotNull(opt);
-        opt!.Dynamic = false;
+        var cut = _ctx.Render<ClayGrid<ClayDynamicRow>>(p =>
+            p.Add(c => c.Options, new ClayGridOptions { Dynamic = true }));
+        Assert.NotNull(cut.Instance.GetColumnMeta("Col101"));
 
-        await CallOnParamsSetAsync(grid);
-        Assert.Null(GetFld<ClayGridDynamicKey?>(grid, "_currentDynamicKey"));
-    }
-
-    [Fact]
-    public void Query_CacheInvalidatesOnUriChange()
-    {
-        _nav.NavigateTo("http://localhost/?id=101&CLID=1");
-        var grid = CreateGrid(new ClayGridOptions { Dynamic = true });
-
-        // Читаем Query через reflection
-        var query1 = AccessQuery(grid);
-        Assert.Equal("101", query1["id"]);
-
-        // Меняем URI
+        var connB = AppendScript(BuildInitScript(202, "Grid 202", "SELECT * FROM T202", "Col202", "Колонка 202", 2));
         _nav.NavigateTo("http://localhost/?id=202&CLID=2");
-        var query2 = AccessQuery(grid);
-        Assert.Equal("202", query2["id"]);
+        cut.Render(p => p.Add(c => c.Options, new ClayGridOptions { Dynamic = true }));
+
+        Assert.NotNull(cut.Instance.GetColumnMeta("Col202"));
+        Assert.Null(cut.Instance.GetColumnMeta("Col101"));
     }
 
     [Fact]
-    public void Query_SameUri_ReturnsSameInstance()
+    public void SameMutableOptions_DynamicGridIdChanged_Reinit()
     {
+        var connA = AppendScript(BuildInitScript(101, "Grid 101", "SELECT * FROM T101", "ColA", "Колонка A", 1));
         _nav.NavigateTo("http://localhost/?id=101&CLID=1");
-        var grid = CreateGrid(new ClayGridOptions { Dynamic = true });
 
-        var q1 = AccessQuery(grid);
-        var q2 = AccessQuery(grid);
-        Assert.Same(q1, q2);
+        var options = new ClayGridOptions { Dynamic = true, DynamicGridId = 101 };
+        var cut = _ctx.Render<ClayGrid<ClayDynamicRow>>(p => p.Add(c => c.Options, options));
+        Assert.NotNull(cut.Instance.GetColumnMeta("ColA"));
+
+        options.DynamicGridId = 202;
+        var connB = AppendScript(BuildInitScript(202, "Grid 202", "SELECT * FROM T202", "ColB", "Колонка B", 2));
+        _nav.NavigateTo("http://localhost/?id=202&CLID=2");
+        cut.Render(p => p.Add(c => c.Options, options));
+
+        Assert.NotNull(cut.Instance.GetColumnMeta("ColB"));
+        Assert.Null(cut.Instance.GetColumnMeta("ColA"));
     }
 
-    private static NameValueCollection AccessQuery(object instance)
+    [Fact]
+    public void InitException_AllowsRetry()
     {
-        var flags = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
-        var t = instance.GetType();
-        var prop = t.GetProperty("Query", flags);
-        return (NameValueCollection)prop!.GetValue(instance)!;
+        // Первая попытка: definition load бросает исключение
+        _globalQueue.Clear();
+        _globalQueue.Enqueue(Script.Error(new InvalidOperationException("boom")));
+        for (int i = 0; i < 7; i++) _globalQueue.Enqueue(Script.Rows());
+        _nav.NavigateTo("http://localhost/?id=101&CLID=1");
+
+        Assert.Throws<InvalidOperationException>(() =>
+            _ctx.Render<ClayGrid<ClayDynamicRow>>(p =>
+                p.Add(c => c.Options, new ClayGridOptions { Dynamic = true, DynamicGridId = 101 })));
+
+        // Очистить остатки от первой попытки и добавить success-скрипт
+        _globalQueue.Clear();
+        var connOk = AppendScript(BuildInitScript(101, "Grid 101", "SELECT * FROM T", "ColOk", "Колонка OK", 1));
+        var cut = _ctx.Render<ClayGrid<ClayDynamicRow>>(p =>
+            p.Add(c => c.Options, new ClayGridOptions { Dynamic = true, DynamicGridId = 101 }));
+
+        Assert.NotNull(cut.Instance.GetColumnMeta("ColOk"));
+        // DefCount включает failed попытку → >1. Проверяем только успех колонки.
+    }
+
+    [Fact]
+    public void AfterSuccess_SameKey_NoReinit()
+    {
+        var conn = AppendScript(BuildInitScript(101, "Grid", "SELECT * FROM T", "ColA", "Колонка A", 1, totalCount: 3));
+        _nav.NavigateTo("http://localhost/?id=101&CLID=1");
+
+        var cut = _ctx.Render<ClayGrid<ClayDynamicRow>>(p =>
+            p.Add(c => c.Options, new ClayGridOptions { Dynamic = true, DynamicGridId = 101 }));
+        Assert.Equal(1, DefCount(conn));
+
+        cut.Render(p => p.Add(c => c.Options,
+            new ClayGridOptions { Dynamic = true, DynamicGridId = 101 }));
+        Assert.Equal(1, DefCount(conn));
+    }
+
+    [Fact]
+    public void DynamicToStatic_ResetsState()
+    {
+        var conn = AppendScript(BuildInitScript(101, "Dynamic", "SELECT * FROM T", "ColA", "Колонка A", 1));
+        _nav.NavigateTo("http://localhost/?id=101&CLID=1");
+
+        var cut = _ctx.Render<ClayGrid<ClayDynamicRow>>(p =>
+            p.Add(c => c.Options, new ClayGridOptions { Dynamic = true, DynamicGridId = 101 }));
+        Assert.NotNull(cut.Instance.GetColumnMeta("ColA"));
+
+        cut.Render(p => p.Add(c => c.Options, new ClayGridOptions { Dynamic = false }));
+
+        Assert.Null(cut.Instance.GetColumnMeta("ColA"));
+        Assert.Null(GetFld<ClayGridDynamicKey?>(cut.Instance, "_currentDynamicKey"));
     }
 }
 
