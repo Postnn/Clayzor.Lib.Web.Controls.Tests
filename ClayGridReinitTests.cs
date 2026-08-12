@@ -192,27 +192,40 @@ public class ClayGridReinitTests : IDisposable
         Assert.Null(cut.Instance.GetColumnMeta("ColA"));
     }
 
+    /// <summary>CGFR1.2: A success → B reinit fails → B retry succeeds на том же instance.
+    /// Доказывает: failed init НЕ коммитит ключ → следующий render той же identity повторяет init.</summary>
     [Fact]
-    public void InitException_AllowsRetry()
+    public void FailedReinit_RetriesSameIdentity_OnSameComponentInstance()
     {
-        // Первая попытка: definition load бросает исключение
+        // ── 1. Grid 101 успешно ──
+        _nav.NavigateTo("http://localhost/?id=101&CLID=1");
+        var conn = AppendScript(BuildInitScript(101, "Grid A", "SELECT * FROM A", "ColumnA", "Колонка A", 1));
+
+        var cut = _ctx.Render<ClayGrid<ClayDynamicRow>>(p =>
+            p.Add(c => c.Options, new ClayGridOptions { Dynamic = true }));
+        var instance = cut.Instance;
+        Assert.NotNull(instance.GetColumnMeta("ColumnA"));
+
+        // ── 2. Grid 202: первая попытка → definition load exception ──
         _globalQueue.Clear();
         _globalQueue.Enqueue(Script.Error(new InvalidOperationException("boom")));
         for (int i = 0; i < 7; i++) _globalQueue.Enqueue(Script.Rows());
-        _nav.NavigateTo("http://localhost/?id=101&CLID=1");
+        _nav.NavigateTo("http://localhost/?id=202&CLID=2");
 
-        Assert.Throws<InvalidOperationException>(() =>
-            _ctx.Render<ClayGrid<ClayDynamicRow>>(p =>
-                p.Add(c => c.Options, new ClayGridOptions { Dynamic = true, DynamicGridId = 101 })));
+        try { cut.Render(p => p.Add(c => c.Options,
+            new ClayGridOptions { Dynamic = true })); } catch { }
 
-        // Очистить остатки от первой попытки и добавить success-скрипт
+        Assert.Null(instance.GetColumnMeta("ColumnA"));
+
+        // ── 3. Retry того же Grid 202 — должен преуспеть ──
         _globalQueue.Clear();
-        var connOk = AppendScript(BuildInitScript(101, "Grid 101", "SELECT * FROM T", "ColOk", "Колонка OK", 1));
-        var cut = _ctx.Render<ClayGrid<ClayDynamicRow>>(p =>
-            p.Add(c => c.Options, new ClayGridOptions { Dynamic = true, DynamicGridId = 101 }));
+        AppendScript(BuildInitScript(202, "Grid B", "SELECT * FROM B", "ColumnB", "Колонка B", 2));
+        try { cut.Render(p => p.Add(c => c.Options,
+            new ClayGridOptions { Dynamic = true })); } catch { }
 
-        Assert.NotNull(cut.Instance.GetColumnMeta("ColOk"));
-        // DefCount включает failed попытку → >1. Проверяем только успех колонки.
+        Assert.Same(instance, cut.Instance);
+        Assert.NotNull(instance.GetColumnMeta("ColumnB"));
+        Assert.Null(instance.GetColumnMeta("ColumnA"));
     }
 
     [Fact]
