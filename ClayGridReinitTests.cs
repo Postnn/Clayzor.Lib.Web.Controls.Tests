@@ -192,12 +192,11 @@ public class ClayGridReinitTests : IDisposable
         Assert.Null(cut.Instance.GetColumnMeta("ColA"));
     }
 
-    /// <summary>CGFR1.3: A success → B reinit fails на том же instance.
-    /// Доказывает: failed init НЕ коммитит ключ (ColumnA очищен, DefCount вырос).
-    /// bUnit v2 ограничение: retry на том же cut после render-исключения невозможен.
-    /// Retry тестируется в CGFR1.1 InitException_AllowsRetry (новый компонент).</summary>
+    /// <summary>CGFR1.3: A success → B reinit fails → B retry succeeds на том же instance.
+    /// Доказывает через _initCallCount (internal seam): failed init НЕ коммитит ключ,
+    /// следующий render той же identity вызывает InitDynamicMode повторно → ровно 2 B попытки.</summary>
     [Fact]
-    public void FailedReinit_ResetsState_OnSameInstance()
+    public void FailedReinit_RetriesSameIdentity_OnSameComponentInstance()
     {
         // ── 1. Grid 101 успешно ──
         _nav.NavigateTo("http://localhost/?id=101&CLID=1");
@@ -207,23 +206,40 @@ public class ClayGridReinitTests : IDisposable
             p.Add(c => c.Options, new ClayGridOptions { Dynamic = true }));
         var instance = cut.Instance;
         Assert.NotNull(instance.GetColumnMeta("ColumnA"));
-        int defBeforeB = DefCount(conn); // снапшот после A
+        int callCountAfterA = instance._initCallCount; // 1
 
-        // ── 2. B: definition load → InvalidOperationException ──
+        // ── 2. Grid 202: первый definition load → InvalidOperationException ──
         _globalQueue.Clear();
         _globalQueue.Enqueue(Script.Error(new InvalidOperationException("boom")));
         for (int i = 0; i < 7; i++) _globalQueue.Enqueue(Script.Rows());
         _nav.NavigateTo("http://localhost/?id=202&CLID=2");
 
-        // bUnit v2 не пробрасывает render-исключения из OnParametersSetAsync.
+        // bUnit v2 не пробрасывает render-исключения в Assert.Throws — ловим через catch.
         // Lifecycle отрабатывает: Reset + Init + catch → _currentDynamicKey = null.
         try { cut.Render(p => p.Add(c => c.Options,
             new ClayGridOptions { Dynamic = true })); } catch { }
 
-        // Доказательство: Reset отработал, B definition load был попыткой
         Assert.Same(instance, cut.Instance);
         Assert.Null(instance.GetColumnMeta("ColumnA"));
-        Assert.Equal(defBeforeB + 1, DefCount(conn)); // ровно 1 попытка B definition load
+        int callCountAfterFail = instance._initCallCount; // 2 (B attempt #1)
+        Assert.Equal(callCountAfterA + 1, callCountAfterFail);
+
+        // ── 3. Retry того же Grid 202 — должен вызвать InitDynamicMode снова ──
+        _globalQueue.Clear();
+        AppendScript(BuildInitScript(202, "Grid B", "SELECT * FROM B", "ColumnB", "Колонка B", 2));
+        // Сбрасываем закешированное соединение DbManager после failed попытки
+        var db = _ctx.Services.GetRequiredService<DbManager>();
+        typeof(DbManager).GetField("_connection", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+            ?.SetValue(db, null);
+        try { cut.Render(p => p.Add(c => c.Options,
+            new ClayGridOptions { Dynamic = true })); } catch { }
+
+        Assert.Same(instance, cut.Instance);
+        Assert.NotNull(instance.GetColumnMeta("ColumnB"));
+        Assert.Null(instance.GetColumnMeta("ColumnA"));
+        int callCountAfterRetry = instance._initCallCount; // 3 (B attempt #2)
+        Assert.Equal(callCountAfterA + 2, callCountAfterRetry);
+        Assert.Equal(2, callCountAfterRetry - callCountAfterA); // ровно 2 B attempts
     }
 
     [Fact]
