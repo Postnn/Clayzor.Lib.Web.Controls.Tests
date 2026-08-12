@@ -87,15 +87,18 @@ internal sealed class ScriptEntry
 
 /// <summary>
 /// DbCommand, возвращающий скриптованные данные. Выполняет один <see cref="ScriptEntry"/>.
+/// Entry извлекается из очереди ЛЕНИВО — при первом Execute, а не при CreateDbCommand.
+/// Иначе потерянные команды (созданы, но не выполнены) сбивают порядок очереди.
 /// </summary>
 internal sealed class ScriptedCommand : DbCommand
 {
-    private readonly ScriptEntry _entry;
+    private readonly ScriptedConnection _owner;
+    private ScriptEntry? _entry;
     public List<string> CommandLog { get; }
 
-    public ScriptedCommand(ScriptEntry entry, List<string> commandLog)
+    public ScriptedCommand(ScriptedConnection owner, List<string> commandLog)
     {
-        _entry = entry;
+        _owner = owner;
         CommandLog = commandLog;
     }
 
@@ -112,51 +115,59 @@ internal sealed class ScriptedCommand : DbCommand
     public override void Prepare() { }
     protected override DbParameter CreateDbParameter() => new FakeParameter();
 
+    private ScriptEntry GetEntry() => _entry ??= _owner.DequeueEntry();
+
     public override int ExecuteNonQuery()
     {
+        var e = GetEntry();
         CommandLog.Add(CommandText);
-        if (_entry.Exception is not null) throw _entry.Exception;
-        return _entry.AffectedRows ?? 1;
+        if (e.Exception is not null) throw e.Exception;
+        return e.AffectedRows ?? 1;
     }
 
     public override object? ExecuteScalar()
     {
+        var e = GetEntry();
         CommandLog.Add(CommandText);
-        if (_entry.Exception is not null) throw _entry.Exception;
-        return (object?)_entry.Scalar;
+        if (e.Exception is not null) throw e.Exception;
+        return (object?)e.Scalar;
     }
 
     protected override DbDataReader ExecuteDbDataReader(CommandBehavior behavior)
     {
+        var e = GetEntry();
         CommandLog.Add(CommandText);
-        if (_entry.Exception is not null) throw _entry.Exception;
-        return new ScriptedDataReader(_entry.Rows ?? []);
+        if (e.Exception is not null) throw e.Exception;
+        return new ScriptedDataReader(e.Rows ?? []);
     }
 
     public override Task<int> ExecuteNonQueryAsync(CancellationToken ct)
     {
+        var e = GetEntry();
         CommandLog.Add(CommandText);
-        if (_entry.Exception is not null) throw _entry.Exception;
-        return Task.FromResult(_entry.AffectedRows ?? 1);
+        if (e.Exception is not null) throw e.Exception;
+        return Task.FromResult(e.AffectedRows ?? 1);
     }
 
     public override Task<object?> ExecuteScalarAsync(CancellationToken ct)
     {
+        var e = GetEntry();
         CommandLog.Add(CommandText);
-        if (_entry.Exception is not null) throw _entry.Exception;
-        return Task.FromResult((object?)_entry.Scalar);
+        if (e.Exception is not null) throw e.Exception;
+        return Task.FromResult((object?)e.Scalar);
     }
 
     protected override Task<DbDataReader> ExecuteDbDataReaderAsync(CommandBehavior behavior, CancellationToken ct)
     {
+        var e = GetEntry();
         CommandLog.Add(CommandText);
-        if (_entry.Exception is not null) throw _entry.Exception;
-        return Task.FromResult<DbDataReader>(new ScriptedDataReader(_entry.Rows ?? []));
+        if (e.Exception is not null) throw e.Exception;
+        return Task.FromResult<DbDataReader>(new ScriptedDataReader(e.Rows ?? []));
     }
 }
 
 /// <summary>
-/// DbConnection, создающая <see cref="ScriptedCommand"/> из очереди <see cref="ScriptEntry"/>.
+/// DbConnection, создающая <see cref="ScriptedCommand"/> с ленивым извлечением <see cref="ScriptEntry"/>.
 /// </summary>
 internal sealed class ScriptedConnection : DbConnection
 {
@@ -175,10 +186,17 @@ internal sealed class ScriptedConnection : DbConnection
     public override void Open() => _state = ConnectionState.Open;
     public override Task OpenAsync(CancellationToken ct) { Open(); return Task.CompletedTask; }
     public override void Close() => _state = ConnectionState.Closed;
-    protected override DbCommand CreateDbCommand() => new ScriptedCommand(_entries.Dequeue(), CommandLog);
+    protected override DbCommand CreateDbCommand() => new ScriptedCommand(this, CommandLog);
     protected override DbTransaction BeginDbTransaction(IsolationLevel il) => throw new NotSupportedException();
     public override void ChangeDatabase(string name) => throw new NotSupportedException();
     protected override void Dispose(bool disposing) { _state = ConnectionState.Closed; }
+
+    /// <summary>Извлекает следующий entry. Бросает, если очередь пуста — скрипт неполон.</summary>
+    internal ScriptEntry DequeueEntry()
+        => _entries.Count > 0
+            ? _entries.Dequeue()
+            : throw new InvalidOperationException(
+                "ScriptedConnection: очередь скриптов пуста — DB-вызовов больше, чем script entries.");
 }
 
 /// <summary>
