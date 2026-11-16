@@ -150,10 +150,13 @@ public sealed class ClaySelectTests : IDisposable
     /// Enter во время debounce не выбирает строку предыдущего запроса.
     /// </summary>
     [Fact]
-    public void EnterDuringDebounce_DoesNotSelectOldResult()
+    public async Task EnterDuringDebounce_DoesNotSelectOldResult()
     {
+        var source = new DeferredSource();
         TestItem? selected = null;
-        var cut = Render(parameters => parameters.Add(component => component.SelectedItemChanged, item => selected = item),
+        var cut = Render(parameters => parameters
+            .Add(component => component.DataSource, source)
+            .Add(component => component.SelectedItemChanged, item => selected = item),
             new ClaySelectOptions { DebounceInterval = 50, AutoSelectExactMatch = false });
 
         cut.Find(".clay-select-button").Click();
@@ -162,6 +165,11 @@ public sealed class ClaySelectTests : IDisposable
 
         Assert.Null(selected);
         Assert.Null(cut.Instance.Value);
+        await Task.Delay(200);
+        Assert.True(source.HasSearch("Bravo"));
+        await CompleteSearchAndFlushAsync(cut, source, "Bravo", Items[1]);
+        Assert.Contains("Bravo", cut.Markup);
+        Assert.DoesNotContain("Alpha", cut.Markup);
     }
 
     /// <summary>
@@ -175,10 +183,12 @@ public sealed class ClaySelectTests : IDisposable
         var cut = Render(parameters => parameters
             .Add(component => component.DataSource, source)
             .Add(component => component.SelectedItemChanged, item => selected = item),
-            new ClaySelectOptions { AutoSelectExactMatch = false });
+            new ClaySelectOptions { DebounceInterval = 0, AutoSelectExactMatch = false });
 
         cut.Find(".clay-select-button").Click();
         cut.Find("input").Input("b");
+        Assert.True(source.HasSearch("b"));
+        Assert.Contains("Загрузка", cut.Markup);
         cut.Find("input").KeyDown(new KeyboardEventArgs { Key = "ArrowDown" });
         cut.Find("input").KeyDown(new KeyboardEventArgs { Key = "Enter" });
 
