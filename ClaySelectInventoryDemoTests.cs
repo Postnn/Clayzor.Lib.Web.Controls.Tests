@@ -105,6 +105,7 @@ public sealed class ClaySelectInventoryDemoTests
 
         provider.WaitForAssertion(() => Assert.Contains("Иван Иванов", provider.Markup));
         await ctx.Services.DisposeAsync();
+        ctx.Dispose();
     }
 
     private static TestContext CreateContext(DbManager db)
