@@ -22,5 +22,6 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\Clayzor.Lib.Web.Controls\Clayzor.Lib.Web.Controls.csproj" />
+    <ProjectReference Include="..\..\src\Clayzor.Lib.Web.DBSelect\Clayzor.Lib.Web.DBSelect.csproj" />
   </ItemGroup>
 </Project>
