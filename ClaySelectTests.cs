@@ -1,6 +1,7 @@
 using Bunit;
 using Clayzor.Lib.Web.Controls.Components.Select;
 using Microsoft.AspNetCore.Components;
+using Microsoft.AspNetCore.Components.Web;
 using Microsoft.Extensions.DependencyInjection;
 using MudBlazor;
 using MudBlazor.Services;
@@ -86,24 +87,24 @@ public sealed class ClaySelectTests : IDisposable
     /// Поздний ответ старого поиска не заменяет результаты нового запроса.
     /// </summary>
     [Fact]
-    public void StaleSearch_DoesNotOverwriteNewResults()
+    public async Task StaleSearch_DoesNotOverwriteNewResults()
     {
         var source = new DeferredSource();
         var cut = Render(parameters => parameters.Add(component => component.DataSource, source));
 
         cut.Find("input").Input("a");
         cut.Find("input").Input("b");
-        source.CompleteSearch("b", Items[1]);
+        await CompleteSearchAndFlushAsync(cut, source, "b", Items[1]);
         cut.WaitForAssertion(() => Assert.Contains("Bravo", cut.Markup));
-        source.CompleteSearch("a", Items[0]);
-        cut.WaitForAssertion(() => Assert.DoesNotContain("Alpha", cut.Markup));
+        await CompleteSearchAndFlushAsync(cut, source, "a", Items[0]);
+        Assert.DoesNotContain("Alpha", cut.Markup);
     }
 
     /// <summary>
     /// Позднее восстановление старого ID не заменяет объект нового ID.
     /// </summary>
     [Fact]
-    public void StaleResolve_DoesNotOverwriteNewValue()
+    public async Task StaleResolve_DoesNotOverwriteNewValue()
     {
         var source = new DeferredSource();
         var cut = Render(parameters => parameters
@@ -113,10 +114,119 @@ public sealed class ClaySelectTests : IDisposable
         cut.Render(parameters => parameters
             .Add(component => component.DataSource, source)
             .Add(component => component.Value, 2));
-        source.CompleteResolve(2, Items[1]);
+        await CompleteResolveAndFlushAsync(cut, source, 2, Items[1]);
         cut.WaitForAssertion(() => Assert.Equal("Bravo", cut.Find("input").GetAttribute("value")));
-        source.CompleteResolve(1, Items[0]);
-        cut.WaitForAssertion(() => Assert.Equal("Bravo", cut.Find("input").GetAttribute("value")));
+        await CompleteResolveAndFlushAsync(cut, source, 1, Items[0]);
+        Assert.Equal("Bravo", cut.Find("input").GetAttribute("value"));
+    }
+
+    /// <summary>
+    /// Повторный рендер с неизменным пустым Value не стирает введённый текст и debounce.
+    /// </summary>
+    [Fact]
+    public async Task ParentRenderDuringDebounce_PreservesTextAndSearch()
+    {
+        var source = new DeferredSource();
+        var options = new ClaySelectOptions { DebounceInterval = 50, AutoSelectExactMatch = false };
+        var cut = Render(parameters => parameters.Add(component => component.DataSource, source), options);
+
+        cut.Find("input").Input("a");
+        cut.Render(parameters => parameters
+            .Add(component => component.Items, Items)
+            .Add(component => component.ValueSelector, item => (int?)item.Id)
+            .Add(component => component.TextSelector, item => item.Name)
+            .Add(component => component.Options, options)
+            .Add(component => component.DataSource, source)
+            .Add(component => component.Value, null));
+
+        Assert.Equal("a", cut.Find("input").GetAttribute("value"));
+        await Task.Delay(200);
+        Assert.True(source.HasSearch("a"));
+        await CompleteSearchAndFlushAsync(cut, source, "a", Items[0]);
+        Assert.Contains("Alpha", cut.Markup);
+    }
+
+    /// <summary>
+    /// Enter во время debounce не выбирает строку предыдущего запроса.
+    /// </summary>
+    [Fact]
+    public void EnterDuringDebounce_DoesNotSelectOldResult()
+    {
+        TestItem? selected = null;
+        var cut = Render(parameters => parameters.Add(component => component.SelectedItemChanged, item => selected = item),
+            new ClaySelectOptions { DebounceInterval = 50, AutoSelectExactMatch = false });
+
+        cut.Find(".clay-select-button").Click();
+        cut.Find("input").Input("Bravo");
+        cut.Find("input").KeyDown(new KeyboardEventArgs { Key = "Enter" });
+
+        Assert.Null(selected);
+        Assert.Null(cut.Instance.Value);
+    }
+
+    /// <summary>
+    /// Клавиатура не активирует и не выбирает старую выдачу во время загрузки.
+    /// </summary>
+    [Fact]
+    public void KeyboardDuringLoading_DoesNotSelectOldResult()
+    {
+        var source = new DeferredSource();
+        TestItem? selected = null;
+        var cut = Render(parameters => parameters
+            .Add(component => component.DataSource, source)
+            .Add(component => component.SelectedItemChanged, item => selected = item),
+            new ClaySelectOptions { AutoSelectExactMatch = false });
+
+        cut.Find(".clay-select-button").Click();
+        cut.Find("input").Input("b");
+        cut.Find("input").KeyDown(new KeyboardEventArgs { Key = "ArrowDown" });
+        cut.Find("input").KeyDown(new KeyboardEventArgs { Key = "Enter" });
+
+        Assert.Null(selected);
+        Assert.Null(cut.Instance.Value);
+    }
+
+    /// <summary>
+    /// Внешняя очистка Value один раз очищает привязанный объект родителя.
+    /// </summary>
+    [Fact]
+    public void ExternalClear_NotifiesSelectedItemOnce()
+    {
+        var notifications = new List<TestItem?>();
+        var cut = Render(parameters => parameters
+            .Add(component => component.Value, 1)
+            .Add(component => component.SelectedItem, Items[0])
+            .Add(component => component.SelectedItemChanged, item => notifications.Add(item)));
+
+        void RenderCleared() => cut.Render(parameters => parameters
+            .Add(component => component.Items, Items)
+            .Add(component => component.ValueSelector, item => (int?)item.Id)
+            .Add(component => component.TextSelector, item => item.Name)
+            .Add(component => component.Options, new ClaySelectOptions { DebounceInterval = 0 })
+            .Add(component => component.Value, null)
+            .Add(component => component.SelectedItem, Items[0])
+            .Add(component => component.SelectedItemChanged, item => notifications.Add(item)));
+
+        RenderCleared();
+        RenderCleared();
+
+        Assert.Single(notifications);
+        Assert.Null(notifications[0]);
+        Assert.Equal(string.Empty, cut.Find("input").GetAttribute("value"));
+    }
+
+    /// <summary>
+    /// Disabled и ReadOnly запрещают открытие списка.
+    /// </summary>
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public void DisabledOrReadOnly_PreventsOpening(bool disabled, bool readOnly)
+    {
+        var cut = Render(options: new ClaySelectOptions { Disabled = disabled, ReadOnly = readOnly });
+
+        Assert.True(cut.Find(".clay-select-button").HasAttribute("disabled"));
+        Assert.Empty(cut.FindAll(".clay-select-popup"));
     }
 
     /// <summary>
@@ -178,6 +288,26 @@ public sealed class ClaySelectTests : IDisposable
         Assert.True(form.Instance.IsValid);
     }
 
+    private static async Task CompleteSearchAndFlushAsync(
+        IRenderedComponent<ClaySelect<TestItem, int?>> cut,
+        DeferredSource source,
+        string text,
+        TestItem item)
+    {
+        await cut.InvokeAsync(() => source.CompleteSearch(text, item));
+        await cut.InvokeAsync(() => Task.CompletedTask);
+    }
+
+    private static async Task CompleteResolveAndFlushAsync(
+        IRenderedComponent<ClaySelect<TestItem, int?>> cut,
+        DeferredSource source,
+        int id,
+        TestItem item)
+    {
+        await cut.InvokeAsync(() => source.CompleteResolve(id, item));
+        await cut.InvokeAsync(() => Task.CompletedTask);
+    }
+
     private IRenderedComponent<ClaySelect<TestItem, int?>> Render(
         Action<ComponentParameterCollectionBuilder<ClaySelect<TestItem, int?>>>? configure = null,
         ClaySelectOptions? options = null)
@@ -218,6 +348,9 @@ public sealed class ClaySelectTests : IDisposable
             ClaySelectSearchRequest request,
             CancellationToken cancellationToken = default)
         {
+            if (request.SearchText.Length == 0)
+                return Task.FromResult(new ClaySelectResult<TestItem> { Items = Items });
+
             var completion = new TaskCompletionSource<ClaySelectResult<TestItem>>(
                 TaskCreationOptions.RunContinuationsAsynchronously);
             _searches[request.SearchText] = completion;
@@ -230,6 +363,8 @@ public sealed class ClaySelectTests : IDisposable
             _resolves[id!.Value] = completion;
             return completion.Task;
         }
+
+        public bool HasSearch(string text) => _searches.ContainsKey(text);
 
         public void CompleteSearch(string text, TestItem item) =>
             _searches[text].TrySetResult(new ClaySelectResult<TestItem> { Items = [item] });
