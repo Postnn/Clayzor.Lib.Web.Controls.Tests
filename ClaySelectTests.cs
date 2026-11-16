@@ -226,6 +226,35 @@ public sealed class ClaySelectTests : IDisposable
     }
 
     /// <summary>
+    /// Сигнал браузера о внешнем клике или потере фокуса закрывает popup.
+    /// </summary>
+    [Fact]
+    public async Task OutsideInteraction_ClosesPopup()
+    {
+        var cut = Render();
+        cut.Find(".clay-select-button").Click();
+        Assert.NotEmpty(cut.FindAll(".clay-select-popup"));
+
+        await cut.InvokeAsync(() => cut.Instance.ClosePopupFromOutsideAsync());
+
+        Assert.Empty(cut.FindAll(".clay-select-popup"));
+    }
+
+    /// <summary>
+    /// Popup привязан к полю, поэтому валидационное сообщение не меняет его вертикальный якорь.
+    /// </summary>
+    [Fact]
+    public async Task ValidationMessage_DoesNotChangePopupAnchor()
+    {
+        var cut = Render(options: new ClaySelectOptions { Required = true, DebounceInterval = 0 });
+        await cut.InvokeAsync(() => cut.Instance.ValidateAsync());
+        cut.Find(".clay-select-button").Click();
+
+        Assert.NotEmpty(cut.FindAll(".clay-select-validation"));
+        Assert.Equal("clay-select-field", cut.Find(".clay-select-popup").ParentElement?.ClassName);
+    }
+
+    /// <summary>
     /// Disabled и ReadOnly запрещают открытие списка.
     /// </summary>
     [Theory]

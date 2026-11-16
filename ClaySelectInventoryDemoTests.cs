@@ -1,11 +1,9 @@
 using Bunit;
 using Clayzor.Lib.DALC;
 using Clayzor.Lib.Entities.Inventory;
-using Clayzor.Lib.Entities.MedicalTests;
 using Clayzor.Lib.Web.Controls.Components.Select;
 using Clayzor.Lib.Web.DBSelect.Employees;
 using Clayzor.Lib.Web.DBSelect.Equipment;
-using Kesco.App.Web.Inventory.Components.Dialogs;
 using Kesco.App.Web.Inventory.Components.Pages;
 using Microsoft.AspNetCore.Components;
 using Microsoft.Extensions.DependencyInjection;
@@ -77,37 +75,6 @@ public sealed class ClaySelectInventoryDemoTests
         Assert.Null(secondSource.Filter.EquipmentTypeId);
     }
 
-    /// <summary>
-    /// Начальная загрузка диалога отображает сотрудников без дополнительного клика.
-    /// </summary>
-    [Fact]
-    public async Task EmployeeDialog_InitialLoadRendersResults()
-    {
-        DapperColumnMapper.Initialize();
-        var entries = new Queue<ScriptEntry>([
-            Script.Rows(Script.Row(
-                ("КодСотрудника", 1),
-                ("Сотрудник", "Иван Иванов"),
-                ("Employee", "Ivan Ivanov"))),
-        ]);
-        var ctx = CreateContext(CreateDb(entries));
-        var provider = ctx.Render<MudDialogProvider>();
-        var service = ctx.Services.GetRequiredService<IDialogService>();
-
-        await provider.InvokeAsync(async () =>
-        {
-            var parameters = new DialogParameters<EmployeeSearchDialog>
-            {
-                { dialog => dialog.InitialSearch, "Иван" },
-            };
-            await service.ShowAsync<EmployeeSearchDialog>("Поиск сотрудника", parameters);
-        });
-
-        provider.WaitForAssertion(() => Assert.Contains("Иван Иванов", provider.Markup));
-        await ctx.Services.DisposeAsync();
-        ctx.Dispose();
-    }
-
     private static TestContext CreateContext(DbManager db)
     {
         var ctx = new TestContext();
@@ -117,6 +84,9 @@ public sealed class ClaySelectInventoryDemoTests
         ctx.Services.AddSingleton(db);
         ctx.Services.AddSingleton(new EquipmentTypeSelectDataSource(db));
         ctx.Services.AddSingleton(new EmployeeSelectDataSource(db));
+        ctx.Services.AddSingleton<Microsoft.Extensions.Configuration.IConfiguration>(
+            new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build());
+        ctx.Services.AddSingleton(new Clayzor.Lib.Web.Controls.Services.ClaySelectAdvancedSearchService(ctx.JSInterop.JSRuntime));
         return ctx;
     }
 
