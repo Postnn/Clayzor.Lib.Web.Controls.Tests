@@ -121,6 +121,7 @@ public sealed class ClaySelectInventoryDemoTests
         var configuration = new Microsoft.Extensions.Configuration.ConfigurationManager
         {
             ["URI_user_search"] = "http://localhost:5030/search",
+            ["URI_user_form"] = "http://localhost:5030/user",
         };
         ctx.Services.AddSingleton<Microsoft.Extensions.Configuration.IConfiguration>(configuration);
         ctx.Services.AddSingleton(new Clayzor.Lib.Web.Controls.Services.ClaySelectAdvancedSearchService(ctx.JSInterop.JSRuntime));

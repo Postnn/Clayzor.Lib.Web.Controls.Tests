@@ -83,7 +83,6 @@ internal sealed class ScriptEntry
     public int? Scalar { get; init; }
     public int? AffectedRows { get; init; }
     public Exception? Exception { get; init; }
-    public Task? Gate { get; init; }
 }
 
 /// <summary>
@@ -158,14 +157,12 @@ internal sealed class ScriptedCommand : DbCommand
         return Task.FromResult((object?)e.Scalar);
     }
 
-    protected override async Task<DbDataReader> ExecuteDbDataReaderAsync(CommandBehavior behavior, CancellationToken ct)
+    protected override Task<DbDataReader> ExecuteDbDataReaderAsync(CommandBehavior behavior, CancellationToken ct)
     {
         var e = GetEntry();
         CommandLog.Add(CommandText);
-        if (e.Gate is not null)
-            await e.Gate;
         if (e.Exception is not null) throw e.Exception;
-        return new ScriptedDataReader(e.Rows ?? []);
+        return Task.FromResult<DbDataReader>(new ScriptedDataReader(e.Rows ?? []));
     }
 }
 

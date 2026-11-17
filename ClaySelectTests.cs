@@ -57,6 +57,73 @@ public sealed class ClaySelectTests : IDisposable
     }
 
     /// <summary>
+    /// После выбора кнопка просмотра открывает карточку вместо popup поиска.
+    /// </summary>
+    [Fact]
+    public void SelectedItemWithViewHandler_OpensEntityView()
+    {
+        TestItem? viewed = null;
+        var cut = Render(parameters => parameters
+            .Add(component => component.Value, 1)
+            .Add(component => component.SelectedItem, Items[0])
+            .Add(component => component.ViewItem, item =>
+            {
+                viewed = item;
+                return Task.CompletedTask;
+            }));
+
+        var button = cut.Find(".clay-select-view-button");
+        Assert.Equal("Просмотреть сущность", button.GetAttribute("aria-label"));
+        button.Click();
+
+        Assert.Same(Items[0], viewed);
+        Assert.Empty(cut.FindAll(".clay-select-popup"));
+        Assert.Equal("Alpha", cut.Find("input").GetAttribute("value"));
+    }
+
+    /// <summary>
+    /// Escape после изменения текста восстанавливает выбранные ранее ID и объект.
+    /// </summary>
+    [Fact]
+    public void EscapeAfterInput_RestoresPreviousSelection()
+    {
+        var cut = Render(parameters => parameters
+            .Add(component => component.Value, 1)
+            .Add(component => component.SelectedItem, Items[0]));
+
+        cut.Find("input").Input("Bravo");
+        Assert.Null(cut.Instance.Value);
+        cut.Find("input").KeyDown(new KeyboardEventArgs { Key = "Escape" });
+
+        Assert.Equal(1, cut.Instance.Value);
+        Assert.Equal("Alpha", cut.Find("input").GetAttribute("value"));
+        Assert.Empty(cut.FindAll(".clay-select-popup"));
+    }
+
+    /// <summary>
+    /// При неизменном тексте выбранного элемента расширенный поиск получает пустой запрос.
+    /// </summary>
+    [Fact]
+    public void AdvancedSearch_DoesNotReuseSelectedText()
+    {
+        string? receivedText = null;
+        var cut = Render(parameters => parameters
+            .Add(component => component.Value, 1)
+            .Add(component => component.SelectedItem, Items[0])
+            .Add(component => component.AdvancedSearch, context =>
+            {
+                receivedText = context.SearchText;
+                return Task.FromResult<ClaySelectExternalResult<TestItem, int?>?>(null);
+            }),
+            new ClaySelectOptions { AlwaysShowAdvancedSearch = true });
+
+        cut.Find(".clay-select-button").Click();
+        cut.Find(".clay-select-advanced").Click();
+
+        Assert.Equal(string.Empty, receivedText);
+    }
+
+    /// <summary>
     /// Enter на тексте уже выбранного элемента не повторяет выбор и не открывает popup.
     /// </summary>
     [Fact]
