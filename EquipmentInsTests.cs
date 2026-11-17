@@ -255,7 +255,7 @@ public sealed class EquipmentInsTests
         Assert.Equal(99, CurrentModel(page.Instance).ShipperId);
     }
 
-    /// <summary>Смена copyId на том же экземпляре компонента запускает новую загрузку.</summary>
+    /// <summary>Смена copyId через навигацию перезагружает тот же экземпляр без ручного lifecycle-вызова.</summary>
     [Fact]
     public async Task CopyIdChange_ReloadsSameComponentInstance()
     {
@@ -264,9 +264,53 @@ public sealed class EquipmentInsTests
         var page = context.Render<EquipmentIns>();
         page.WaitForAssertion(() => Assert.Single(page.FindAll("textarea")), TimeSpan.FromSeconds(3));
         fixture.Navigation.NavigateTo("http://localhost/Equipment/EquipmentIns?copyId=8");
-        await InvokeHandler(page, "OnParametersSetAsync");
-        Assert.Equal([7, 8], fixture.Service.CopyRequests);
+        page.WaitForAssertion(() =>
+        {
+            Assert.Equal([7, 8], fixture.Service.CopyRequests);
+            Assert.Equal("Copy8", CurrentModel(page.Instance).Description);
+        }, TimeSpan.FromSeconds(3));
         Assert.Equal(0, CurrentModel(page.Instance).Id);
+    }
+
+    /// <summary>Поздний ответ копии A не меняет бухгалтерский признак уже загруженной копии B.</summary>
+    [Fact]
+    public async Task LateCopyLoad_DoesNotPartiallyOverwriteNewCopy()
+    {
+        var fixture = CreateFixture("http://localhost/Equipment/EquipmentIns?copyId=7");
+        fixture.Service.AccountingAvailable = false;
+        fixture.Service.DeferredAccountingPersonId = 1;
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentIns>();
+        fixture.Service.WaitForDeferredAccountingRequest();
+        fixture.Navigation.NavigateTo("http://localhost/Equipment/EquipmentIns?copyId=8");
+        fixture.Service.WaitForSecondAccountingRequest();
+        page.WaitForAssertion(() => Assert.Equal("Copy8", CurrentModel(page.Instance).Description),
+            TimeSpan.FromSeconds(3));
+        fixture.Service.DeferredAccountingCompletion.SetResult(true);
+        await Task.Delay(100);
+        Assert.False(PrivateBool(page.Instance, "_accountingAvailable"));
+        Assert.Equal("Copy8", CurrentModel(page.Instance).Description);
+    }
+
+    /// <summary>Escape до завершения первого запроса повторно запрашивает и восстанавливает бухучёт.</summary>
+    [Fact]
+    public async Task EscapeDuringOwnerAccountingRequest_RestoresAvailableAccounting()
+    {
+        var fixture = CreateFixture("http://localhost/Equipment/EquipmentIns", accountingAvailable: true);
+        fixture.Service.DeferredAccountingPersonId = 2;
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentIns>();
+        page.WaitForAssertion(() => Assert.Single(page.FindAll("textarea")), TimeSpan.FromSeconds(3));
+        var first = InvokeHandler(page, "OnOwnerChangedAsync", 2);
+        fixture.Service.WaitForDeferredAccountingRequest();
+        await InvokeHandler(page, "OnOwnerChangedAsync", (object?)null);
+        var restored = InvokeHandler(page, "OnOwnerChangedAsync", 2);
+        fixture.Service.WaitForSecondAccountingRequest();
+        await restored;
+        fixture.Service.DeferredAccountingCompletion.SetResult(true);
+        await first;
+        Assert.True(PrivateBool(page.Instance, "_accountingAvailable"));
+        Assert.Single(page.FindAll("input[placeholder='Введите арендатора']"));
     }
 
     /// <summary>При доступном бухучёте арендатор и бухгалтерский документ присутствуют с подсказками.</summary>
@@ -323,6 +367,10 @@ public sealed class EquipmentInsTests
         (EquipmentEntity)typeof(EquipmentIns).GetField("_model",
             System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(page)!;
 
+    private static bool PrivateBool(EquipmentIns page, string name) =>
+        (bool)typeof(EquipmentIns).GetField(name,
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(page)!;
+
     private static Task InvokeSave(IRenderedComponent<EquipmentIns> page, bool close) =>
         InvokeHandler(page, "SaveAsync", close);
 
@@ -358,22 +406,64 @@ public sealed class EquipmentInsTests
 
     private sealed class FakeEquipmentInsService : EquipmentInsService
     {
+        private readonly TaskCompletionSource _deferredAccountingRequested =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _secondAccountingRequested =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _deferredAccountingCalls;
+
         public FakeEquipmentInsService(DbManager db) : base(db) { }
         public EquipmentEntity? Created { get; private set; }
         public Exception? SaveException { get; set; }
         public bool AccountingAvailable { get; set; }
+        public int? DeferredAccountingPersonId { get; set; }
         public int CreateCalls { get; private set; }
         public List<int> CopyRequests { get; } = [];
+        public TaskCompletionSource<bool> DeferredAccountingCompletion { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public override Task<EquipmentEntity?> GetForCopyAsync(int id)
         {
             CopyRequests.Add(id);
-            return Task.FromResult<EquipmentEntity?>(
-                new EquipmentEntity { Id = id, EquipmentTypeId = 103, ModelId = 945, OwnerId = 1, LocationId = 1 });
+            return Task.FromResult<EquipmentEntity?>(new EquipmentEntity
+            {
+                Id = id, EquipmentTypeId = 103, ModelId = 945, OwnerId = 1, LocationId = 1,
+                Description = $"Copy{id}",
+            });
         }
 
         public override Task<bool> HasRoleAsync(int roleId) => Task.FromResult(true);
-        public override Task<bool> CanUseAccountingAsync(int? personId) => Task.FromResult(AccountingAvailable);
+
+        public override Task<bool> CanUseAccountingAsync(int? personId)
+        {
+            if (personId is null)
+                return Task.FromResult(false);
+            if (DeferredAccountingPersonId == personId)
+            {
+                var call = ++_deferredAccountingCalls;
+                if (call == 1)
+                {
+                    _deferredAccountingRequested.TrySetResult();
+                    return DeferredAccountingCompletion.Task;
+                }
+                _secondAccountingRequested.TrySetResult();
+            }
+            return Task.FromResult(AccountingAvailable);
+        }
+
+        public void WaitForDeferredAccountingRequest()
+        {
+            for (var attempt = 0; attempt < 100 && !_deferredAccountingRequested.Task.IsCompleted; attempt++)
+                Thread.Sleep(10);
+            Assert.True(_deferredAccountingRequested.Task.IsCompleted, "Первый запрос бухучёта не был начат");
+        }
+
+        public void WaitForSecondAccountingRequest()
+        {
+            for (var attempt = 0; attempt < 100 && !_secondAccountingRequested.Task.IsCompleted; attempt++)
+                Thread.Sleep(10);
+            Assert.True(_secondAccountingRequested.Task.IsCompleted, "Повторный запрос бухучёта не был начат");
+        }
 
         public override Task<int> CreateAsync(EquipmentEntity equipment)
         {
