@@ -146,22 +146,23 @@ public sealed class ClaySelectTests : IDisposable
     }
 
     /// <summary>
-    /// Наведение мыши переносит активную строку и доступное состояние выбора.
+    /// Наведение мыши не вызывает серверный рендер и не меняет клавиатурную активную строку.
     /// </summary>
     [Fact]
-    public void MouseOver_MovesActiveOption()
+    public void MouseOver_DoesNotRerenderOrChangeKeyboardActiveOption()
     {
         var cut = Render();
         cut.Find(".clay-select-button").Click();
         var options = cut.FindAll(".clay-select-option");
+        var markup = cut.Markup;
 
-        options[1].MouseOver();
-        options = cut.FindAll(".clay-select-option");
+        Assert.Throws<MissingEventHandlerException>(() => options[1].MouseOver());
 
-        Assert.DoesNotContain("clay-select-option--active", options[0].ClassName);
-        Assert.Contains("clay-select-option--active", options[1].ClassName);
-        Assert.False(options[0].HasAttribute("aria-selected"));
-        Assert.True(options[1].HasAttribute("aria-selected"));
+        Assert.Equal(markup, cut.Markup);
+        Assert.Contains("clay-select-option--active", options[0].ClassName);
+        Assert.True(options[0].HasAttribute("aria-selected"));
+        Assert.DoesNotContain("clay-select-option--active", options[1].ClassName);
+        Assert.False(options[1].HasAttribute("aria-selected"));
     }
 
     /// <summary>
