@@ -66,6 +66,25 @@ public sealed class ClayFormControlsTests
         });
     }
 
+    /// <summary>Каркас оставляет toolbar и footer вне прокручиваемого содержимого.</summary>
+    [Fact]
+    public void EntityForm_KeepsToolbarAndFooterOutsideScrollableContent()
+    {
+        using var ctx = new BunitContext();
+        ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+        ctx.Services.AddMudServices();
+        var cut = ctx.Render<ClayEntityForm>(parameters => parameters
+            .Add(component => component.Toolbar, "<div id='toolbar'>Команды</div>")
+            .Add(component => component.ChildContent, "<div id='body'>Поля</div>")
+            .Add(component => component.Footer, "<div id='footer'>Изменения</div>"));
+
+        Assert.NotNull(cut.Find(".clay-entity-form > #toolbar"));
+        Assert.NotNull(cut.Find(".clay-entity-form-content > #body"));
+        Assert.NotNull(cut.Find(".clay-entity-form-layout > .clay-entity-form-footer > #footer"));
+        Assert.DoesNotContain("toolbar", cut.Find(".clay-entity-form-content").InnerHtml);
+        Assert.DoesNotContain("footer", cut.Find(".clay-entity-form-content").InnerHtml);
+    }
+
     /// <summary>Checkbox изменяется с клавиатуры и не изменяется в ReadOnly.</summary>
     [Fact]
     public void Checkbox_SupportsKeyboardAndReadOnly()
