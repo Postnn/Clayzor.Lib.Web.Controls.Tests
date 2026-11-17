@@ -131,6 +131,22 @@ public sealed class EquipmentFormTests
         Assert.Equal(0, fixture.Service.UpdateCalls);
     }
 
+    /// <summary>Обновление текущих detail-метаданных не меняет признак несохранённой основной формы.</summary>
+    [Fact]
+    public async Task DetailMetadataChanges_DoNotMarkMainFormModified()
+    {
+        var fixture = CreateFixture();
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+
+        Assert.False(IsModified(page.Instance));
+        CurrentModel(page.Instance).LocationId = 4;
+        CurrentModel(page.Instance).EmployeeId = 4;
+
+        Assert.False(IsModified(page.Instance));
+    }
+
     /// <summary>Добавление и удаление номера используют атомарный phone-save и синхронизацию.</summary>
     [Fact]
     public async Task PhoneAddAndDelete_UsesAtomicDiffAndSynchronizes()
@@ -230,6 +246,10 @@ public sealed class EquipmentFormTests
 
     private static bool PrivateBool(EquipmentForm page, string name) => (bool)GetPrivate(page, name)!;
 
+    private static bool IsModified(EquipmentForm page) => (bool)typeof(EquipmentForm)
+        .GetProperty("IsModified", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+        .GetValue(page)!;
+
     private static bool ValidateBusinessRules(EquipmentForm page) => (bool)typeof(EquipmentForm)
         .GetMethod("ValidateBusinessRules", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
         .Invoke(page, null)!;
@@ -309,6 +329,11 @@ public sealed class EquipmentFormTests
 
         public override Task<int?> GetConnectionEquipmentIdAsync(int phoneId, int? employeeId, int locationId) =>
             Task.FromResult<int?>(8);
+
+        public override Task<IReadOnlyList<EquipmentLocationPeriod>> GetLocationsAsync(int equipmentId) =>
+            Task.FromResult<IReadOnlyList<EquipmentLocationPeriod>>([]);
+
+        public override Task<bool> HasCurrentResponsibleAsync(int equipmentId) => Task.FromResult(false);
 
         public override Task<IReadOnlyList<EquipmentPhoneLink>> GetPhonesAsync(int equipmentId) =>
             Task.FromResult<IReadOnlyList<EquipmentPhoneLink>>(StoredPhones.ToList());
