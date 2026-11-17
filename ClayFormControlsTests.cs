@@ -47,19 +47,23 @@ public sealed class ClayFormControlsTests
         Assert.Equal(int.MaxValue.ToString(), cut.Find("textarea").GetAttribute("maxlength"));
     }
 
-    /// <summary>Changed показывает сотрудника и дату существующей записи.</summary>
+    /// <summary>Changed показывает сотрудника и переводит UTC-время в часовой пояс клиента.</summary>
     [Fact]
-    public void Changed_ShowsEmployeeAndDate()
+    public void Changed_ShowsEmployeeAndConvertsUtcToClientTime()
     {
         using var ctx = new BunitContext();
-        var changedAt = new DateTime(2026, 11, 17, 12, 30, 0);
+        ctx.JSInterop.Setup<int>("clayGridTimeZone.getOffsetMinutes", _ => true).SetResult(180);
+        var changedAt = new DateTime(2026, 11, 17, 12, 30, 0, DateTimeKind.Utc);
         var cut = ctx.Render<ClayChanged>(parameters => parameters
             .Add(component => component.ChangedById, 3)
             .Add(component => component.ChangedByName, "Иван Иванов")
             .Add(component => component.ChangedAt, changedAt));
 
-        Assert.Contains("Иван Иванов", cut.Markup);
-        Assert.Contains("17.11.2026 12:30:00", cut.Markup);
+        cut.WaitForAssertion(() =>
+        {
+            Assert.Contains("Иван Иванов", cut.Markup);
+            Assert.Contains("17.11.2026 15:30:00", cut.Markup);
+        });
     }
 
     /// <summary>Checkbox изменяется с клавиатуры и не изменяется в ReadOnly.</summary>
