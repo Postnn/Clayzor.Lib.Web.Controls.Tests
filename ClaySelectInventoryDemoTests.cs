@@ -5,6 +5,7 @@ using Clayzor.Lib.Web.Controls.Components.Select;
 using Clayzor.Lib.Web.DBSelect.Employees;
 using Clayzor.Lib.Web.DBSelect.Equipment;
 using Kesco.App.Web.Inventory.Components.Pages;
+using Kesco.App.Web.Inventory.Components.Pages.Equipment;
 using Microsoft.AspNetCore.Components;
 using Microsoft.Extensions.DependencyInjection;
 using MudBlazor;

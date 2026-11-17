@@ -7,7 +7,7 @@ using Clayzor.Lib.Web.Controls.Components.Form;
 using Clayzor.Lib.Web.Controls.Components.Select;
 using Clayzor.Lib.Web.Controls.Services;
 using Clayzor.Lib.Web.DBSelect.Equipment;
-using Kesco.App.Web.Inventory.Components.Pages;
+using Kesco.App.Web.Inventory.Components.Pages.Equipment;
 using Kesco.App.Web.Inventory.Services;
 using Microsoft.AspNetCore.Components;
 using Microsoft.AspNetCore.Components.Web;
@@ -25,7 +25,7 @@ public sealed class ModelEquipmentFormTests
     [Fact]
     public async Task NewComputerModel_AppliesInitialTypeAndDefaults()
     {
-        var fixture = CreateFixture("http://localhost/ModelEquipmentForm?codetype=5&_codetype=5", [
+        var fixture = CreateFixture("http://localhost/Equipment/ModelEquipmentForm?codetype=5&_codetype=5", [
             Script.Rows(TypeRow(5, computer: 1, mac: 2)), Script.Rows(),
         ]);
         await using var _ = fixture.Context;
@@ -48,7 +48,7 @@ public sealed class ModelEquipmentFormTests
     [Fact]
     public async Task TypeChange_ResetsDependentValues()
     {
-        var fixture = CreateFixture("http://localhost/ModelEquipmentForm?codetype=5", [
+        var fixture = CreateFixture("http://localhost/Equipment/ModelEquipmentForm?codetype=5", [
             Script.Rows(TypeRow(5, computer: 1, mac: 2)), Script.Rows(),
         ]);
         await using var _ = fixture.Context;
@@ -87,7 +87,7 @@ public sealed class ModelEquipmentFormTests
             MonitorSize = 12.5, IsMultimedia = true, MemoryTypeId = 3, MemoryBanks = 4,
             NetworkInterfaces = 1, NetworkName = "LAN", PhoneTemplate = "template",
         };
-        var fixture = CreateFixture("http://localhost/ModelEquipmentForm?id=7", [
+        var fixture = CreateFixture("http://localhost/Equipment/ModelEquipmentForm?id=7", [
             Script.Rows(TypeRow(5, computer: 1, mac: 2)), Script.Rows(),
         ], original);
         await using var _ = fixture.Context;
@@ -117,7 +117,7 @@ public sealed class ModelEquipmentFormTests
     [Fact]
     public async Task DuplicateModel_DoesNotSave()
     {
-        var fixture = CreateFixture("http://localhost/ModelEquipmentForm?id=7", [
+        var fixture = CreateFixture("http://localhost/Equipment/ModelEquipmentForm?id=7", [
             Script.Rows(TypeRow(5, computer: 1)), Script.Rows(),
         ], new EquipmentModel { Id = 7, EquipmentTypeId = 5, Name = "Old", PartNumber = "PN" });
         fixture.Service.Duplicate = true;
@@ -137,7 +137,7 @@ public sealed class ModelEquipmentFormTests
     [Fact]
     public async Task ApplyNewModel_SavesNavigatesAndReloadsCreatedModel()
     {
-        var fixture = CreateFixture("http://localhost/ModelEquipmentForm?codetype=5", [
+        var fixture = CreateFixture("http://localhost/Equipment/ModelEquipmentForm?codetype=5", [
             Script.Rows(TypeRow(5, computer: 1)), Script.Rows(),
             Script.Rows(TypeRow(5, computer: 1)), Script.Rows(),
         ]);
@@ -164,7 +164,7 @@ public sealed class ModelEquipmentFormTests
     [Fact]
     public async Task SaveSqlException_KeepsPageAndInputWithoutSuccessPath()
     {
-        var fixture = CreateFixture("http://localhost/ModelEquipmentForm?id=7", [
+        var fixture = CreateFixture("http://localhost/Equipment/ModelEquipmentForm?id=7", [
             Script.Rows(TypeRow(5)), Script.Rows(),
         ], new EquipmentModel { Id = 7, EquipmentTypeId = 5, Name = "Existing", PartNumber = "PN" });
         fixture.Service.SaveException = SqlExceptionFactory.Create(50000, "trigger");
@@ -186,7 +186,7 @@ public sealed class ModelEquipmentFormTests
     [Fact]
     public async Task InsertWithoutId_DoesNotNavigateOrRefreshOpener()
     {
-        var fixture = CreateFixture("http://localhost/ModelEquipmentForm?codetype=5", [
+        var fixture = CreateFixture("http://localhost/Equipment/ModelEquipmentForm?codetype=5", [
             Script.Rows(TypeRow(5, computer: 1)), Script.Rows(),
         ]);
         fixture.Service.SaveResult = 0;
@@ -208,7 +208,7 @@ public sealed class ModelEquipmentFormTests
     [Fact]
     public async Task DisposeDuringSave_DoesNotSaveOrInvokeJsAfterLateContinuation()
     {
-        var fixture = CreateFixture("http://localhost/ModelEquipmentForm?id=7", [
+        var fixture = CreateFixture("http://localhost/Equipment/ModelEquipmentForm?id=7", [
             Script.Rows(TypeRow(5)), Script.Rows(),
         ], new EquipmentModel { Id = 7, EquipmentTypeId = 5, Name = "Existing", PartNumber = "PN" });
         fixture.Service.DeferredDuplicate = true;
@@ -233,7 +233,7 @@ public sealed class ModelEquipmentFormTests
     [Fact]
     public async Task OkWithoutChanges_ClosesWithoutSave()
     {
-        var fixture = CreateFixture("http://localhost/ModelEquipmentForm?id=7", [
+        var fixture = CreateFixture("http://localhost/Equipment/ModelEquipmentForm?id=7", [
             Script.Rows(TypeRow(5)), Script.Rows(),
         ], new EquipmentModel { Id = 7, EquipmentTypeId = 5, Name = "Existing", PartNumber = "PN" });
         await using var _ = fixture.Context;

@@ -47,23 +47,33 @@ public sealed class ClayFormControlsTests
         Assert.Equal(int.MaxValue.ToString(), cut.Find("textarea").GetAttribute("maxlength"));
     }
 
-    /// <summary>Changed показывает сотрудника и переводит UTC-время в часовой пояс клиента.</summary>
+    /// <summary>Changed запрашивает смещение на дату записи, учитывая сезонные переходы.</summary>
     [Fact]
-    public void Changed_ShowsEmployeeAndConvertsUtcToClientTime()
+    public void Changed_UsesOffsetAtRecordedUtcDate()
     {
         using var ctx = new BunitContext();
-        ctx.JSInterop.Setup<int>("clayGridTimeZone.getOffsetMinutes", _ => true).SetResult(180);
-        var changedAt = new DateTime(2026, 11, 17, 12, 30, 0, DateTimeKind.Utc);
+        var summer = new DateTime(2026, 7, 15, 12, 0, 0, DateTimeKind.Utc);
+        var winter = new DateTime(2026, 1, 15, 12, 0, 0, DateTimeKind.Utc);
+        var summerUtc = summer.ToString("O");
+        var winterUtc = winter.ToString("O");
+        ctx.JSInterop.Setup<int>("clayGridTimeZone.getOffsetMinutes", invocation =>
+            invocation.Arguments.Count == 1 && Equals(invocation.Arguments[0], summerUtc)).SetResult(120);
+        ctx.JSInterop.Setup<int>("clayGridTimeZone.getOffsetMinutes", invocation =>
+            invocation.Arguments.Count == 1 && Equals(invocation.Arguments[0], winterUtc)).SetResult(60);
         var cut = ctx.Render<ClayChanged>(parameters => parameters
             .Add(component => component.ChangedById, 3)
             .Add(component => component.ChangedByName, "Иван Иванов")
-            .Add(component => component.ChangedAt, changedAt));
+            .Add(component => component.ChangedAt, summer));
 
-        cut.WaitForAssertion(() =>
-        {
-            Assert.Contains("Иван Иванов", cut.Markup);
-            Assert.Contains("17.11.2026 15:30:00", cut.Markup);
-        });
+        cut.WaitForAssertion(() => Assert.Contains("15.07.2026 14:00:00", cut.Markup));
+        cut.Render(parameters => parameters.Add(component => component.ChangedAt, winter));
+
+        cut.WaitForAssertion(() => Assert.Contains("15.01.2026 13:00:00", cut.Markup));
+        var invocations = ctx.JSInterop.Invocations
+            .Where(invocation => invocation.Identifier == "clayGridTimeZone.getOffsetMinutes").ToArray();
+        Assert.Equal(2, invocations.Length);
+        Assert.Equal(summerUtc, invocations[0].Arguments.Single());
+        Assert.Equal(winterUtc, invocations[1].Arguments.Single());
     }
 
     /// <summary>Каркас оставляет toolbar и footer вне прокручиваемого содержимого.</summary>
