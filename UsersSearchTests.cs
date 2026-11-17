@@ -52,4 +52,38 @@ public sealed class UsersSearchTests
         Assert.All(connection.CommandLog, sql => Assert.Contains("Name LIKE @search", sql));
         Assert.Contains("Примеров Наблюдатель", page.Markup);
     }
+
+    /// <summary>
+    /// Страница сотрудника читает id из query string и загружает запись по параметризованному SQL.
+    /// </summary>
+    [Fact]
+    public async Task EmployeeDetails_LoadsEmployeeByQueryId()
+    {
+        DapperColumnMapper.Initialize();
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([
+            Script.Rows(Script.Row(("КодСотрудника", 4), ("Сотрудник", "Тестов Оператор"), ("Employee", "Test Operator"))),
+        ]));
+        await using var ctx = new BunitContext();
+        ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+        ctx.Services.AddMudServices();
+        ctx.Services.AddMudExtensions();
+        var errorService = new ClayErrorService();
+        ctx.Services.AddSingleton<ClayErrorService>(errorService);
+        ctx.Services.AddSingleton<ISqlErrorHandler>(errorService);
+        ctx.Services.AddSingleton(new ClayAppSettings());
+        ctx.Services.AddSingleton<IConfiguration>(new ConfigurationBuilder().Build());
+        ctx.Services.AddSingleton(new DbManager("Server=test", errorService, () => connection));
+        var navigation = new FakeNavigationManager();
+        navigation.NavigateTo("http://localhost/user?id=4");
+        ctx.Services.AddSingleton<NavigationManager>(navigation);
+
+        var page = ctx.Render<EmployeeDetails>();
+
+        page.WaitForAssertion(() => Assert.Contains("Тестов Оператор", page.Markup));
+        Assert.Equal(4, page.Instance.Id);
+        Assert.Contains("КодСотрудника = @Id", connection.CommandLog.Single());
+        var values = page.FindComponents<MudTextField<string>>()
+            .Select(field => field.Find("input").GetAttribute("value")).ToList();
+        Assert.Equal(["4", "Тестов Оператор", "Test Operator"], values);
+    }
 }

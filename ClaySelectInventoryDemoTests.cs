@@ -94,11 +94,15 @@ public sealed class ClaySelectInventoryDemoTests
 
         page.Instance.Dispose();
         page.Dispose();
-        for (var attempt = 0; attempt < 20 && !ctx.JSInterop.Invocations.Any(item =>
-                 item.Identifier == "claySelectAdvancedSearch.cancel" && Equals(item.Arguments[0], requestId)); attempt++)
-            await Task.Delay(50);
-        Assert.Contains(ctx.JSInterop.Invocations, item =>
-            item.Identifier == "claySelectAdvancedSearch.cancel" && Equals(item.Arguments[0], requestId));
+        var cancelled = false;
+        for (var attempt = 0; attempt < 20 && !cancelled; attempt++)
+        {
+            cancelled = await page.InvokeAsync(() => ctx.JSInterop.Invocations.Any(item =>
+                item.Identifier == "claySelectAdvancedSearch.cancel" && Equals(item.Arguments[0], requestId)));
+            if (!cancelled)
+                await Task.Delay(50);
+        }
+        Assert.True(cancelled);
         using var document = System.Text.Json.JsonDocument.Parse("3");
         await service.CompleteAsync(requestId, document.RootElement.Clone());
 
@@ -116,7 +120,7 @@ public sealed class ClaySelectInventoryDemoTests
         ctx.Services.AddSingleton(new EmployeeSelectDataSource(db));
         var configuration = new Microsoft.Extensions.Configuration.ConfigurationManager
         {
-            ["Users:SearchUrl"] = "http://localhost:5030/search",
+            ["URI_user_search"] = "http://localhost:5030/search",
         };
         ctx.Services.AddSingleton<Microsoft.Extensions.Configuration.IConfiguration>(configuration);
         ctx.Services.AddSingleton(new Clayzor.Lib.Web.Controls.Services.ClaySelectAdvancedSearchService(ctx.JSInterop.JSRuntime));

@@ -57,6 +57,68 @@ public sealed class ClaySelectTests : IDisposable
     }
 
     /// <summary>
+    /// Enter на тексте уже выбранного элемента не повторяет выбор и не открывает popup.
+    /// </summary>
+    [Fact]
+    public void EnterOnSelectedValue_DoesNotSelectAgain()
+    {
+        var valueNotifications = 0;
+        var itemNotifications = 0;
+        var cut = Render(parameters => parameters
+            .Add(component => component.Value, 1)
+            .Add(component => component.SelectedItem, Items[0])
+            .Add(component => component.ValueChanged, _ => valueNotifications++)
+            .Add(component => component.SelectedItemChanged, _ => itemNotifications++));
+
+        cut.Find("input").KeyDown(new KeyboardEventArgs { Key = "Enter" });
+
+        Assert.Equal(0, valueNotifications);
+        Assert.Equal(0, itemNotifications);
+        Assert.Empty(cut.FindAll(".clay-select-popup"));
+        Assert.Equal("Alpha", cut.Find("input").GetAttribute("value"));
+    }
+
+    /// <summary>
+    /// Наведение мыши переносит активную строку и доступное состояние выбора.
+    /// </summary>
+    [Fact]
+    public void MouseOver_MovesActiveOption()
+    {
+        var cut = Render();
+        cut.Find(".clay-select-button").Click();
+        var options = cut.FindAll(".clay-select-option");
+
+        options[1].MouseOver();
+        options = cut.FindAll(".clay-select-option");
+
+        Assert.DoesNotContain("clay-select-option--active", options[0].ClassName);
+        Assert.Contains("clay-select-option--active", options[1].ClassName);
+        Assert.False(options[0].HasAttribute("aria-selected"));
+        Assert.True(options[1].HasAttribute("aria-selected"));
+    }
+
+    /// <summary>
+    /// Отмена во время ожидания closeOthers запрещает старому поиску открывать popup и обращаться к источнику.
+    /// </summary>
+    [Fact]
+    public async Task CancelledCloseOthers_DoesNotOpenPopupOrSearch()
+    {
+        var closeOthers = _ctx.JSInterop.SetupVoid("claySelect.closeOthers", _ => true);
+        var source = new DeferredSource();
+        var cut = Render(parameters => parameters.Add(component => component.DataSource, source));
+        cut.Find(".clay-select-button").Click();
+
+        cut.Find("input").Input("Bravo");
+        closeOthers.SetVoidResult();
+        await cut.InvokeAsync(() => Task.CompletedTask);
+        await cut.InvokeAsync(() => Task.CompletedTask);
+
+        Assert.Empty(cut.FindAll(".clay-select-popup"));
+        Assert.False(source.HasSearch(string.Empty));
+        Assert.False(source.HasSearch("Bravo"));
+    }
+
+    /// <summary>
     /// Статический источник ограничивает выдачу и сообщает о дополнительных результатах.
     /// </summary>
     [Fact]
