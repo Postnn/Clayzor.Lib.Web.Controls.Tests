@@ -86,6 +86,23 @@ public sealed class EquipmentInsTests
         Assert.Equal("http://localhost:5020/Equipment/EquipmentForm?id=123",
             EquipmentIns.BuildEditUrl("http://localhost:5020/Equipment/EquipmentForm", 123));
 
+    /// <summary>SQL копирования восстанавливает тип, модель, владельца и расположение через Dapper-маппер.</summary>
+    [Fact]
+    public async Task CopyQuery_MapsAllLegacyFields()
+    {
+        DapperColumnMapper.Initialize();
+        var db = CreateDb(Script.Rows(Script.Row(
+            ("КодТипаОборудования", 103), ("КодМоделиОборудования", 945),
+            ("КодЛицаВладельца", 1), ("КодРасположения", 2))));
+        var service = new EquipmentInsService(db);
+        var copy = await service.GetForCopyAsync(3);
+        Assert.NotNull(copy);
+        Assert.Equal(103, copy.EquipmentTypeId);
+        Assert.Equal(945, copy.ModelId);
+        Assert.Equal(1, copy.OwnerId);
+        Assert.Equal(2, copy.LocationId);
+    }
+
     /// <summary>Форма копирует исходные значения и успешно создаёт запись через сервис.</summary>
     [Fact]
     public async Task CopyAndOk_CreatesEquipmentAndClosesWindow()
