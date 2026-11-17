@@ -131,7 +131,41 @@ public sealed class EquipmentFormTests
         Assert.Equal(0, fixture.Service.UpdateCalls);
     }
 
-    private static Fixture CreateFixture()
+    /// <summary>Добавление и удаление номера используют атомарный phone-save и синхронизацию.</summary>
+    [Fact]
+    public async Task PhoneAddAndDelete_UsesAtomicDiffAndSynchronizes()
+    {
+        var fixture = CreateFixture(phones: true);
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        SetPrivate(page.Instance, "_phoneToAdd", 11);
+        await page.InvokeAsync(async () =>
+        {
+            var method = typeof(EquipmentForm).GetMethod("AddPhoneAsync",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+            if (method.Invoke(page.Instance, null) is Task task)
+                await task;
+        });
+        page.WaitForAssertion(() => Assert.Contains("101", page.Markup));
+        Assert.Equal(8, ((List<EquipmentPhoneLink>)GetPrivate(page.Instance, "_phones")!)[0].ConnectionEquipmentId);
+
+        await InvokeSave(page, false);
+        Assert.Equal(1, fixture.Service.UpdateWithPhonesCalls);
+        Assert.Equal(1, fixture.Service.SyncCalls);
+        Assert.Equal(new[] { 11 }, fixture.Service.PhoneSaves[0].Current);
+
+        var phones = (List<EquipmentPhoneLink>)GetPrivate(page.Instance, "_phones")!;
+        phones.Clear();
+        await InvokeSave(page, false);
+
+        Assert.Equal(2, fixture.Service.UpdateWithPhonesCalls);
+        Assert.Equal(2, fixture.Service.SyncCalls);
+        Assert.Equal(new[] { 11 }, fixture.Service.PhoneSaves[1].Original);
+        Assert.Empty(fixture.Service.PhoneSaves[1].Current);
+    }
+
+    private static Fixture CreateFixture(bool phones = false)
     {
         DapperColumnMapper.Initialize();
         var context = new BunitContext();
@@ -152,10 +186,12 @@ public sealed class EquipmentFormTests
         context.Services.AddSingleton<IConfiguration>(configuration);
         context.Services.AddSingleton<EquipmentFormService>(service);
         context.Services.AddSingleton(new EquipmentTypeSelectDataSource(CreateDb(
-            Script.Rows(TypeRow()), Script.Rows(TypeRow()), Script.Rows(TypeRow()), Script.Rows(TypeRow()))));
+            Script.Rows(TypeRow(phones)), Script.Rows(TypeRow(phones)), Script.Rows(TypeRow(phones)), Script.Rows(TypeRow(phones)))));
         context.Services.AddSingleton(new EquipmentModelSelectDataSource(CreateDb(
             Script.Rows(ModelRow()), Script.Rows(ModelRow()), Script.Rows(ModelRow()), Script.Rows(ModelRow()))));
         context.Services.AddSingleton(new PhonePoolSelectDataSource(CreateDb()));
+        context.Services.AddSingleton(new PhoneNumberSelectDataSource(CreateDb(
+            Script.Rows(PhoneNumberRow()), Script.Rows(PhoneNumberRow()), Script.Rows(PhoneNumberRow()))));
         context.Services.AddSingleton(new PersonSelectDataSource(CreateDb(
             Script.Rows(PersonRow()), Script.Rows(PersonRow()), Script.Rows(PersonRow()), Script.Rows(PersonRow()))));
         context.Services.AddKeyedSingleton<DocumentSelectDataSource>("receipt", new DocumentSelectDataSource(CreateDb()));
@@ -198,14 +234,18 @@ public sealed class EquipmentFormTests
         .GetMethod("ValidateBusinessRules", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
         .Invoke(page, null)!;
 
-    private static Dictionary<string, object?> TypeRow() => Script.Row(
+    private static Dictionary<string, object?> TypeRow(bool phones = false) => Script.Row(
         ("КодТипаОборудования", 103), ("ТипОборудования", "Шторы"), ("SNобязателен", (byte)0),
-        ("ЕстьХарактеристикиМонитора", (byte)0), ("ЕстьТелефонныйНомер", (byte)0),
+        ("ЕстьХарактеристикиМонитора", (byte)0), ("ЕстьТелефонныйНомер", phones ? (byte)1 : (byte)0),
         ("ЕстьMACадрес", (byte)0), ("ЕстьСетевоеИмя", (byte)0));
 
     private static Dictionary<string, object?> ModelRow() => Script.Row(
         ("КодМоделиОборудования", 945), ("МодельОборудования", "Шторы"),
         ("КодТипаОборудования", 103), ("Net", 0));
+
+    private static Dictionary<string, object?> PhoneNumberRow() => Script.Row(
+        ("КодТелефонногоНомера", 11), ("Телефон", "101"),
+        ("КодТелефоннойСтанции", 2), ("XorcomName", ""));
 
     private static Dictionary<string, object?> PersonRow() => Script.Row(
         ("КодЛица", 1), ("Кличка", "Тестовая организация"));
@@ -227,6 +267,10 @@ public sealed class EquipmentFormTests
         public bool DeferredInitialLoad { get; set; }
         public int UpdateCalls { get; private set; }
         public List<int> Requests { get; } = [];
+        public List<EquipmentPhoneLink> StoredPhones { get; private set; } = [];
+        public List<(int[] Original, int[] Current)> PhoneSaves { get; } = [];
+        public int UpdateWithPhonesCalls { get; private set; }
+        public int SyncCalls { get; private set; }
         public TaskCompletionSource UpdateCompletion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource InitialLoadCompletion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource InitialLoadReturned { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -242,7 +286,7 @@ public sealed class EquipmentFormTests
             }
             return new EquipmentEntity
             {
-                Id = id, EquipmentTypeId = 103, ModelId = 945, OwnerId = 1,
+                Id = id, EquipmentTypeId = 103, ModelId = 945, OwnerId = 1, LocationId = 55,
                 SerialNumber = $"CLAY_TEST_{id}", Description = $"Copy{id}",
                 ChangedById = 4, ChangedAtUtc = new DateTime(2026, 11, 18, 8, 0, 0),
             };
@@ -261,6 +305,33 @@ public sealed class EquipmentFormTests
             }
             if (SaveException is not null)
                 throw SaveException;
+        }
+
+        public override Task<int?> GetConnectionEquipmentIdAsync(int phoneId, int? employeeId, int locationId) =>
+            Task.FromResult<int?>(8);
+
+        public override Task<IReadOnlyList<EquipmentPhoneLink>> GetPhonesAsync(int equipmentId) =>
+            Task.FromResult<IReadOnlyList<EquipmentPhoneLink>>(StoredPhones.ToList());
+
+        public override Task UpdateWithPhonesAsync(
+            EquipmentEntity equipment,
+            IReadOnlyCollection<EquipmentPhoneLink> original,
+            IReadOnlyCollection<EquipmentPhoneLink> current)
+        {
+            UpdateWithPhonesCalls++;
+            Updated = equipment;
+            StoredPhones = current.ToList();
+            PhoneSaves.Add((original.Select(item => item.PhoneId).ToArray(), current.Select(item => item.PhoneId).ToArray()));
+            return Task.CompletedTask;
+        }
+
+        public override Task<IReadOnlyList<string>> SynchronizePhonesAsync(
+            int equipmentId,
+            IReadOnlyCollection<EquipmentPhoneLink> original,
+            IReadOnlyCollection<EquipmentPhoneLink> current)
+        {
+            SyncCalls++;
+            return Task.FromResult<IReadOnlyList<string>>([]);
         }
 
         public void WaitForGetRequest()
