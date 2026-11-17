@@ -111,7 +111,7 @@ public sealed class EquipmentInsTests
             Assert.False(string.IsNullOrWhiteSpace(input.GetAttribute("placeholder"))));
         page.Find("textarea").Input("CLAY_TEST_Description");
 
-        await page.InvokeAsync(() => FindButton(page, "OK").Click());
+        await InvokeSave(page, true);
 
         page.WaitForAssertion(() => Assert.Equal(1, fixture.Service.CreateCalls), TimeSpan.FromSeconds(3));
         Assert.Equal(103, fixture.Service.Created!.EquipmentTypeId);
@@ -272,24 +272,64 @@ public sealed class EquipmentInsTests
         Assert.Equal(0, CurrentModel(page.Instance).Id);
     }
 
-    /// <summary>Поздний ответ копии A не меняет бухгалтерский признак уже загруженной копии B.</summary>
+    /// <summary>Поздний ответ копии A после его полного завершения не меняет копию B.</summary>
     [Fact]
     public async Task LateCopyLoad_DoesNotPartiallyOverwriteNewCopy()
     {
         var fixture = CreateFixture("http://localhost/Equipment/EquipmentIns?copyId=7");
         fixture.Service.AccountingAvailable = false;
-        fixture.Service.DeferredAccountingPersonId = 1;
         await using var context = fixture.Context;
         var page = context.Render<EquipmentIns>();
+        page.WaitForAssertion(() => Assert.Single(page.FindAll("textarea")), TimeSpan.FromSeconds(3));
+        fixture.Service.DeferredAccountingPersonId = 1;
+        var loadA = InvokeHandler(page, "LoadAsync");
         fixture.Service.WaitForDeferredAccountingRequest();
         fixture.Navigation.NavigateTo("http://localhost/Equipment/EquipmentIns?copyId=8");
         fixture.Service.WaitForSecondAccountingRequest();
         page.WaitForAssertion(() => Assert.Equal("Copy8", CurrentModel(page.Instance).Description),
             TimeSpan.FromSeconds(3));
         fixture.Service.DeferredAccountingCompletion.SetResult(true);
-        await Task.Delay(100);
+        await loadA;
         Assert.False(PrivateBool(page.Instance, "_accountingAvailable"));
         Assert.Equal("Copy8", CurrentModel(page.Instance).Description);
+    }
+
+    /// <summary>Бухучёт из обработчика владельца прежней копии не меняет новую копию с тем же владельцем.</summary>
+    [Fact]
+    public async Task OwnerAccountingFromPreviousCopy_DoesNotOverwriteNewCopy()
+    {
+        var fixture = CreateFixture("http://localhost/Equipment/EquipmentIns?copyId=7");
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentIns>();
+        page.WaitForAssertion(() => Assert.Single(page.FindAll("textarea")), TimeSpan.FromSeconds(3));
+        fixture.Service.DeferredAccountingPersonId = 1;
+        var ownerRequest = InvokeHandler(page, "OnOwnerChangedAsync", 1);
+        fixture.Service.WaitForDeferredAccountingRequest();
+        fixture.Navigation.NavigateTo("http://localhost/Equipment/EquipmentIns?copyId=8");
+        fixture.Service.WaitForSecondAccountingRequest();
+        page.WaitForAssertion(() => Assert.Equal("Copy8", CurrentModel(page.Instance).Description),
+            TimeSpan.FromSeconds(3));
+        fixture.Service.DeferredAccountingCompletion.SetResult(true);
+        await ownerRequest;
+        Assert.False(PrivateBool(page.Instance, "_accountingAvailable"));
+        Assert.Equal("Copy8", CurrentModel(page.Instance).Description);
+    }
+
+    /// <summary>Отмена источника после Dispose завершает загрузку без необработанного исключения.</summary>
+    [Fact]
+    public async Task DisposeDuringLoad_CancellationIsObserved()
+    {
+        var fixture = CreateFixture("http://localhost/Equipment/EquipmentIns?copyId=7");
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentIns>();
+        page.WaitForAssertion(() => Assert.Single(page.FindAll("textarea")), TimeSpan.FromSeconds(3));
+        fixture.Service.DeferredCopy = true;
+        var load = InvokeHandler(page, "LoadAsync");
+        fixture.Service.WaitForCopyRequest();
+        page.Instance.Dispose();
+        fixture.Service.CopyCompletion.SetException(new OperationCanceledException());
+        await load;
+        Assert.True(PrivateBool(page.Instance, "_disposed"));
     }
 
     /// <summary>Escape до завершения первого запроса повторно запрашивает и восстанавливает бухучёт.</summary>
@@ -342,16 +382,20 @@ public sealed class EquipmentInsTests
         if (includeEditUrl)
             configuration["URI_equipment_form"] = "http://localhost/Equipment/EquipmentForm";
         var service = new FakeEquipmentInsService(CreateDb()) { AccountingAvailable = accountingAvailable };
-        var modelSource = new EquipmentModelSelectDataSource(CreateDb(Script.Rows(ModelRow()), Script.Rows(ModelRow())));
+        var modelSource = new EquipmentModelSelectDataSource(CreateDb(
+            Script.Rows(ModelRow()), Script.Rows(ModelRow()), Script.Rows(ModelRow())));
         var receiptDocuments = new FakeDocumentSelectDataSource(CreateDb());
         context.Services.AddSingleton<NavigationManager>(navigation);
         context.Services.AddSingleton<IConfiguration>(configuration);
         context.Services.AddSingleton<EquipmentInsService>(service);
-        context.Services.AddSingleton(new EquipmentTypeSelectDataSource(CreateDb(Script.Rows(TypeRow()), Script.Rows(TypeRow()))));
+        context.Services.AddSingleton(new EquipmentTypeSelectDataSource(CreateDb(
+            Script.Rows(TypeRow()), Script.Rows(TypeRow()), Script.Rows(TypeRow()))));
         context.Services.AddSingleton(modelSource);
         context.Services.AddSingleton(new EmployeeSelectDataSource(CreateDb()));
-        context.Services.AddSingleton(new PersonSelectDataSource(CreateDb(Script.Rows(PersonRow()), Script.Rows(PersonRow()))));
-        context.Services.AddSingleton(new LocationSelectDataSource(CreateDb(Script.Rows(LocationRow()), Script.Rows(LocationRow()))));
+        context.Services.AddSingleton(new PersonSelectDataSource(CreateDb(
+            Script.Rows(PersonRow()), Script.Rows(PersonRow()), Script.Rows(PersonRow()))));
+        context.Services.AddSingleton(new LocationSelectDataSource(CreateDb(
+            Script.Rows(LocationRow()), Script.Rows(LocationRow()), Script.Rows(LocationRow()))));
         context.Services.AddKeyedSingleton<DocumentSelectDataSource>("receipt", receiptDocuments);
         context.Services.AddKeyedSingleton<DocumentSelectDataSource>("accounting", new DocumentSelectDataSource(CreateDb()));
         return new Fixture(context, service, navigation, receiptDocuments);
@@ -410,26 +454,43 @@ public sealed class EquipmentInsTests
             new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly TaskCompletionSource _secondAccountingRequested =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _copyRequested =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
         private int _deferredAccountingCalls;
 
         public FakeEquipmentInsService(DbManager db) : base(db) { }
         public EquipmentEntity? Created { get; private set; }
         public Exception? SaveException { get; set; }
         public bool AccountingAvailable { get; set; }
+        public bool DeferredCopy { get; set; }
         public int? DeferredAccountingPersonId { get; set; }
         public int CreateCalls { get; private set; }
         public List<int> CopyRequests { get; } = [];
         public TaskCompletionSource<bool> DeferredAccountingCompletion { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<EquipmentEntity?> CopyCompletion { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public override Task<EquipmentEntity?> GetForCopyAsync(int id)
         {
             CopyRequests.Add(id);
+            if (DeferredCopy)
+            {
+                _copyRequested.TrySetResult();
+                return CopyCompletion.Task;
+            }
             return Task.FromResult<EquipmentEntity?>(new EquipmentEntity
             {
                 Id = id, EquipmentTypeId = 103, ModelId = 945, OwnerId = 1, LocationId = 1,
                 Description = $"Copy{id}",
             });
+        }
+
+        public void WaitForCopyRequest()
+        {
+            for (var attempt = 0; attempt < 100 && !_copyRequested.Task.IsCompleted; attempt++)
+                Thread.Sleep(10);
+            Assert.True(_copyRequested.Task.IsCompleted, "Отложенный запрос копии не был начат");
         }
 
         public override Task<bool> HasRoleAsync(int roleId) => Task.FromResult(true);
