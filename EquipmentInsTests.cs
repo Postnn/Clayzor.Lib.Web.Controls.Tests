@@ -59,25 +59,21 @@ public sealed class EquipmentInsTests
         Assert.Equal(string.Empty, parameters.Get<string>("@Примечания"));
     }
 
-    /// <summary>MAC очищается от разделителей и проверяется по 12 hex-символам.</summary>
+    /// <summary>MAC принимает форматированный ввод и отклоняет не-hex символы.</summary>
     [Fact]
     public void MacAddress_NormalizesAndValidates()
     {
+        Assert.Equal("001122334455", EquipmentEntity.NormalizeMacAddress("00:11:22:33:44:55"));
         Assert.Equal("001122AABBCC", EquipmentEntity.NormalizeMacAddress("00:11-22 aa.bb.cc"));
+        Assert.True(EquipmentEntity.IsValidMacAddress("00:11:22:33:44:55"));
         Assert.True(EquipmentEntity.IsValidMacAddress("00:11-22 aa.bb.cc"));
         Assert.False(EquipmentEntity.IsValidMacAddress("0011"));
-    }
-
-    /// <summary>Локальное время переводится в UTC со смещением на выбранную дату.</summary>
-    [Theory]
-    [InlineData(120, "2026-07-15T10:00:00Z")]
-    [InlineData(60, "2026-01-15T11:00:00Z")]
-    public void ApplyClientOffset_UsesRecordedDateOffset(int offset, string expected)
-    {
-        var local = new DateTime(2026, offset == 120 ? 7 : 1, 15, 12, 0, 0);
-        var utc = EquipmentIns.ApplyClientOffset(local, offset);
-        Assert.Equal(DateTime.Parse(expected).ToUniversalTime(), utc);
-        Assert.Equal(DateTimeKind.Utc, utc.Kind);
+        Assert.False(EquipmentEntity.IsValidMacAddress("ZZZZ"));
+        Assert.False(EquipmentEntity.IsValidMacAddress("00:11:22:33:44:5Z"));
+        var options = (Clayzor.Lib.Web.Controls.Components.Form.ClayTextBoxOptions)typeof(EquipmentIns)
+            .GetField("_macOptions", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .GetValue(new EquipmentIns())!;
+        Assert.Equal(17, options.MaxLength);
     }
 
     /// <summary>Применить строит URL будущей формы редактирования со статическим id.</summary>
@@ -124,6 +120,8 @@ public sealed class EquipmentInsTests
         Assert.Equal(1, fixture.Service.Created.LocationId);
         Assert.Equal("CLAY_TEST_Description", fixture.Service.Created.Description);
         Assert.Equal(DateTimeKind.Utc, fixture.Service.Created.ReceivedAtUtc.Kind);
+        Assert.Contains(context.JSInterop.Invocations,
+            call => call.Identifier == "clayGridTimeZone.localDateTimeToUtcMilliseconds");
         Assert.Contains(context.JSInterop.Invocations, call => call.Identifier == "clayModelEquipmentForm.refreshOpener");
         Assert.Contains(context.JSInterop.Invocations, call => call.Identifier == "clayModelEquipmentForm.close");
     }
@@ -149,6 +147,128 @@ public sealed class EquipmentInsTests
         Assert.DoesNotContain(context.JSInterop.Invocations, call => call.Identifier == "clayModelEquipmentForm.refreshOpener");
     }
 
+    /// <summary>Отсутствующий URL редактирования обнаруживается до вызова процедуры.</summary>
+    [Fact]
+    public async Task ApplyWithoutEditUrl_DoesNotCreate()
+    {
+        var fixture = CreateFixture("http://localhost/Equipment/EquipmentIns?copyId=7", includeEditUrl: false);
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentIns>();
+        page.WaitForAssertion(() => Assert.Single(page.FindAll("textarea")), TimeSpan.FromSeconds(3));
+        page.Find("textarea").Input("Changed");
+        await InvokeSave(page, false);
+        Assert.Equal(0, fixture.Service.CreateCalls);
+        Assert.Contains("URI_equipment_form", page.Markup);
+    }
+
+    /// <summary>После успешного создания повторный Save не вызывает процедуру повторно.</summary>
+    [Fact]
+    public async Task SecondSaveAfterSuccess_OnlyNavigatesOrCloses()
+    {
+        var fixture = CreateFixture("http://localhost/Equipment/EquipmentIns?copyId=7");
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentIns>();
+        page.WaitForAssertion(() => Assert.Single(page.FindAll("textarea")), TimeSpan.FromSeconds(3));
+        page.Find("textarea").Input("Changed");
+        await InvokeSave(page, false);
+        Assert.Equal(1, fixture.Service.CreateCalls);
+        Assert.EndsWith("/Equipment/EquipmentForm?id=123", fixture.Navigation.Uri);
+        await InvokeSave(page, true);
+        Assert.Equal(1, fixture.Service.CreateCalls);
+        Assert.Contains(context.JSInterop.Invocations, call => call.Identifier == "clayModelEquipmentForm.close");
+    }
+
+    /// <summary>Временный null и Escape не очищают зависимые значения типа и владельца.</summary>
+    [Fact]
+    public async Task TemporaryNullAndEscape_PreserveDependentValues()
+    {
+        var fixture = CreateFixture("http://localhost/Equipment/EquipmentIns?copyId=7", accountingAvailable: true);
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentIns>();
+        page.WaitForAssertion(() => Assert.Single(page.FindAll("textarea")), TimeSpan.FromSeconds(3));
+        var model = CurrentModel(page.Instance);
+        model.NetworkName = "host";
+        model.MacAddress = "001122334455";
+        model.DocumentReceiptOuId = 10;
+        model.ShipperId = 4;
+        model.IsAccounting = true;
+        model.TenantId = 2;
+
+        await InvokeHandler(page, "OnTypeIdChanged", (object?)null);
+        Assert.Equal(945, model.ModelId);
+        Assert.Equal("host", model.NetworkName);
+        Assert.Equal("001122334455", model.MacAddress);
+        await InvokeHandler(page, "OnTypeIdChanged", 103);
+        Assert.Equal(103, model.EquipmentTypeId);
+        Assert.Equal(945, model.ModelId);
+
+        await InvokeHandler(page, "OnOwnerChangedAsync", (object?)null);
+        Assert.Equal(10, model.DocumentReceiptOuId);
+        Assert.Equal(4, model.ShipperId);
+        Assert.Equal(2, model.TenantId);
+        Assert.True(model.IsAccounting);
+        await InvokeHandler(page, "OnOwnerChangedAsync", 1);
+        Assert.Equal(1, model.OwnerId);
+        Assert.Equal(10, model.DocumentReceiptOuId);
+        Assert.Equal(4, model.ShipperId);
+        Assert.Equal(2, model.TenantId);
+    }
+
+    /// <summary>Новая модель сохраняет поддерживаемый MAC и очищает только лишние поля.</summary>
+    [Fact]
+    public async Task ModelChange_PreservesMacSupportedByNewModel()
+    {
+        var fixture = CreateFixture("http://localhost/Equipment/EquipmentIns?copyId=7");
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentIns>();
+        page.WaitForAssertion(() => Assert.Single(page.FindAll("textarea")), TimeSpan.FromSeconds(3));
+        var model = CurrentModel(page.Instance);
+        model.MacAddress = "001122334455";
+        model.MacAddress2 = "66778899AABB";
+        model.MacAddressIlo = "CCDDEEFF0011";
+
+        await InvokeHandler(page, "OnModelIdChanged", 946);
+        Assert.Equal("001122334455", model.MacAddress);
+        await InvokeHandler(page, "OnModelChangedAsync", new EquipmentModel
+        {
+            Id = 946, EquipmentTypeId = 103, NetworkInterfaces = 1,
+        });
+        Assert.Equal("001122334455", model.MacAddress);
+        Assert.Null(model.MacAddress2);
+        Assert.Null(model.MacAddressIlo);
+    }
+
+    /// <summary>Поздняя автоподстановка документа не перезаписывает ручной выбор поставщика.</summary>
+    [Fact]
+    public async Task LateDocumentShipper_DoesNotOverwriteManualSelection()
+    {
+        var fixture = CreateFixture("http://localhost/Equipment/EquipmentIns?copyId=7");
+        fixture.ReceiptDocuments.DeferredShipper = true;
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentIns>();
+        page.WaitForAssertion(() => Assert.Single(page.FindAll("textarea")), TimeSpan.FromSeconds(3));
+        var pending = InvokeHandler(page, "OnReceiptDocumentChangedAsync", 10);
+        fixture.ReceiptDocuments.WaitForShipperRequest();
+        await InvokeHandler(page, "OnShipperChanged", 99);
+        fixture.ReceiptDocuments.ShipperCompletion.SetResult(4);
+        await pending;
+        Assert.Equal(99, CurrentModel(page.Instance).ShipperId);
+    }
+
+    /// <summary>Смена copyId на том же экземпляре компонента запускает новую загрузку.</summary>
+    [Fact]
+    public async Task CopyIdChange_ReloadsSameComponentInstance()
+    {
+        var fixture = CreateFixture("http://localhost/Equipment/EquipmentIns?copyId=7");
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentIns>();
+        page.WaitForAssertion(() => Assert.Single(page.FindAll("textarea")), TimeSpan.FromSeconds(3));
+        fixture.Navigation.NavigateTo("http://localhost/Equipment/EquipmentIns?copyId=8");
+        await InvokeHandler(page, "OnParametersSetAsync");
+        Assert.Equal([7, 8], fixture.Service.CopyRequests);
+        Assert.Equal(0, CurrentModel(page.Instance).Id);
+    }
+
     /// <summary>При доступном бухучёте арендатор и бухгалтерский документ присутствуют с подсказками.</summary>
     [Fact]
     public async Task AccountingAvailable_ShowsTenantAndDocumentPlaceholders()
@@ -163,33 +283,34 @@ public sealed class EquipmentInsTests
         }, TimeSpan.FromSeconds(3));
     }
 
-    private static Fixture CreateFixture(string uri, bool accountingAvailable = false)
+    private static Fixture CreateFixture(string uri, bool accountingAvailable = false, bool includeEditUrl = true)
     {
         DapperColumnMapper.Initialize();
         var context = new BunitContext();
         context.JSInterop.Mode = JSRuntimeMode.Loose;
         context.JSInterop.Setup<int>("clayGridTimeZone.getOffsetMinutes", _ => true).SetResult(180);
+        context.JSInterop.Setup<long>("clayGridTimeZone.localDateTimeToUtcMilliseconds", _ => true).SetResult(0L);
         context.Services.AddMudServices();
         context.Services.AddMudExtensions();
         var navigation = new FakeNavigationManager();
         navigation.NavigateTo(uri);
-        var configuration = new ConfigurationManager
-        {
-            ["URI_equipment_form"] = "http://localhost:5020/Equipment/EquipmentForm",
-        };
+        var configuration = new ConfigurationManager();
+        if (includeEditUrl)
+            configuration["URI_equipment_form"] = "http://localhost/Equipment/EquipmentForm";
         var service = new FakeEquipmentInsService(CreateDb()) { AccountingAvailable = accountingAvailable };
-        var modelSource = new EquipmentModelSelectDataSource(CreateDb(Script.Rows(ModelRow())));
+        var modelSource = new EquipmentModelSelectDataSource(CreateDb(Script.Rows(ModelRow()), Script.Rows(ModelRow())));
+        var receiptDocuments = new FakeDocumentSelectDataSource(CreateDb());
         context.Services.AddSingleton<NavigationManager>(navigation);
         context.Services.AddSingleton<IConfiguration>(configuration);
         context.Services.AddSingleton<EquipmentInsService>(service);
-        context.Services.AddSingleton(new EquipmentTypeSelectDataSource(CreateDb(Script.Rows(TypeRow()))));
+        context.Services.AddSingleton(new EquipmentTypeSelectDataSource(CreateDb(Script.Rows(TypeRow()), Script.Rows(TypeRow()))));
         context.Services.AddSingleton(modelSource);
         context.Services.AddSingleton(new EmployeeSelectDataSource(CreateDb()));
-        context.Services.AddSingleton(new PersonSelectDataSource(CreateDb(Script.Rows(PersonRow()))));
-        context.Services.AddSingleton(new LocationSelectDataSource(CreateDb(Script.Rows(LocationRow()))));
-        context.Services.AddKeyedSingleton<DocumentSelectDataSource>("receipt", new DocumentSelectDataSource(CreateDb()));
+        context.Services.AddSingleton(new PersonSelectDataSource(CreateDb(Script.Rows(PersonRow()), Script.Rows(PersonRow()))));
+        context.Services.AddSingleton(new LocationSelectDataSource(CreateDb(Script.Rows(LocationRow()), Script.Rows(LocationRow()))));
+        context.Services.AddKeyedSingleton<DocumentSelectDataSource>("receipt", receiptDocuments);
         context.Services.AddKeyedSingleton<DocumentSelectDataSource>("accounting", new DocumentSelectDataSource(CreateDb()));
-        return new Fixture(context, service);
+        return new Fixture(context, service, navigation, receiptDocuments);
     }
 
     private static DbManager CreateDb(params ScriptEntry[] entries) =>
@@ -197,6 +318,24 @@ public sealed class EquipmentInsTests
 
     private static AngleSharp.Dom.IElement FindButton(IRenderedComponent<EquipmentIns> page, string text) =>
         page.FindAll("button").Single(button => button.TextContent.Trim() == text);
+
+    private static EquipmentEntity CurrentModel(EquipmentIns page) =>
+        (EquipmentEntity)typeof(EquipmentIns).GetField("_model",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(page)!;
+
+    private static Task InvokeSave(IRenderedComponent<EquipmentIns> page, bool close) =>
+        InvokeHandler(page, "SaveAsync", close);
+
+    private static async Task InvokeHandler(IRenderedComponent<EquipmentIns> page, string name, params object?[] args)
+    {
+        await page.InvokeAsync(async () =>
+        {
+            var method = typeof(EquipmentIns).GetMethod(name,
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+            if (method.Invoke(page.Instance, args) is Task task)
+                await task;
+        });
+    }
 
     private static Dictionary<string, object?> TypeRow() => Script.Row(
         ("КодТипаОборудования", 103), ("ТипОборудования", "Шторы"), ("SNобязателен", (byte)0));
@@ -211,7 +350,11 @@ public sealed class EquipmentInsTests
     private static Dictionary<string, object?> LocationRow() => Script.Row(
         ("КодРасположения", 1), ("РасположениеPath1", "CLAY_TEST / Room"));
 
-    private sealed record Fixture(BunitContext Context, FakeEquipmentInsService Service);
+    private sealed record Fixture(
+        BunitContext Context,
+        FakeEquipmentInsService Service,
+        FakeNavigationManager Navigation,
+        FakeDocumentSelectDataSource ReceiptDocuments);
 
     private sealed class FakeEquipmentInsService : EquipmentInsService
     {
@@ -220,9 +363,14 @@ public sealed class EquipmentInsTests
         public Exception? SaveException { get; set; }
         public bool AccountingAvailable { get; set; }
         public int CreateCalls { get; private set; }
+        public List<int> CopyRequests { get; } = [];
 
-        public override Task<EquipmentEntity?> GetForCopyAsync(int id) => Task.FromResult<EquipmentEntity?>(
-            new EquipmentEntity { Id = id, EquipmentTypeId = 103, ModelId = 945, OwnerId = 1, LocationId = 1 });
+        public override Task<EquipmentEntity?> GetForCopyAsync(int id)
+        {
+            CopyRequests.Add(id);
+            return Task.FromResult<EquipmentEntity?>(
+                new EquipmentEntity { Id = id, EquipmentTypeId = 103, ModelId = 945, OwnerId = 1, LocationId = 1 });
+        }
 
         public override Task<bool> HasRoleAsync(int roleId) => Task.FromResult(true);
         public override Task<bool> CanUseAccountingAsync(int? personId) => Task.FromResult(AccountingAvailable);
@@ -234,6 +382,32 @@ public sealed class EquipmentInsTests
                 throw SaveException;
             Created = equipment;
             return Task.FromResult(123);
+        }
+    }
+
+    private sealed class FakeDocumentSelectDataSource : DocumentSelectDataSource
+    {
+        private readonly TaskCompletionSource _shipperRequested =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public FakeDocumentSelectDataSource(DbManager db) : base(db) { }
+        public bool DeferredShipper { get; set; }
+        public TaskCompletionSource<int?> ShipperCompletion { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public override Task<int?> GetSingleShipperIdAsync(int documentId, int ownerId)
+        {
+            if (!DeferredShipper)
+                return Task.FromResult<int?>(4);
+            _shipperRequested.TrySetResult();
+            return ShipperCompletion.Task;
+        }
+
+        public void WaitForShipperRequest()
+        {
+            for (var attempt = 0; attempt < 100 && !_shipperRequested.Task.IsCompleted; attempt++)
+                Thread.Sleep(10);
+            Assert.True(_shipperRequested.Task.IsCompleted, "Запрос поставщика не был начат");
         }
     }
 }
