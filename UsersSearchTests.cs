@@ -86,4 +86,50 @@ public sealed class UsersSearchTests
             .Select(field => field.Find("input").GetAttribute("value")).ToList();
         Assert.Equal(["4", "Тестов Оператор", "Test Operator"], values);
     }
+
+    /// <summary>
+    /// Смена id на той же странице загружает нового сотрудника, а поздний ответ прежнего запроса его не перезаписывает.
+    /// </summary>
+    [Fact]
+    public async Task EmployeeDetails_IdChangeIgnoresLatePreviousResult()
+    {
+        DapperColumnMapper.Initialize();
+        var firstResponse = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([
+            new ScriptEntry
+            {
+                Rows = [Script.Row(("КодСотрудника", 4), ("Сотрудник", "Тестов Оператор"), ("Employee", "Test Operator"))],
+                Gate = firstResponse.Task,
+            },
+            Script.Rows(Script.Row(("КодСотрудника", 5), ("Сотрудник", "Проверочкин Рецензент"), ("Employee", "Review User"))),
+        ]));
+        await using var ctx = new BunitContext();
+        ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+        ctx.Services.AddMudServices();
+        ctx.Services.AddMudExtensions();
+        var errorService = new ClayErrorService();
+        ctx.Services.AddSingleton<ClayErrorService>(errorService);
+        ctx.Services.AddSingleton<ISqlErrorHandler>(errorService);
+        ctx.Services.AddSingleton(new ClayAppSettings());
+        ctx.Services.AddSingleton<IConfiguration>(new ConfigurationBuilder().Build());
+        ctx.Services.AddSingleton(new DbManager("Server=test", errorService, () => connection));
+        var navigation = new FakeNavigationManager();
+        navigation.NavigateTo("http://localhost/user?id=4");
+        ctx.Services.AddSingleton<NavigationManager>(navigation);
+
+        var page = ctx.Render<EmployeeDetails>();
+        var originalInstance = page.Instance;
+        for (var attempt = 0; attempt < 20 && connection.CommandLog.Count == 0; attempt++)
+            await Task.Delay(50);
+        Assert.Single(connection.CommandLog);
+
+        await page.InvokeAsync(() => navigation.NavigateTo("http://localhost/user?id=5"));
+        firstResponse.SetResult();
+
+        page.WaitForAssertion(() => Assert.Contains("Проверочкин Рецензент", page.Markup));
+        Assert.Same(originalInstance, page.Instance);
+        Assert.Equal(5, page.Instance.Id);
+        Assert.Equal(2, connection.CommandLog.Count);
+        Assert.DoesNotContain("Тестов Оператор", page.Markup);
+    }
 }
