@@ -111,6 +111,8 @@ public sealed class EquipmentInsTests
         await using var context = fixture.Context;
         var page = context.Render<EquipmentIns>();
         page.WaitForAssertion(() => Assert.Single(page.FindAll("textarea")), TimeSpan.FromSeconds(3));
+        Assert.All(page.FindAll(".clay-select-input"), input =>
+            Assert.False(string.IsNullOrWhiteSpace(input.GetAttribute("placeholder"))));
         page.Find("textarea").Input("CLAY_TEST_Description");
 
         await page.InvokeAsync(() => FindButton(page, "OK").Click());
@@ -135,6 +137,8 @@ public sealed class EquipmentInsTests
         await using var context = fixture.Context;
         var page = context.Render<EquipmentIns>();
         page.WaitForAssertion(() => Assert.Single(page.FindAll("textarea")), TimeSpan.FromSeconds(3));
+        Assert.All(page.FindAll(".clay-select-input"), input =>
+            Assert.False(string.IsNullOrWhiteSpace(input.GetAttribute("placeholder"))));
         page.Find("textarea").Input("CLAY_TEST_Description");
 
         await page.InvokeAsync(() => FindButton(page, "OK").Click());
