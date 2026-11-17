@@ -40,6 +40,7 @@ public sealed class UsersSearchTests
         ctx.Services.AddSingleton(new ClayAppSettings());
         ctx.Services.AddSingleton<IConfiguration>(new ConfigurationBuilder().Build());
         ctx.Services.AddSingleton(new DbManager("Server=test", errorService, () => connection));
+        ctx.Services.AddSingleton(new Clayzor.Lib.Web.Controls.Services.ClayFormWindowService(ctx.JSInterop.JSRuntime));
         var navigation = new FakeNavigationManager();
         navigation.NavigateTo("http://localhost/search?return=1&requestId=request-1&search=Примеров");
         ctx.Services.AddSingleton<NavigationManager>(navigation);

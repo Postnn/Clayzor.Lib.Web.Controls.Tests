@@ -57,6 +57,8 @@ public class ClayGridReinitTests : IDisposable
         _ctx.Services.AddSingleton<IConfiguration>(new ConfigurationBuilder().Build());
         _ctx.Services.AddSingleton(Options.Create(_settings));
         _ctx.Services.AddSingleton<IJSRuntime>(new FakeJSRuntime());
+        _ctx.Services.AddSingleton<Clayzor.Lib.Web.Controls.Services.ClayFormWindowService>(sp =>
+            new(sp.GetRequiredService<IJSRuntime>()));
         _nav = new FakeNavigationManager();
         _ctx.Services.AddSingleton<NavigationManager>(_nav);
         var conn = new ScriptedConnection(_globalQueue);
