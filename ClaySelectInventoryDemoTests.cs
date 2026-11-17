@@ -1,11 +1,9 @@
 using Bunit;
 using Clayzor.Lib.DALC;
 using Clayzor.Lib.Entities.Inventory;
-using Clayzor.Lib.Entities.MedicalTests;
 using Clayzor.Lib.Web.Controls.Components.Select;
 using Clayzor.Lib.Web.DBSelect.Employees;
 using Clayzor.Lib.Web.DBSelect.Equipment;
-using Kesco.App.Web.Inventory.Components.Dialogs;
 using Kesco.App.Web.Inventory.Components.Pages;
 using Microsoft.AspNetCore.Components;
 using Microsoft.Extensions.DependencyInjection;
@@ -37,13 +35,14 @@ public sealed class ClaySelectInventoryDemoTests
             builder.AddAttribute(1, "DataSource", currentSource);
             builder.AddAttribute(2, "ValueSelector", (Func<Employee, int?>)(item => item.Id));
             builder.AddAttribute(3, "TextSelector", (Func<Employee, string>)(item => item.Name));
-            builder.AddAttribute(4, "Options", new ClaySelectOptions { DebounceInterval = 0, AutoSelectExactMatch = false });
+            builder.AddAttribute(4, "Options", new ClaySelectOptions { AutoSelectExactMatch = false });
             builder.CloseComponent();
         };
         var host = ctx.Render<MudForm>(parameters => parameters.Add(component => component.ChildContent, content));
         var oldSelect = host.FindComponent<ClaySelect<Employee, int?>>();
         oldSelect.Find(".clay-select-button").Click();
         oldSelect.Find("input").Input("old");
+        oldSelect.Find("input").KeyDown(new Microsoft.AspNetCore.Components.Web.KeyboardEventArgs { Key = "Enter" });
 
         key = 2;
         currentSource = new DeferredEmployeeSource();
@@ -78,34 +77,36 @@ public sealed class ClaySelectInventoryDemoTests
     }
 
     /// <summary>
-    /// Начальная загрузка диалога отображает сотрудников без дополнительного клика.
+    /// Уход со страницы отменяет браузерный запрос, а поздний ответ не возвращает фокус в уничтоженный компонент.
     /// </summary>
     [Fact]
-    public async Task EmployeeDialog_InitialLoadRendersResults()
+    public async Task PageDisposal_CancelsExternalSearchAndIgnoresLateResult()
     {
-        DapperColumnMapper.Initialize();
-        var entries = new Queue<ScriptEntry>([
-            Script.Rows(Script.Row(
-                ("КодСотрудника", 1),
-                ("Сотрудник", "Иван Иванов"),
-                ("Employee", "Ivan Ivanov"))),
-        ]);
-        var ctx = CreateContext(CreateDb(entries));
-        var provider = ctx.Render<MudDialogProvider>();
-        var service = ctx.Services.GetRequiredService<IDialogService>();
+        using var ctx = CreateContext(CreateDb(new Queue<ScriptEntry>([Script.Rows()])));
+        var page = ctx.Render<SelectTest>();
+        var select = page.FindComponent<ClaySelect<Employee, int?>>();
+        select.Find(".clay-select-button").Click();
+        select.Find(".clay-select-advanced").Click();
+        var open = ctx.JSInterop.Invocations.Single(item => item.Identifier == "claySelectAdvancedSearch.open");
+        var requestId = (string)open.Arguments[1]!;
+        var service = ctx.Services.GetRequiredService<Clayzor.Lib.Web.Controls.Services.ClaySelectAdvancedSearchService>();
+        var focusCount = ctx.JSInterop.Invocations.Count(item => item.Identifier == "focus");
 
-        await provider.InvokeAsync(async () =>
+        page.Instance.Dispose();
+        page.Dispose();
+        var cancelled = false;
+        for (var attempt = 0; attempt < 20 && !cancelled; attempt++)
         {
-            var parameters = new DialogParameters<EmployeeSearchDialog>
-            {
-                { dialog => dialog.InitialSearch, "Иван" },
-            };
-            await service.ShowAsync<EmployeeSearchDialog>("Поиск сотрудника", parameters);
-        });
+            cancelled = await page.InvokeAsync(() => ctx.JSInterop.Invocations.Any(item =>
+                item.Identifier == "claySelectAdvancedSearch.cancel" && Equals(item.Arguments[0], requestId)));
+            if (!cancelled)
+                await Task.Delay(50);
+        }
+        Assert.True(cancelled);
+        using var document = System.Text.Json.JsonDocument.Parse("3");
+        await service.CompleteAsync(requestId, document.RootElement.Clone());
 
-        provider.WaitForAssertion(() => Assert.Contains("Иван Иванов", provider.Markup));
-        await ctx.Services.DisposeAsync();
-        ctx.Dispose();
+        Assert.Equal(focusCount, ctx.JSInterop.Invocations.Count(item => item.Identifier == "focus"));
     }
 
     private static TestContext CreateContext(DbManager db)
@@ -117,6 +118,13 @@ public sealed class ClaySelectInventoryDemoTests
         ctx.Services.AddSingleton(db);
         ctx.Services.AddSingleton(new EquipmentTypeSelectDataSource(db));
         ctx.Services.AddSingleton(new EmployeeSelectDataSource(db));
+        var configuration = new Microsoft.Extensions.Configuration.ConfigurationManager
+        {
+            ["URI_user_search"] = "http://localhost:5030/search",
+            ["URI_user_form"] = "http://localhost:5030/user",
+        };
+        ctx.Services.AddSingleton<Microsoft.Extensions.Configuration.IConfiguration>(configuration);
+        ctx.Services.AddSingleton(new Clayzor.Lib.Web.Controls.Services.ClaySelectAdvancedSearchService(ctx.JSInterop.JSRuntime));
         return ctx;
     }
 

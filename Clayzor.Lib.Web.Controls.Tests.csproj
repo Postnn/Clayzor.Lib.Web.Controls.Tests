@@ -24,5 +24,6 @@
     <ProjectReference Include="..\..\src\Clayzor.Lib.Web.Controls\Clayzor.Lib.Web.Controls.csproj" />
     <ProjectReference Include="..\..\src\Clayzor.Lib.Web.DBSelect\Clayzor.Lib.Web.DBSelect.csproj" />
     <ProjectReference Include="..\..\src\Kesco.App.Web.Inventory\Kesco.App.Web.Inventory.csproj" />
+    <ProjectReference Include="..\..\src\Kesco.App.Web.Users\Kesco.App.Web.Users.csproj" />
   </ItemGroup>
 </Project>
