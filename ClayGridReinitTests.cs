@@ -282,6 +282,12 @@ internal sealed class FakeNavigationManager : NavigationManager
     public FakeNavigationManager() => Initialize("http://localhost/", "http://localhost/");
     public void NavigateTo(string uri) { Uri = uri; NotifyLocationChanged(false); }
     protected override void NavigateToCore(string uri, bool forceLoad) => Uri = uri;
+    protected override void NavigateToCore(string uri, NavigationOptions options)
+    {
+        Uri = ToAbsoluteUri(uri).ToString();
+        NotifyLocationChanged(false);
+    }
+    protected override void SetNavigationLockState(bool value) { }
 }
 
 internal sealed class FakeJSRuntime : IJSRuntime
