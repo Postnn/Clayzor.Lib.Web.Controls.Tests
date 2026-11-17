@@ -35,13 +35,14 @@ public sealed class ClaySelectInventoryDemoTests
             builder.AddAttribute(1, "DataSource", currentSource);
             builder.AddAttribute(2, "ValueSelector", (Func<Employee, int?>)(item => item.Id));
             builder.AddAttribute(3, "TextSelector", (Func<Employee, string>)(item => item.Name));
-            builder.AddAttribute(4, "Options", new ClaySelectOptions { DebounceInterval = 0, AutoSelectExactMatch = false });
+            builder.AddAttribute(4, "Options", new ClaySelectOptions { AutoSelectExactMatch = false });
             builder.CloseComponent();
         };
         var host = ctx.Render<MudForm>(parameters => parameters.Add(component => component.ChildContent, content));
         var oldSelect = host.FindComponent<ClaySelect<Employee, int?>>();
         oldSelect.Find(".clay-select-button").Click();
         oldSelect.Find("input").Input("old");
+        oldSelect.Find("input").KeyDown(new Microsoft.AspNetCore.Components.Web.KeyboardEventArgs { Key = "Enter" });
 
         key = 2;
         currentSource = new DeferredEmployeeSource();
@@ -75,6 +76,35 @@ public sealed class ClaySelectInventoryDemoTests
         Assert.Null(secondSource.Filter.EquipmentTypeId);
     }
 
+    /// <summary>
+    /// Уход со страницы отменяет браузерный запрос, а поздний ответ не возвращает фокус в уничтоженный компонент.
+    /// </summary>
+    [Fact]
+    public async Task PageDisposal_CancelsExternalSearchAndIgnoresLateResult()
+    {
+        using var ctx = CreateContext(CreateDb(new Queue<ScriptEntry>([Script.Rows()])));
+        var page = ctx.Render<SelectTest>();
+        var select = page.FindComponent<ClaySelect<Employee, int?>>();
+        select.Find(".clay-select-button").Click();
+        select.Find(".clay-select-advanced").Click();
+        var open = ctx.JSInterop.Invocations.Single(item => item.Identifier == "claySelectAdvancedSearch.open");
+        var requestId = (string)open.Arguments[1]!;
+        var service = ctx.Services.GetRequiredService<Clayzor.Lib.Web.Controls.Services.ClaySelectAdvancedSearchService>();
+        var focusCount = ctx.JSInterop.Invocations.Count(item => item.Identifier == "focus");
+
+        page.Instance.Dispose();
+        page.Dispose();
+        for (var attempt = 0; attempt < 20 && !ctx.JSInterop.Invocations.Any(item =>
+                 item.Identifier == "claySelectAdvancedSearch.cancel" && Equals(item.Arguments[0], requestId)); attempt++)
+            await Task.Delay(50);
+        Assert.Contains(ctx.JSInterop.Invocations, item =>
+            item.Identifier == "claySelectAdvancedSearch.cancel" && Equals(item.Arguments[0], requestId));
+        using var document = System.Text.Json.JsonDocument.Parse("3");
+        await service.CompleteAsync(requestId, document.RootElement.Clone());
+
+        Assert.Equal(focusCount, ctx.JSInterop.Invocations.Count(item => item.Identifier == "focus"));
+    }
+
     private static TestContext CreateContext(DbManager db)
     {
         var ctx = new TestContext();
@@ -84,8 +114,11 @@ public sealed class ClaySelectInventoryDemoTests
         ctx.Services.AddSingleton(db);
         ctx.Services.AddSingleton(new EquipmentTypeSelectDataSource(db));
         ctx.Services.AddSingleton(new EmployeeSelectDataSource(db));
-        ctx.Services.AddSingleton<Microsoft.Extensions.Configuration.IConfiguration>(
-            new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build());
+        var configuration = new Microsoft.Extensions.Configuration.ConfigurationManager
+        {
+            ["Users:SearchUrl"] = "http://localhost:5030/search",
+        };
+        ctx.Services.AddSingleton<Microsoft.Extensions.Configuration.IConfiguration>(configuration);
         ctx.Services.AddSingleton(new Clayzor.Lib.Web.Controls.Services.ClaySelectAdvancedSearchService(ctx.JSInterop.JSRuntime));
         return ctx;
     }

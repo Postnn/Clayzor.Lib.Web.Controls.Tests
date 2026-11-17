@@ -53,5 +53,49 @@ public sealed class ClaySelectAdvancedSearchServiceTests : IDisposable
         await service.CancelAsync(requestId);
 
         Assert.Null(await pending);
+        AssertCancelInvocation(requestId);
+    }
+
+    /// <summary>
+    /// Отмена токена завершает C#-ожидание и удаляет браузерную часть запроса.
+    /// </summary>
+    [Fact]
+    public async Task CancellationToken_CancelsBrowserRequest()
+    {
+        var service = new ClaySelectAdvancedSearchService(_ctx.JSInterop.JSRuntime);
+        using var cts = new CancellationTokenSource();
+        var pending = service.OpenAsync<Employee, int?>("http://localhost:5030/search", cts.Token);
+        var invocation = _ctx.JSInterop.Invocations.Single(item => item.Identifier == "claySelectAdvancedSearch.open");
+        var requestId = (string)invocation.Arguments[1]!;
+
+        await cts.CancelAsync();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => pending);
+        AssertCancelInvocation(requestId);
+    }
+
+    /// <summary>
+    /// Освобождение сервиса очищает JS и завершает ожидание отменой.
+    /// </summary>
+    [Fact]
+    public async Task Dispose_CancelsBrowserRequestAndCompletesPendingWait()
+    {
+        var service = new ClaySelectAdvancedSearchService(_ctx.JSInterop.JSRuntime);
+        var pending = service.OpenAsync<Employee, int?>("http://localhost:5030/search");
+        var invocation = _ctx.JSInterop.Invocations.Single(item => item.Identifier == "claySelectAdvancedSearch.open");
+        var requestId = (string)invocation.Arguments[1]!;
+
+        await service.DisposeAsync();
+
+        Assert.Null(await pending);
+        AssertCancelInvocation(requestId);
+        await Assert.ThrowsAsync<ObjectDisposedException>(() =>
+            service.OpenAsync<Employee, int?>("http://localhost:5030/search"));
+    }
+
+    private void AssertCancelInvocation(string requestId)
+    {
+        Assert.Contains(_ctx.JSInterop.Invocations, item =>
+            item.Identifier == "claySelectAdvancedSearch.cancel" && Equals(item.Arguments[0], requestId));
     }
 }
