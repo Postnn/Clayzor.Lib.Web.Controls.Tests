@@ -29,6 +29,24 @@ public sealed class ClayFormControlsTests
         Assert.Contains("mud-input-outlined", cut.Markup);
     }
 
+    /// <summary>Нулевой MaxLength означает отсутствие прикладного ограничения и разрешает ручной ввод.</summary>
+    [Fact]
+    public void TextArea_ZeroMaxLength_DoesNotProduceZeroHtmlLimit()
+    {
+        using var ctx = new BunitContext();
+        ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+        ctx.Services.AddMudServices();
+        string? value = null;
+        var cut = ctx.Render<ClayTextArea>(parameters => parameters
+            .Add(component => component.ValueChanged, newValue => value = newValue)
+            .Add(component => component.Options, new ClayTextAreaOptions { MaxLength = 0 }));
+
+        cut.Find("textarea").Input("template");
+
+        Assert.Equal("template", value);
+        Assert.Equal(int.MaxValue.ToString(), cut.Find("textarea").GetAttribute("maxlength"));
+    }
+
     /// <summary>Changed показывает сотрудника и дату существующей записи.</summary>
     [Fact]
     public void Changed_ShowsEmployeeAndDate()

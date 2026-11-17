@@ -89,6 +89,20 @@ public class DbManagerConnectivityBehavioralTests
         Assert.Equal(1, handler.CallCount);
     }
 
+    /// <summary>Пишущий scalar-метод не превращает потерю соединения в default(T).</summary>
+    [Fact]
+    public async Task ExecuteWriteScalarAsync_Connectivity_ThrowsNotDefault()
+    {
+        var handler = new CountingHandler();
+        var db = CreateDb(handler);
+
+        var ex = await Assert.ThrowsAsync<SqlException>(() =>
+            db.ExecuteWriteScalarAsync<int>("INSERT INTO t VALUES (1); SELECT 0"));
+
+        Assert.Equal(1, handler.CallCount);
+        Assert.True(DbManager.IsConnectivityError(ex));
+    }
+
     // ═══ Read tests ═══
 
     [Fact]

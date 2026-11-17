@@ -25,6 +25,19 @@ public sealed class EquipmentModelPersistenceTests
         Assert.Contains("CAST(@@IDENTITY AS int)", sql);
     }
 
+    /// <summary>Нулевой или отсутствующий ID после INSERT считается ошибкой, а не успешным сохранением.</summary>
+    [Fact]
+    public async Task InsertWithoutCreatedId_Throws()
+    {
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Scalar(0)]));
+        var model = new EquipmentModel { EquipmentTypeId = 5, Name = "Created", PartNumber = "PN-1" };
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => model.SaveAsync(CreateDb(connection)));
+
+        Assert.Contains("не вернула идентификатор", error.Message);
+        Assert.Equal(0, model.Id);
+    }
+
     /// <summary>Существующая модель обновляется без INSERT.</summary>
     [Fact]
     public async Task Update_UsesParameterizedUpdate()
