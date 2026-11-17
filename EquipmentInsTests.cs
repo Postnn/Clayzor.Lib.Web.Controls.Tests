@@ -149,7 +149,21 @@ public sealed class EquipmentInsTests
         Assert.DoesNotContain(context.JSInterop.Invocations, call => call.Identifier == "clayModelEquipmentForm.refreshOpener");
     }
 
-    private static Fixture CreateFixture(string uri)
+    /// <summary>При доступном бухучёте арендатор и бухгалтерский документ присутствуют с подсказками.</summary>
+    [Fact]
+    public async Task AccountingAvailable_ShowsTenantAndDocumentPlaceholders()
+    {
+        var fixture = CreateFixture("http://localhost/Equipment/EquipmentIns?copyId=7", accountingAvailable: true);
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentIns>();
+        page.WaitForAssertion(() =>
+        {
+            Assert.Single(page.FindAll("input[placeholder='Введите арендатора']"));
+            Assert.Equal(2, page.FindAll("input[placeholder='Введите документ поступления']").Count);
+        }, TimeSpan.FromSeconds(3));
+    }
+
+    private static Fixture CreateFixture(string uri, bool accountingAvailable = false)
     {
         DapperColumnMapper.Initialize();
         var context = new BunitContext();
@@ -163,7 +177,7 @@ public sealed class EquipmentInsTests
         {
             ["URI_equipment_form"] = "http://localhost:5020/Equipment/EquipmentForm",
         };
-        var service = new FakeEquipmentInsService(CreateDb());
+        var service = new FakeEquipmentInsService(CreateDb()) { AccountingAvailable = accountingAvailable };
         var modelSource = new EquipmentModelSelectDataSource(CreateDb(Script.Rows(ModelRow())));
         context.Services.AddSingleton<NavigationManager>(navigation);
         context.Services.AddSingleton<IConfiguration>(configuration);
@@ -204,13 +218,14 @@ public sealed class EquipmentInsTests
         public FakeEquipmentInsService(DbManager db) : base(db) { }
         public EquipmentEntity? Created { get; private set; }
         public Exception? SaveException { get; set; }
+        public bool AccountingAvailable { get; set; }
         public int CreateCalls { get; private set; }
 
         public override Task<EquipmentEntity?> GetForCopyAsync(int id) => Task.FromResult<EquipmentEntity?>(
             new EquipmentEntity { Id = id, EquipmentTypeId = 103, ModelId = 945, OwnerId = 1, LocationId = 1 });
 
         public override Task<bool> HasRoleAsync(int roleId) => Task.FromResult(true);
-        public override Task<bool> CanUseAccountingAsync(int? personId) => Task.FromResult(false);
+        public override Task<bool> CanUseAccountingAsync(int? personId) => Task.FromResult(AccountingAvailable);
 
         public override Task<int> CreateAsync(EquipmentEntity equipment)
         {
