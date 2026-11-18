@@ -3,6 +3,8 @@ using Clayzor.Lib.DALC;
 using Clayzor.Lib.Entities.Inventory;
 using Clayzor.Lib.Entities.MedicalTests;
 using Clayzor.Lib.Web.Controls.Components.Select;
+using Clayzor.Lib.Web.Controls.Services;
+using Clayzor.Lib.Web.Settings;
 using Clayzor.Lib.Web.DBSelect.Documents;
 using Clayzor.Lib.Web.DBSelect.Employees;
 using Clayzor.Lib.Web.DBSelect.Equipment;
@@ -162,13 +164,8 @@ public sealed class EquipmentFormTests
         var page = context.Render<EquipmentForm>();
         WaitForSn(page, "CLAY_TEST_7");
         SetPrivate(page.Instance, "_phoneToAdd", 11);
-        await page.InvokeAsync(async () =>
-        {
-            var method = typeof(EquipmentForm).GetMethod("AddPhoneAsync",
-                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
-            if (method.Invoke(page.Instance, null) is Task task)
-                await task;
-        });
+        page.Render();
+        page.Find("#equipment-phones thead th button").Click();
         page.WaitForAssertion(() => Assert.Contains("101", page.Markup));
         Assert.Equal(8, ((List<EquipmentPhoneLink>)GetPrivate(page.Instance, "_phones")!)[0].ConnectionEquipmentId);
 
@@ -608,11 +605,11 @@ public sealed class EquipmentFormTests
         await using var context = fixture.Context;
         var page = context.Render<EquipmentForm>();
         WaitForSn(page, "CLAY_TEST_7");
-        Assert.Contains("Учётные записи", page.Markup);
+        Assert.NotNull(page.Find("#equipment-accounts"));
 
         fixture.Service.Roles.Remove(102);
         await InvokeHandler(page, "LoadCurrentAsync", 7);
-        Assert.DoesNotContain("Учётные записи", page.Markup);
+        Assert.Empty(page.FindAll("#equipment-accounts"));
     }
 
     /// <summary>Команда рабочей сети требует компьютерную характеристику и роль 103.</summary>
@@ -644,7 +641,7 @@ public sealed class EquipmentFormTests
         fixture.Service.RoleForPersonResult = false;
         await InvokeHandler(page, "LoadCurrentAsync", 7);
         Assert.DoesNotContain("Подключить UPS:", page.Markup);
-        Assert.Contains("Подключённые UPS", page.Markup);
+        Assert.NotNull(page.Find("#equipment-ups"));
     }
 
     /// <summary>Бухгалтерская секция доступна для чтения при отсутствии права изменения.</summary>
@@ -658,8 +655,8 @@ public sealed class EquipmentFormTests
         var page = context.Render<EquipmentForm>();
         WaitForSn(page, "CLAY_TEST_7");
 
-        Assert.Contains("Бухгалтерский учёт", page.Markup);
-        Assert.Contains("Read only owner", page.Markup);
+        Assert.NotNull(page.Find("#equipment-accounting"));
+        page.WaitForAssertion(() => Assert.Contains("Read only owner", page.Markup));
         Assert.False(PrivateBool(page.Instance, "_canUseAccounting"));
     }
 
@@ -702,37 +699,41 @@ public sealed class EquipmentFormTests
 
     /// <summary>Компьютерная секция сохраняет отдельные модули и даты стандартных конфигураций.</summary>
     [Fact]
-    public void ComputerGrid_BuildsDynamicModuleAndConfigurationColumns()
+    public async Task ComputerGrid_BuildsDynamicModuleAndConfigurationColumns()
     {
-        var form = new EquipmentForm();
-        SetPrivate(form, "_computerHistory", new List<EquipmentComputerSnapshot>
+        var fixture = CreateFixture(computer: true);
+        fixture.Service.StoredComputers.Add(new()
         {
-            new()
-            {
-                RamMb = 3072,
-                RamComponents = [1024, 2048],
-                HdGb = 1000,
-                HdComponents = [1000],
-                SsdGb = 500,
-                SsdComponents = [250, 250],
-                Configuration1Id = 1,
-                Configuration1Name = "Офисная",
-                Configuration1Date = new DateTime(2026, 1, 2),
-            },
+            Date = new DateTime(2026, 1, 1),
+            RamMb = 3072,
+            RamComponents = [1024, 2048],
+            HdGb = 1000,
+            HdComponents = [1000],
+            SsdGb = 500,
+            SsdComponents = [250, 250],
+            Configuration1Id = 1,
+            Configuration1Name = "Офисная",
+            Configuration1Date = new DateTime(2026, 1, 2),
         });
+        await using var context = fixture.Context;
 
-        var columns = (IReadOnlyList<Clayzor.Lib.Web.Controls.Components.Detail.ClayDetailColumn<EquipmentComputerSnapshot>>)typeof(EquipmentForm)
-            .GetProperty("_computerColumns", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
-            .GetValue(form)!;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        page.WaitForAssertion(() => Assert.Contains("2048", page.Find("#equipment-computer tbody tr").TextContent));
+        var grid = page.Find("#equipment-computer");
+        var headers = grid.QuerySelectorAll("thead th").Select(column => column.TextContent.Trim())
+            .Where(title => title.Length > 0).ToArray();
 
         Assert.Equal(new[]
         {
             "Дата", "RAM, Мб", "RAM1", "RAM2", "HD, Гб", "HD1", "SSD, Гб", "SSD1", "SSD2",
             "Стандартная конфигурация 1", "Лицензия", "Примечания", "Изменил", "Изменено",
-        }, columns.Select(column => column.Title));
-        Assert.Equal("2048", columns.Single(column => column.Title == "RAM2").TextSelector(((List<EquipmentComputerSnapshot>)GetPrivate(form, "_computerHistory")!)[0]));
-        Assert.Equal("Офисная [02.01.26]", columns.Single(column => column.Title == "Стандартная конфигурация 1")
-            .TextSelector(((List<EquipmentComputerSnapshot>)GetPrivate(form, "_computerHistory")!)[0]));
+        }, headers);
+        var row = grid.QuerySelector("tbody tr")!.TextContent;
+        Assert.Contains("2048", row);
+        Assert.Contains("Офисная [02.01.26]", row);
+        Assert.DoesNotContain("clay-grid-search", page.Markup);
+        Assert.DoesNotContain("clay-grid-paginator", page.Markup);
     }
 
     /// <summary>Телефонная секция выводит ссылки, условное подключение, просрочку и предупреждение отеля.</summary>
@@ -803,6 +804,10 @@ public sealed class EquipmentFormTests
         context.JSInterop.Setup<long>("clayGridTimeZone.localDateTimeToUtcMilliseconds", _ => true).SetResult(0L);
         context.Services.AddMudServices();
         context.Services.AddMudExtensions();
+        context.Services.AddScoped<DbManager>(_ => CreateDb());
+        context.Services.AddSingleton(new ClayAppSettings());
+        context.Services.AddScoped<ClayErrorService>();
+        context.Services.AddSingleton(new ClayFormWindowService(js));
         var navigation = new FakeNavigationManager();
         navigation.NavigateTo("http://localhost/Equipment/EquipmentForm?id=7");
         var configuration = new ConfigurationManager
@@ -967,6 +972,7 @@ public sealed class EquipmentFormTests
         public List<(EquipmentResponsiblePeriod Current, EquipmentResponsiblePeriod? Next, EquipmentLocationPeriod? Location)> WithdrawCalls { get; } = [];
         public List<EquipmentPhoneLink> StoredPhones { get; private set; } = [];
         public List<EquipmentSoftwareInstallation> StoredSoftware { get; } = [];
+        public List<EquipmentComputerSnapshot> StoredComputers { get; } = [];
         public int HotelPhoneCount { get; set; }
         public List<(int[] Original, int[] Current)> PhoneSaves { get; } = [];
         public int UpdateWithPhonesCalls { get; private set; }
@@ -997,7 +1003,7 @@ public sealed class EquipmentFormTests
             Task.FromResult<IReadOnlyList<EquipmentResponsiblePeriod>>(StoredResponsibles.ToList());
 
         public override Task<IReadOnlyList<EquipmentComputerSnapshot>> GetComputerHistoryAsync(int equipmentId) =>
-            Task.FromResult<IReadOnlyList<EquipmentComputerSnapshot>>([]);
+            Task.FromResult<IReadOnlyList<EquipmentComputerSnapshot>>(StoredComputers.ToList());
 
         public override Task<IReadOnlyList<StandardConfiguration>> GetStandardConfigurationsAsync() =>
             Task.FromResult<IReadOnlyList<StandardConfiguration>>([]);
