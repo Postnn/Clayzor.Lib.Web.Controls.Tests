@@ -14,7 +14,7 @@ public sealed class EquipmentPhonePersistenceTests
     {
         var command = EquipmentPhoneSaveBuilder.Build(
             new Equipment { Id = 7, ModelId = 5, OwnerId = 1 },
-            [Link(1), Link(2)],
+            [Link(1), Link(2, ReturnDate: new DateTime(2026, 12, 1))],
             [Link(2), Link(3), Link(4, ConnectionEquipmentId: 0)]);
 
         Assert.Contains("BEGIN TRANSACTION", command.Sql);
@@ -32,11 +32,67 @@ public sealed class EquipmentPhonePersistenceTests
         Assert.DoesNotContain("001122", command.Sql);
     }
 
+    /// <summary>Неизменённая общая связь не обновляется и не затирает чужие изменения.</summary>
+    [Fact]
+    public void Build_SkipsUnchangedExistingPhone()
+    {
+        var command = EquipmentPhoneSaveBuilder.Build(
+            new Equipment { Id = 7, ModelId = 5, OwnerId = 1 },
+            [Link(1, ReturnDate: new DateTime(2026, 12, 1), Notes: "old")],
+            [Link(1, ReturnDate: new DateTime(2026, 12, 1), Notes: "old"), Link(2)]);
+
+        Assert.DoesNotContain("UPDATE ТелефонныеНомераОборудование", command.Sql);
+        Assert.DoesNotContain("@updPhone0", command.Parameters.ParameterNames);
+        Assert.Equal(2, command.Parameters.Get<int>("@newPhone0"));
+    }
+
+    /// <summary>Новая связь сохраняет срок возврата и примечание в том же INSERT.</summary>
+    [Fact]
+    public void Build_SavesMetadataForNewPhone()
+    {
+        var returnDate = new DateTime(2026, 12, 31);
+        var command = EquipmentPhoneSaveBuilder.Build(
+            new Equipment { Id = 7, ModelId = 5, OwnerId = 1 }, [],
+            [Link(2, ConnectionEquipmentId: 8, ReturnDate: returnDate, Notes: "return to stock")]);
+
+        Assert.Contains("СрокВозврата, Примечание", command.Sql);
+        Assert.Equal(returnDate, command.Parameters.Get<DateTime?>("@newReturn0"));
+        Assert.Equal("return to stock", command.Parameters.Get<string>("@newNotes0"));
+    }
+
     /// <summary>Повтор одного номера отклоняется до обращения к БД.</summary>
     [Fact]
     public void Build_DuplicatePhone_Throws() =>
         Assert.Throws<InvalidOperationException>(() => EquipmentPhoneSaveBuilder.Build(
             new Equipment { Id = 7 }, [], [Link(1), Link(1)]));
+
+    /// <summary>CCM получает только оборудование подключения; текущее оборудование добавляется лишь как fallback.</summary>
+    [Fact]
+    public async Task SynchronizePhones_MatchesLegacyRecipients()
+    {
+        DapperColumnMapper.Initialize();
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([
+            Script.Rows(Script.Row(("КодТелефонногоНомера", 1), ("КодТелефоннойСтанции", 0), ("XorcomName", ""))),
+            Script.NonQuery(), Script.NonQuery(),
+        ]));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+
+        await service.SynchronizePhonesAsync(7,
+            [Link(1, ConnectionEquipmentId: 8)], [Link(1, ConnectionEquipmentId: 9)]);
+
+        static object? EquipmentId(Dictionary<string, object?> parameters) =>
+            parameters.GetValueOrDefault("@КодОборудования") ?? parameters["КодОборудования"];
+        Assert.Equal([8, 9], connection.ParameterLog.Select(EquipmentId).ToArray());
+        Assert.DoesNotContain(connection.ParameterLog, item => Equals(EquipmentId(item), 7));
+
+        var fallbackConnection = new ScriptedConnection(new Queue<ScriptEntry>([
+            Script.Rows(Script.Row(("КодТелефонногоНомера", 1), ("КодТелефоннойСтанции", 0), ("XorcomName", ""))),
+            Script.NonQuery(),
+        ]));
+        var fallbackService = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => fallbackConnection));
+        await fallbackService.SynchronizePhonesAsync(7, [], [Link(1)]);
+        Assert.Equal(7, EquipmentId(Assert.Single(fallbackConnection.ParameterLog)));
+    }
 
     /// <summary>Чтение восстанавливает поля связи и срок возврата.</summary>
     [Fact]
@@ -85,12 +141,17 @@ public sealed class EquipmentPhonePersistenceTests
         Assert.Contains("TARGET.КодРасположения = @LocationId", connection.CommandLog[0]);
     }
 
-    private static EquipmentPhoneLink Link(int phoneId, int? ConnectionEquipmentId = null) => new()
+    private static EquipmentPhoneLink Link(
+        int phoneId,
+        int? ConnectionEquipmentId = null,
+        DateTime? ReturnDate = null,
+        string Notes = "") => new()
     {
         PhoneId = phoneId,
         EquipmentId = 7,
         Description = phoneId.ToString(),
         ConnectionEquipmentId = ConnectionEquipmentId,
-        Notes = string.Empty,
+        ReturnDate = ReturnDate,
+        Notes = Notes,
     };
 }

@@ -12,6 +12,7 @@ using MudBlazor;
 using Microsoft.AspNetCore.Components;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.JSInterop;
 using MudBlazor.Extensions;
 using MudBlazor.Services;
 using EquipmentEntity = Clayzor.Lib.Entities.Inventory.Equipment;
@@ -222,10 +223,198 @@ public sealed class EquipmentFormTests
         Assert.Equal("old-host", Assert.Single(history).NetworkName);
     }
 
-    private static Fixture CreateFixture(bool phones = false, bool network = false)
+    /// <summary>Диалог прежней записи после смены id не выполняет SQL для новой записи.</summary>
+    [Fact]
+    public async Task AccountDialogFromPreviousId_DoesNotSaveIntoNewEquipment()
+    {
+        var fixture = CreateFixture();
+        await using var context = fixture.Context;
+        var provider = context.Render<MudDialogProvider>();
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        var dialogAdded = TrackNextDialog(context);
+        var pending = InvokeHandler(page, "OpenAccountDialogAsync", (object?)null);
+        var dialog = await dialogAdded.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        await page.InvokeAsync(() => fixture.Navigation.NavigateTo("http://localhost/Equipment/EquipmentForm?id=8"));
+        WaitForSn(page, "CLAY_TEST_8");
+        dialog.Close(DialogResult.Ok(new EquipmentAccountDialogResult("account-from-a", "", false, "")));
+        await pending;
+
+        Assert.Equal(0, fixture.Service.AddAccountCalls);
+    }
+
+    /// <summary>Подтверждение удаления SIM прежней записи аннулируется после смены id.</summary>
+    [Fact]
+    public async Task DeleteSimConfirmationFromPreviousId_DoesNotDeleteNewEquipment()
+    {
+        var fixture = CreateFixture();
+        await using var context = fixture.Context;
+        var provider = context.Render<MudDialogProvider>();
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        SetPrivate(page.Instance, "_canEditSim", true);
+        var dialogAdded = TrackNextDialog(context);
+        var pending = InvokeHandler(page, "DeleteSimAsync");
+        var dialog = await dialogAdded.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        await page.InvokeAsync(() => fixture.Navigation.NavigateTo("http://localhost/Equipment/EquipmentForm?id=8"));
+        WaitForSn(page, "CLAY_TEST_8");
+        dialog.Close(DialogResult.Ok(true));
+        await pending;
+
+        Assert.Equal(0, fixture.Service.DeleteSimCalls);
+    }
+
+    /// <summary>Поздний JS-ответ загрузки A не меняет поля полностью загруженной записи B.</summary>
+    [Fact]
+    public async Task LateTimeZoneResultFromPreviousLoad_DoesNotChangeCurrentEquipment()
+    {
+        var fixture = CreateFixture();
+        var dateA = new DateTime(2026, 1, 10, 12, 0, 0, DateTimeKind.Utc);
+        var dateB = new DateTime(2026, 7, 20, 15, 30, 0, DateTimeKind.Utc);
+        fixture.Service.WriteOffDates[7] = dateA;
+        fixture.Service.WriteOffDates[8] = dateB;
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        fixture.Js.DeferredIdentifier = "clayGridTimeZone.getOffsetMinutes";
+        fixture.Js.DeferredArgument = dateA.ToString("O");
+        var loadA = InvokeHandler(page, "LoadCurrentAsync", 7);
+        await fixture.Js.Requested.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        await page.InvokeAsync(() => fixture.Navigation.NavigateTo("http://localhost/Equipment/EquipmentForm?id=8"));
+        WaitForSn(page, "CLAY_TEST_8");
+        fixture.Js.Completion.SetResult();
+        await loadA;
+
+        Assert.Equal(8, CurrentModel(page.Instance).Id);
+        Assert.Equal(8, CurrentModel(page.Instance).TenantId);
+        Assert.Equal(dateB.AddMinutes(180).Date, GetPrivate(page.Instance, "_writeOffDate"));
+        Assert.False(IsModified(page.Instance));
+    }
+
+    /// <summary>Закрытие формы во время отложенного callback после SQL завершает Save без исключения.</summary>
+    [Fact]
+    public async Task DisposeDuringRefreshCallback_AfterSuccessfulSaveIsObserved()
+    {
+        var fixture = CreateFixture();
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        FindSn(page).Input("CLAY_TEST_CALLBACK");
+        fixture.Js.DeferredIdentifier = "clayModelEquipmentForm.refreshOpener";
+        var save = InvokeSave(page, false);
+        await fixture.Js.Requested.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        page.Instance.Dispose();
+        fixture.Js.Completion.SetException(new OperationCanceledException());
+        await save;
+
+        Assert.Equal(1, fixture.Service.UpdateCalls);
+        Assert.True(PrivateBool(page.Instance, "_disposed"));
+    }
+
+    /// <summary>SQL-ошибка изменения ответственного не меняет отображаемый исходный объект.</summary>
+    [Fact]
+    public async Task ResponsibleSqlException_KeepsDisplayedRowUnchanged()
+    {
+        var fixture = CreateFixture();
+        var originalDate = new DateTime(2026, 11, 20);
+        var responsible = new EquipmentResponsiblePeriod
+        {
+            EquipmentId = 7, EmployeeId = 4, FromUtc = new DateTime(2026, 11, 1),
+            ReturnDate = originalDate, Notes = "old",
+        };
+        fixture.Service.StoredResponsibles.Add(responsible);
+        fixture.Service.ResponsibleException = SqlExceptionFactory.Create(50000, "trigger");
+        await using var context = fixture.Context;
+        var provider = context.Render<MudDialogProvider>();
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        var dialogAdded = TrackNextDialog(context);
+        var pending = InvokeHandler(page, "OpenResponsibleDialogAsync", EquipmentResponsibleDialogMode.Edit, responsible);
+        var dialog = await dialogAdded.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        await page.InvokeAsync(() => dialog.Close(DialogResult.Ok(new EquipmentResponsibleDialogResult(
+            4, responsible.FromUtc, null, originalDate.AddDays(1), "new", null))));
+        await pending;
+
+        Assert.Equal(originalDate, responsible.ReturnDate);
+        Assert.Equal("old", responsible.Notes);
+        Assert.Equal(originalDate.AddDays(1), fixture.Service.ResponsibleUpdated?.ReturnDate);
+        Assert.Contains("Ответственный не сохранён", page.Markup);
+    }
+
+    /// <summary>Обновление бухучёта сохраняет изменённые владельца, арендатора и документы основной формы.</summary>
+    [Fact]
+    public async Task RefreshAccounting_PreservesModifiedMainFields()
+    {
+        var fixture = CreateFixture();
+        fixture.Service.StoredAccounting.Add(new EquipmentAccounting
+        {
+            EquipmentId = 7, OwnerId = 20, TenantId = 30, ReceiptDocumentId = 40, WriteOffDocumentId = 50,
+        });
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        CurrentModel(page.Instance).TenantId = 999;
+        CurrentModel(page.Instance).DocumentReceiptOuId = 888;
+
+        await InvokeHandler(page, "RefreshAccountingAsync");
+
+        Assert.Equal(20, CurrentModel(page.Instance).OwnerId);
+        Assert.Equal(999, CurrentModel(page.Instance).TenantId);
+        Assert.Equal(888, CurrentModel(page.Instance).DocumentReceiptOuId);
+        Assert.Equal(50, CurrentModel(page.Instance).DocumentWriteOffId);
+    }
+
+    /// <summary>Восстановление того же типа после Escape не перечитывает и не очищает телефонные правки.</summary>
+    [Fact]
+    public async Task RestoringSameType_PreservesEditedPhoneList()
+    {
+        var fixture = CreateFixture(phones: true);
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        var phones = (List<EquipmentPhoneLink>)GetPrivate(page.Instance, "_phones")!;
+        phones.Add(new EquipmentPhoneLink { PhoneId = 11, EquipmentId = 7, Notes = "edited" });
+        var reads = fixture.Service.GetPhonesCalls;
+        var selectedType = GetPrivate(page.Instance, "_selectedType");
+
+        await InvokeHandler(page, "OnTypeChanged", selectedType);
+
+        Assert.Single(phones);
+        Assert.Equal("edited", phones[0].Notes);
+        Assert.Equal(reads, fixture.Service.GetPhonesCalls);
+    }
+
+    /// <summary>Кнопка конфигурации следует роли 102 независимо от роли редактирования 43.</summary>
+    [Fact]
+    public async Task PhoneConfigAccess_UsesRole102InsteadOfEditRole()
+    {
+        var fixture = CreateFixture(phoneConfig: true);
+        fixture.Service.Roles.Clear();
+        fixture.Service.Roles.Add(102);
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        var button = page.FindAll("button").Single(item => item.TextContent.Trim() == "Конфигурация");
+        Assert.False(button.HasAttribute("disabled"));
+
+        fixture.Service.Roles.Clear();
+        fixture.Service.Roles.Add(43);
+        await InvokeHandler(page, "LoadCurrentAsync", 7);
+        button = page.FindAll("button").Single(item => item.TextContent.Trim() == "Конфигурация");
+        Assert.True(button.HasAttribute("disabled"));
+    }
+
+    private static Fixture CreateFixture(bool phones = false, bool network = false, bool phoneConfig = false)
     {
         DapperColumnMapper.Initialize();
         var context = new BunitContext();
+        var js = new DeferredJSRuntime(context.JSInterop.JSRuntime);
+        context.Services.AddSingleton<IJSRuntime>(js);
         context.JSInterop.Mode = JSRuntimeMode.Loose;
         context.JSInterop.Setup<int>("clayGridTimeZone.getOffsetMinutes", _ => true).SetResult(180);
         context.JSInterop.Setup<long>("clayGridTimeZone.localDateTimeToUtcMilliseconds", _ => true).SetResult(0L);
@@ -238,17 +427,18 @@ public sealed class EquipmentFormTests
             ["URI_user_form"] = "http://localhost/user",
             ["URI_model_form"] = "http://localhost/Equipment/ModelEquipmentForm",
         };
-        var service = new FakeEquipmentFormService(CreateDb());
+        var service = new FakeEquipmentFormService(CreateDb()) { PhoneConfig = phoneConfig };
         context.Services.AddSingleton<NavigationManager>(navigation);
         context.Services.AddSingleton<IConfiguration>(configuration);
         context.Services.AddSingleton<EquipmentFormService>(service);
         context.Services.AddSingleton(new EquipmentTypeSelectDataSource(CreateDb(
-            Script.Rows(TypeRow(phones, network)), Script.Rows(TypeRow(phones, network)), Script.Rows(TypeRow(phones, network)), Script.Rows(TypeRow(phones, network)))));
+            Script.Rows(TypeRow(phones, network, phoneConfig)), Script.Rows(TypeRow(phones, network, phoneConfig)),
+            Script.Rows(TypeRow(phones, network, phoneConfig)), Script.Rows(TypeRow(phones, network, phoneConfig)))));
         context.Services.AddSingleton(new EquipmentModelSelectDataSource(CreateDb(
-            Script.Rows(ModelRow(network)),
-            Script.Rows(ModelRow(network)),
-            Script.Rows(ModelRow(network)),
-            Script.Rows(ModelRow(network)))));
+            Script.Rows(ModelRow(network, phoneConfig)),
+            Script.Rows(ModelRow(network, phoneConfig)),
+            Script.Rows(ModelRow(network, phoneConfig)),
+            Script.Rows(ModelRow(network, phoneConfig)))));
         context.Services.AddSingleton(new PhonePoolSelectDataSource(CreateDb()));
         context.Services.AddSingleton(new PhoneNumberSelectDataSource(CreateDb(
             Script.Rows(PhoneNumberRow()), Script.Rows(PhoneNumberRow()), Script.Rows(PhoneNumberRow()))));
@@ -258,7 +448,7 @@ public sealed class EquipmentFormTests
         context.Services.AddKeyedSingleton<DocumentSelectDataSource>("writeoff", new DocumentSelectDataSource(CreateDb()));
         context.Services.AddKeyedSingleton<UpsEquipmentSelectDataSource>("ups", new UpsEquipmentSelectDataSource(CreateDb(), true));
         context.Services.AddKeyedSingleton<UpsEquipmentSelectDataSource>("server", new UpsEquipmentSelectDataSource(CreateDb(), false));
-        return new Fixture(context, service, navigation);
+        return new Fixture(context, service, navigation, js);
     }
 
     private static DbManager CreateDb(params ScriptEntry[] entries) =>
@@ -276,6 +466,29 @@ public sealed class EquipmentFormTests
             var method = typeof(EquipmentForm).GetMethod("SaveAsync",
                 System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
             if (method.Invoke(page.Instance, new object[] { close }) is Task task)
+                await task;
+        });
+
+    private static TaskCompletionSource<IDialogReference> TrackNextDialog(BunitContext context)
+    {
+        var result = new TaskCompletionSource<IDialogReference>(TaskCreationOptions.RunContinuationsAsynchronously);
+        context.Services.GetRequiredService<IDialogService>().DialogInstanceAddedAsync += reference =>
+        {
+            result.TrySetResult(reference);
+            return Task.CompletedTask;
+        };
+        return result;
+    }
+
+    private static async Task InvokeHandler(
+        IRenderedComponent<EquipmentForm> page,
+        string name,
+        params object?[] args) =>
+        await page.InvokeAsync(async () =>
+        {
+            var method = typeof(EquipmentForm).GetMethod(name,
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+            if (method.Invoke(page.Instance, args) is Task task)
                 await task;
         });
 
@@ -300,14 +513,16 @@ public sealed class EquipmentFormTests
         .GetMethod("ValidateBusinessRules", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
         .Invoke(page, null)!;
 
-    private static Dictionary<string, object?> TypeRow(bool phones = false, bool network = false) => Script.Row(
-        ("КодТипаОборудования", 103), ("ТипОборудования", "Шторы"), ("SNобязателен", (byte)0),
-        ("ЕстьХарактеристикиМонитора", (byte)0), ("ЕстьТелефонныйНомер", phones ? (byte)1 : (byte)0),
-        ("ЕстьMACадрес", (byte)0), ("ЕстьСетевоеИмя", network ? (byte)1 : (byte)0));
+    private static Dictionary<string, object?> TypeRow(bool phones = false, bool network = false, bool phoneConfig = false) => Script.Row(
+        ("КодТипаОборудования", phoneConfig ? 30 : 103), ("ТипОборудования", phoneConfig ? "IP-телефон" : "Шторы"),
+        ("SNобязателен", (byte)0), ("ЕстьХарактеристикиМонитора", (byte)0),
+        ("ЕстьТелефонныйНомер", phones ? (byte)1 : (byte)0), ("ЕстьMACадрес", (byte)0),
+        ("ЕстьСетевоеИмя", network ? (byte)1 : (byte)0));
 
-    private static Dictionary<string, object?> ModelRow(bool network = false) => Script.Row(
-        ("КодМоделиОборудования", 945), ("МодельОборудования", "Шторы"),
-        ("КодТипаОборудования", 103), ("Net", network ? 1 : 0));
+    private static Dictionary<string, object?> ModelRow(bool network = false, bool phoneConfig = false) => Script.Row(
+        ("КодМоделиОборудования", 945), ("МодельОборудования", phoneConfig ? "Phone" : "Шторы"),
+        ("КодТипаОборудования", phoneConfig ? 30 : 103), ("Net", network ? 1 : 0),
+        ("ШаблонТелефона", phoneConfig ? "template" : ""));
 
     private static Dictionary<string, object?> PhoneNumberRow() => Script.Row(
         ("КодТелефонногоНомера", 11), ("Телефон", "101"),
@@ -319,7 +534,8 @@ public sealed class EquipmentFormTests
     private sealed record Fixture(
         BunitContext Context,
         FakeEquipmentFormService Service,
-        FakeNavigationManager Navigation);
+        FakeNavigationManager Navigation,
+        DeferredJSRuntime Js);
 
     private sealed class FakeEquipmentFormService : EquipmentFormService
     {
@@ -329,10 +545,20 @@ public sealed class EquipmentFormTests
         public FakeEquipmentFormService(DbManager db) : base(db) { }
         public EquipmentEntity? Updated { get; private set; }
         public Exception? SaveException { get; set; }
+        public Exception? ResponsibleException { get; set; }
+        public EquipmentResponsiblePeriod? ResponsibleUpdated { get; private set; }
         public bool DeferredUpdate { get; set; }
         public bool DeferredInitialLoad { get; set; }
+        public bool PhoneConfig { get; set; }
         public int UpdateCalls { get; private set; }
+        public int AddAccountCalls { get; private set; }
+        public int DeleteSimCalls { get; private set; }
+        public int GetPhonesCalls { get; private set; }
         public List<int> Requests { get; } = [];
+        public HashSet<int> Roles { get; } = [42, 43, 102];
+        public Dictionary<int, DateTime?> WriteOffDates { get; } = [];
+        public List<EquipmentResponsiblePeriod> StoredResponsibles { get; } = [];
+        public List<EquipmentAccounting> StoredAccounting { get; } = [];
         public List<(EquipmentResponsiblePeriod Current, EquipmentResponsiblePeriod? Next, EquipmentLocationPeriod? Location)> WithdrawCalls { get; } = [];
         public List<EquipmentPhoneLink> StoredPhones { get; private set; } = [];
         public List<(int[] Original, int[] Current)> PhoneSaves { get; } = [];
@@ -353,14 +579,15 @@ public sealed class EquipmentFormTests
             }
             return new EquipmentEntity
             {
-                Id = id, EquipmentTypeId = 103, ModelId = 945, OwnerId = 1, LocationId = 55,
-                SerialNumber = $"CLAY_TEST_{id}", Description = $"Copy{id}", MacAddress = "001122334455",
+                Id = id, EquipmentTypeId = PhoneConfig ? 30 : 103, ModelId = 945, OwnerId = 1, TenantId = id,
+                LocationId = 55, SerialNumber = $"CLAY_TEST_{id}", Description = $"Copy{id}",
+                MacAddress = "001122334455", WriteOffAtUtc = WriteOffDates.GetValueOrDefault(id),
                 ChangedById = 4, ChangedAtUtc = new DateTime(2026, 11, 18, 8, 0, 0), ChangedByName = "Тестов А.",
             };
         }
 
         public override Task<IReadOnlyList<EquipmentResponsiblePeriod>> GetResponsiblesAsync(int equipmentId) =>
-            Task.FromResult<IReadOnlyList<EquipmentResponsiblePeriod>>([]);
+            Task.FromResult<IReadOnlyList<EquipmentResponsiblePeriod>>(StoredResponsibles.ToList());
 
         public override Task<IReadOnlyList<EquipmentAccount>> GetAccountsAsync(int equipmentId) =>
             Task.FromResult<IReadOnlyList<EquipmentAccount>>([]);
@@ -385,7 +612,7 @@ public sealed class EquipmentFormTests
             Task.FromResult<IReadOnlyList<EquipmentSoftwareInstallation>>([]);
 
         public override Task<IReadOnlyList<EquipmentAccounting>> GetAccountingAsync(int equipmentId) =>
-            Task.FromResult<IReadOnlyList<EquipmentAccounting>>([]);
+            Task.FromResult<IReadOnlyList<EquipmentAccounting>>(StoredAccounting.ToList());
 
         public override Task<EquipmentRouterInfo?> GetRouterInfoAsync(int equipmentId) =>
             Task.FromResult<EquipmentRouterInfo?>(null);
@@ -409,7 +636,7 @@ public sealed class EquipmentFormTests
 
         public override Task<bool> CanUseAccountingAsync(int? personId) => Task.FromResult(true);
 
-        public override Task<bool> HasRoleAsync(int roleId) => Task.FromResult(true);
+        public override Task<bool> HasRoleAsync(int roleId) => Task.FromResult(Roles.Contains(roleId));
 
         public override Task<bool> HasRoleForPersonAsync(int roleId, int? personId) => Task.FromResult(true);
 
@@ -424,6 +651,26 @@ public sealed class EquipmentFormTests
             }
             if (SaveException is not null)
                 throw SaveException;
+        }
+
+        public override Task AddAccountAsync(EquipmentAccount account)
+        {
+            AddAccountCalls++;
+            return Task.CompletedTask;
+        }
+
+        public override Task DeleteSimAsync(int equipmentId)
+        {
+            DeleteSimCalls++;
+            return Task.CompletedTask;
+        }
+
+        public override Task UpdateResponsibleAsync(EquipmentResponsiblePeriod responsible)
+        {
+            ResponsibleUpdated = responsible;
+            if (ResponsibleException is not null)
+                throw ResponsibleException;
+            return Task.CompletedTask;
         }
 
         public override Task WithdrawResponsibleAsync(
@@ -443,8 +690,11 @@ public sealed class EquipmentFormTests
 
         public override Task<bool> HasCurrentResponsibleAsync(int equipmentId) => Task.FromResult(false);
 
-        public override Task<IReadOnlyList<EquipmentPhoneLink>> GetPhonesAsync(int equipmentId) =>
-            Task.FromResult<IReadOnlyList<EquipmentPhoneLink>>(StoredPhones.ToList());
+        public override Task<IReadOnlyList<EquipmentPhoneLink>> GetPhonesAsync(int equipmentId)
+        {
+            GetPhonesCalls++;
+            return Task.FromResult<IReadOnlyList<EquipmentPhoneLink>>(StoredPhones.ToList());
+        }
 
         public override Task UpdateWithPhonesAsync(
             EquipmentEntity equipment,
@@ -482,4 +732,28 @@ public sealed class EquipmentFormTests
         }
     }
 
+    private sealed class DeferredJSRuntime(IJSRuntime inner) : IJSRuntime
+    {
+        public string? DeferredIdentifier { get; set; }
+        public string? DeferredArgument { get; set; }
+        public TaskCompletionSource Requested { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public ValueTask<TValue> InvokeAsync<TValue>(string identifier, object?[]? args) =>
+            InvokeAsync<TValue>(identifier, CancellationToken.None, args);
+
+        public async ValueTask<TValue> InvokeAsync<TValue>(
+            string identifier,
+            CancellationToken cancellationToken,
+            object?[]? args)
+        {
+            if (identifier == DeferredIdentifier &&
+                (DeferredArgument is null || Equals(args?.FirstOrDefault(), DeferredArgument)))
+            {
+                Requested.TrySetResult();
+                await Completion.Task.WaitAsync(cancellationToken);
+            }
+            return await inner.InvokeAsync<TValue>(identifier, cancellationToken, args);
+        }
+    }
 }

@@ -93,6 +93,7 @@ internal sealed class ScriptEntry
 internal sealed class ScriptedCommand : DbCommand
 {
     private readonly ScriptedConnection _owner;
+    private readonly FakeParameterCollection _parameters = new();
     private ScriptEntry? _entry;
     public List<string> CommandLog { get; }
 
@@ -108,7 +109,7 @@ internal sealed class ScriptedCommand : DbCommand
     public override UpdateRowSource UpdatedRowSource { get; set; }
     protected override DbConnection? DbConnection { get; set; }
     protected override DbTransaction? DbTransaction { get; set; }
-    protected override DbParameterCollection DbParameterCollection => new FakeParameterCollection();
+    protected override DbParameterCollection DbParameterCollection => _parameters;
     public override bool DesignTimeVisible { get; set; }
 
     public override void Cancel() { }
@@ -145,6 +146,11 @@ internal sealed class ScriptedCommand : DbCommand
     {
         var e = GetEntry();
         CommandLog.Add(CommandText);
+        _owner.ParameterLog.Add(DbParameterCollection.Cast<DbParameter>()
+            .ToDictionary(parameter => parameter.ParameterName, parameter => parameter.Value));
+        foreach (var parameter in DbParameterCollection.Cast<DbParameter>()
+                     .Where(parameter => parameter.Direction == ParameterDirection.ReturnValue && parameter.Value is null or DBNull))
+            parameter.Value = 0;
         if (e.Exception is not null) throw e.Exception;
         return Task.FromResult(e.AffectedRows ?? 1);
     }
@@ -174,6 +180,7 @@ internal sealed class ScriptedConnection : DbConnection
     private readonly Queue<ScriptEntry> _entries;
     private ConnectionState _state;
     public List<string> CommandLog { get; } = [];
+    public List<Dictionary<string, object?>> ParameterLog { get; } = [];
 
     public ScriptedConnection(Queue<ScriptEntry> entries) => _entries = entries;
 
