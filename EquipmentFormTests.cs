@@ -337,6 +337,9 @@ public sealed class EquipmentFormTests
         public override Task<IReadOnlyList<LicenseType>> GetLicenseTypesAsync() =>
             Task.FromResult<IReadOnlyList<LicenseType>>([]);
 
+        public override Task<IReadOnlyList<EquipmentSoftwareInstallation>> GetSoftwareInstallationsAsync(int equipmentId) =>
+            Task.FromResult<IReadOnlyList<EquipmentSoftwareInstallation>>([]);
+
         public override Task<bool> HasRoleAsync(int roleId) => Task.FromResult(true);
 
         public override Task<bool> HasRoleForPersonAsync(int roleId, int? personId) => Task.FromResult(true);
