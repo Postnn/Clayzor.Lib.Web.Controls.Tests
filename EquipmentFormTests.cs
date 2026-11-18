@@ -163,9 +163,9 @@ public sealed class EquipmentFormTests
         await using var context = fixture.Context;
         var page = context.Render<EquipmentForm>();
         WaitForSn(page, "CLAY_TEST_7");
-        SetPrivate(page.Instance, "_phoneToAdd", 11);
+        Assert.Empty(page.FindAll("#equipment-phones"));
+        await InvokeHandler(page, "OnPhoneToAddChangedAsync", 11);
         page.Render();
-        page.Find("#equipment-phones thead th button").Click();
         page.WaitForAssertion(() => Assert.Contains("101", page.Markup));
         Assert.Equal(8, ((List<EquipmentPhoneLink>)GetPrivate(page.Instance, "_phones")!)[0].ConnectionEquipmentId);
 
@@ -605,7 +605,11 @@ public sealed class EquipmentFormTests
         await using var context = fixture.Context;
         var page = context.Render<EquipmentForm>();
         WaitForSn(page, "CLAY_TEST_7");
-        Assert.NotNull(page.Find("#equipment-accounts"));
+        Assert.NotNull(page.Find(".equipment-accounts-toggle"));
+        Assert.Empty(page.FindAll("#equipment-accounts"));
+        page.Find(".equipment-accounts-toggle").Click();
+        page.WaitForAssertion(() => Assert.NotNull(page.Find("#equipment-accounts")));
+        Assert.Empty(page.FindAll(".equipment-accounts-toggle"));
 
         fixture.Service.Roles.Remove(102);
         await InvokeHandler(page, "LoadCurrentAsync", 7);
@@ -726,7 +730,7 @@ public sealed class EquipmentFormTests
 
         Assert.Equal(new[]
         {
-            "Дата", "RAM, Мб", "RAM1", "RAM2", "HD, Гб", "HD1", "SSD, Гб", "SSD1", "SSD2",
+            "С", "RAM", "RAM1", "RAM2", "HD", "HD1", "SSD", "SSD1", "SSD2",
             "Стандартная конфигурация 1", "Лицензия", "Примечания", "Изменил", "Изменено",
         }, headers);
         var row = grid.QuerySelector("tbody tr")!.TextContent;
@@ -765,7 +769,10 @@ public sealed class EquipmentFormTests
         Assert.Equal("http://localhost/Telefon/Tel?id=11", phoneLink.GetAttribute("href"));
         Assert.Contains("01.01.2026 15:00:00", phoneLink.GetAttribute("title"));
         Assert.Equal("http://localhost/Equipment/EquipmentForm?id=55", page.Find("a[title^='Оборудование подключения']").GetAttribute("href"));
-        Assert.Contains("(основной)", page.Markup);
+        Assert.Contains("(основной на аппарате)", page.Markup);
+        Assert.Contains("clay-grid-hide-header", page.Find("#equipment-phones").ClassName);
+        var rows = page.FindAll("#equipment-phones tbody tr");
+        Assert.Equal(string.Empty, rows[1].QuerySelectorAll("td")[2].TextContent.Trim());
         Assert.Single(page.FindAll("tr.equipment-overdue"));
         Assert.Contains("может быть только один телефонный номер", page.Markup);
     }
