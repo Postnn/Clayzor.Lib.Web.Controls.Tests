@@ -34,7 +34,7 @@ public sealed class ClayGridSectionTests
         Assert.DoesNotContain("Секция", cut.Markup);
         Assert.DoesNotContain("clay-grid-search", cut.Markup);
         Assert.DoesNotContain("clay-grid-paginator", cut.Markup);
-        Assert.Contains("width:44px", cut.Find("thead th").GetAttribute("style"));
+        Assert.Contains("width:88px", cut.Find("thead th").GetAttribute("style"));
         Assert.NotNull(cut.Find(".clay-grid-service-add"));
         cut.Find("thead th button").Click();
         Assert.Equal(1, added);
