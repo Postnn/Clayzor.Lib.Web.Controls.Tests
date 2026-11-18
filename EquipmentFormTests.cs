@@ -214,6 +214,8 @@ public sealed class EquipmentFormTests
             Script.Rows(PersonRow()), Script.Rows(PersonRow()), Script.Rows(PersonRow()), Script.Rows(PersonRow()))));
         context.Services.AddKeyedSingleton<DocumentSelectDataSource>("receipt", new DocumentSelectDataSource(CreateDb()));
         context.Services.AddKeyedSingleton<DocumentSelectDataSource>("writeoff", new DocumentSelectDataSource(CreateDb()));
+        context.Services.AddKeyedSingleton<UpsEquipmentSelectDataSource>("ups", new UpsEquipmentSelectDataSource(CreateDb(), true));
+        context.Services.AddKeyedSingleton<UpsEquipmentSelectDataSource>("server", new UpsEquipmentSelectDataSource(CreateDb(), false));
         return new Fixture(context, service, navigation);
     }
 
@@ -348,6 +350,12 @@ public sealed class EquipmentFormTests
 
         public override Task<IReadOnlyList<EquipmentRouterInventoryItem>> GetRouterInventoryAsync(int equipmentId) =>
             Task.FromResult<IReadOnlyList<EquipmentRouterInventoryItem>>([]);
+
+        public override Task<IReadOnlyList<UpsServerLink>> GetUpsLinksAsync(int serverEquipmentId) =>
+            Task.FromResult<IReadOnlyList<UpsServerLink>>([]);
+
+        public override Task<EquipmentActualInventory?> GetLastInventoryAsync(int equipmentId) =>
+            Task.FromResult<EquipmentActualInventory?>(null);
 
         public override Task<bool> CanUseAccountingAsync(int? personId) => Task.FromResult(true);
 
