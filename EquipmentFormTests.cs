@@ -597,6 +597,51 @@ public sealed class EquipmentFormTests
         Assert.Equal(reads, fixture.Service.GetPhonesCalls);
     }
 
+    /// <summary>Просмотр модели открывает отдельную вкладку и не закрывает форму оборудования.</summary>
+    [Fact]
+    public async Task ModelView_OpensNewTabWithoutClosingEquipmentForm()
+    {
+        var fixture = CreateFixture();
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+
+        await InvokeHandler(page, "OpenModelViewAsync", new EquipmentModel { Id = 945 });
+
+        var open = Assert.Single(context.JSInterop.Invocations, call => call.Identifier == "open");
+        Assert.Contains("id=945", open.Arguments[0]?.ToString());
+        Assert.Equal("_blank", open.Arguments[1]);
+        Assert.DoesNotContain(context.JSInterop.Invocations, call => call.Identifier == "clayModelEquipmentForm.close");
+        Assert.Equal("CLAY_TEST_7", FindSn(page).GetAttribute("value"));
+    }
+
+    /// <summary>Редактирование истории расположений и ответственных доступно только у последней строки.</summary>
+    [Fact]
+    public async Task HistoricalPeriods_AllowEditingOnlyLastRow()
+    {
+        var fixture = CreateFixture();
+        for (var day = 1; day <= 3; day++)
+        {
+            fixture.Service.StoredLocations.Add(new EquipmentLocationPeriod
+            {
+                EquipmentId = 7, LocationId = 55, FromUtc = new DateTime(2026, 11, day)
+            });
+            fixture.Service.StoredResponsibles.Add(new EquipmentResponsiblePeriod
+            {
+                EquipmentId = 7, EmployeeId = 4, FromUtc = new DateTime(2026, 11, day),
+                ToUtc = new DateTime(2026, 11, day + 1)
+            });
+        }
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+
+        Assert.Equal(3, page.FindAll("#equipment-locations tbody tr").Count);
+        Assert.Equal(3, page.FindAll("#equipment-responsibles tbody tr").Count);
+        page.WaitForAssertion(() => Assert.Single(page.FindAll("#equipment-locations tbody button")));
+        page.WaitForAssertion(() => Assert.Single(page.FindAll("#equipment-responsibles tbody button")));
+    }
+
     /// <summary>Учётные записи отображаются только для MAC-типа и роли 102.</summary>
     [Fact]
     public async Task AccountsVisibility_RequiresMacTypeAndDutyRole()
@@ -1007,6 +1052,38 @@ public sealed class EquipmentFormTests
                 LocationId = 55, SerialNumber = $"CLAY_TEST_{id}", Description = $"Copy{id}",
                 MacAddress = "001122334455", WriteOffAtUtc = WriteOffDates.GetValueOrDefault(id),
                 ChangedById = 4, ChangedAtUtc = new DateTime(2026, 11, 18, 8, 0, 0), ChangedByName = "Тестов А.",
+            };
+        }
+
+        /// <summary>Собирает пакетный результат из тех же тестовых данных, не обращаясь к БД.</summary>
+        public override async Task<EquipmentFormReadResult> GetFormDataAsync(EquipmentFormReadRequest request)
+        {
+            var phones = request.IncludePhones
+                ? await GetPhonesAsync(request.EquipmentId)
+                : (IReadOnlyList<EquipmentPhoneLink>)[];
+            return new EquipmentFormReadResult
+            {
+                Phones = phones,
+                HotelPhoneCount = request.IncludeHotelPhoneCount && phones.Count > 0 ? HotelPhoneCount : 0,
+                Locations = StoredLocations.Where(item => item.EquipmentId == request.EquipmentId).ToList(),
+                Responsibles = StoredResponsibles.ToList(),
+                Accounts = [],
+                ComputerHistory = request.IncludeComputer ? StoredComputers.ToList() : [],
+                SimCards = [],
+                SimServices = [],
+                SimServiceTypes = [],
+                Licenses = [],
+                LicenseTypes = [],
+                SoftwareInstallations = request.IncludeComputer ? StoredSoftware.ToList() : [],
+                Accounting = StoredAccounting.ToList(),
+                RouterInfo = null,
+                RouterInventory = [],
+                UpsLinks = [],
+                LastInventory = null,
+                NetworkAttachmentCount = 0,
+                NetworkNameHistory = request.IncludeNetworkName
+                    ? await GetNetworkNameHistoryAsync(request.EquipmentId)
+                    : []
             };
         }
 
