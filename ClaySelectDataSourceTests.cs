@@ -98,6 +98,26 @@ public sealed class ClaySelectDataSourceTests
         Assert.Equal(2365, Assert.Single(connection.ParameterLog)["DocumentTypeId"]);
     }
 
+    /// <summary>Акты списания читаются одним join-запросом с названиями документов.</summary>
+    [Fact]
+    public async Task WriteOffActs_LoadDocumentNamesWithoutNPlusOne()
+    {
+        DapperColumnMapper.Initialize();
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([
+            Script.Rows(
+                Script.Row(("КодДокумента", 2), ("НазваниеДокумента", "Акт 2")),
+                Script.Row(("КодДокумента", 1), ("НазваниеДокумента", "Акт 1")))
+        ]));
+        var source = new DocumentSelectDataSource(CreateDb(connection));
+
+        var acts = await source.GetWriteOffActsAsync(7);
+
+        Assert.Equal(2, acts.Count);
+        Assert.Single(connection.CommandLog);
+        Assert.Contains("INNER JOIN vwДокументы", connection.CommandLog[0]);
+        Assert.Equal(7, Assert.Single(connection.ParameterLog)["EquipmentId"]);
+    }
+
     /// <summary>Выбор UPS применяет серверный фильтр текущего офиса и исключает склад.</summary>
     [Fact]
     public async Task UpsSearch_UsesLocationInOfficeFilter()

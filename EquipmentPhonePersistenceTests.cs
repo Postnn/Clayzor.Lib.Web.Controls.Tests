@@ -116,6 +116,43 @@ public sealed class EquipmentPhonePersistenceTests
         Assert.DoesNotContain(connection.CommandLog, sql => sql.Contains("sp_CCM_PhoneSync"));
     }
 
+    /// <summary>Синхронизация не затрагивает неизменённые номера и их оборудование подключения.</summary>
+    [Fact]
+    public async Task SynchronizePhones_UsesOnlyAffectedPhoneDiff()
+    {
+        DapperColumnMapper.Initialize();
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([
+            Script.Rows(Script.Row(("КодТелефонногоНомера", 2), ("КодТелефоннойСтанции", 0), ("XorcomName", ""))),
+            Script.NonQuery(),
+        ]));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+
+        await service.SynchronizePhonesAsync(7,
+            [Link(1, ConnectionEquipmentId: 8)],
+            [Link(1, ConnectionEquipmentId: 8), Link(2, ConnectionEquipmentId: 9)]);
+
+        Assert.Equal(2, connection.CommandLog.Count);
+        var requestedPhone = Assert.Single(connection.ParameterLog, item => item.ContainsKey("Id"));
+        Assert.Equal(2, requestedPhone["Id"]);
+        Assert.DoesNotContain(connection.ParameterLog, item =>
+            (item.GetValueOrDefault("@КодОборудования") ?? item.GetValueOrDefault("КодОборудования"))?.Equals(8) == true);
+    }
+
+    /// <summary>Изменение только срока возврата или примечания не вызывает команды АТС.</summary>
+    [Fact]
+    public async Task SynchronizePhones_IgnoresMetadataOnlyChanges()
+    {
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>());
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+
+        var errors = await service.SynchronizePhonesAsync(7,
+            [Link(1, ReturnDate: new DateTime(2026, 12, 1), Notes: "old")],
+            [Link(1, ReturnDate: new DateTime(2026, 12, 2), Notes: "new")]);
+
+        Assert.Empty(errors);
+        Assert.Empty(connection.CommandLog);
+    }
+
     /// <summary>Чтение восстанавливает поля связи и срок возврата.</summary>
     [Fact]
     public async Task GetPhones_MapsAllColumns()

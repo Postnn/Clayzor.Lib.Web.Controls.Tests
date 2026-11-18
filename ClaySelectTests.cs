@@ -100,6 +100,29 @@ public sealed class ClaySelectTests : IDisposable
         Assert.Empty(cut.FindAll(".clay-select-popup"));
     }
 
+    /// <summary>Подтверждение пустого поля вызывает Cleared, а Escape только восстанавливает выбор.</summary>
+    [Fact]
+    public void ConfirmedClear_RaisesClearedOnlyAfterBlur()
+    {
+        var cleared = 0;
+        var cut = Render(parameters => parameters
+            .Add(component => component.Value, 1)
+            .Add(component => component.SelectedItem, Items[0])
+            .Add(component => component.Cleared, () => cleared++));
+
+        cut.Find("input").Input(string.Empty);
+        Assert.Equal(0, cleared);
+        cut.Find("input").KeyDown(new KeyboardEventArgs { Key = "Escape" });
+        Assert.Equal(0, cleared);
+        Assert.Equal(1, cut.Instance.Value);
+
+        cut.Find("input").Input(string.Empty);
+        cut.Find("input").Blur();
+
+        Assert.Equal(1, cleared);
+        Assert.Null(cut.Instance.Value);
+    }
+
     /// <summary>
     /// При неизменном тексте выбранного элемента расширенный поиск получает пустой запрос.
     /// </summary>

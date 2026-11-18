@@ -3,6 +3,7 @@ using Clayzor.Lib.DALC;
 using Clayzor.Lib.Entities.Inventory;
 using Clayzor.Lib.Entities.MedicalTests;
 using Clayzor.Lib.Web.Controls.Components.Select;
+using Clayzor.Lib.Web.Controls.Components.Grid;
 using Clayzor.Lib.Web.Controls.Services;
 using Clayzor.Lib.Web.Settings;
 using Clayzor.Lib.Web.DBSelect.Documents;
@@ -65,6 +66,25 @@ public sealed class EquipmentFormTests
         Assert.DoesNotContain(context.JSInterop.Invocations, call => call.Identifier == "clayModelEquipmentForm.close");
     }
 
+    /// <summary>Отзыв роли между загрузкой и Save показывает ошибку и сохраняет черновик.</summary>
+    [Fact]
+    public async Task SavePermissionRevoked_KeepsDraftWithoutSuccessCallbacks()
+    {
+        var fixture = CreateFixture();
+        fixture.Service.SaveException = new UnauthorizedAccessException("Недостаточно прав для изменения оборудования.");
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        FindSn(page).Input("CLAY_TEST_DRAFT");
+
+        await InvokeSave(page, false);
+
+        page.WaitForAssertion(() => Assert.Contains("Недостаточно прав", page.Markup));
+        Assert.Equal("CLAY_TEST_DRAFT", FindSn(page).GetAttribute("value"));
+        Assert.DoesNotContain(context.JSInterop.Invocations, call => call.Identifier == "clayModelEquipmentForm.refreshOpener");
+        Assert.DoesNotContain(context.JSInterop.Invocations, call => call.Identifier == "clayModelEquipmentForm.close");
+    }
+
     /// <summary>Параллельный повторный Save не вызывает второй UPDATE.</summary>
     [Fact]
     public async Task ConcurrentSave_ExecutesSingleUpdate()
@@ -99,6 +119,34 @@ public sealed class EquipmentFormTests
 
         WaitForSn(page, "CLAY_TEST_8");
         Assert.Equal(new[] { 7, 8 }, fixture.Service.Requests);
+    }
+
+    /// <summary>Акты списания видны только без выбранного документа и выводятся текстом без ссылок.</summary>
+    [Theory]
+    [InlineData(0, null, false)]
+    [InlineData(2, null, true)]
+    [InlineData(1, 9, false)]
+    public async Task PendingWriteOffActs_VisibleOnlyWithoutWriteoffDocument(
+        int count,
+        int? documentId,
+        bool expected)
+    {
+        var acts = Enumerable.Range(1, count).Select(index => new DocumentLookup
+        {
+            Id = index, Name = $"Акт {index}", Number = index.ToString()
+        }).ToList();
+        var fixture = CreateFixture(writeOffActs: acts, writeOffDocumentId: documentId);
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+
+        Assert.Equal(expected, page.FindAll(".equipment-writeoff-acts").Count > 0);
+        if (expected)
+        {
+            Assert.Contains("Акт 1", page.Markup);
+            Assert.Contains("Акт 2", page.Markup);
+        }
+        Assert.Empty(page.FindAll(".equipment-writeoff-acts a"));
     }
 
     /// <summary>Для обычного оборудования дата списания требует документ, для SIM — нет.</summary>
@@ -182,6 +230,31 @@ public sealed class EquipmentFormTests
         Assert.Equal(2, fixture.Service.SyncCalls);
         Assert.Equal(new[] { 11 }, fixture.Service.PhoneSaves[1].Original);
         Assert.Empty(fixture.Service.PhoneSaves[1].Current);
+    }
+
+    /// <summary>После ошибки АТС повторный Save выполняет только синхронизацию без повторного UPDATE.</summary>
+    [Fact]
+    public async Task SyncFailure_RetriesWithoutRepeatingDatabaseSave()
+    {
+        var fixture = CreateFixture(phones: true);
+        fixture.Service.SyncException = new InvalidOperationException("АТС недоступна");
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        await InvokeHandler(page, "OnPhoneToAddChangedAsync", 11);
+
+        await InvokeSave(page, false);
+
+        Assert.Equal(1, fixture.Service.UpdateWithPhonesCalls);
+        Assert.Equal(1, fixture.Service.SyncCalls);
+        Assert.NotNull(GetPrivate(page.Instance, "_pendingPhoneSync"));
+        fixture.Service.SyncException = null;
+
+        await InvokeSave(page, false);
+
+        Assert.Equal(1, fixture.Service.UpdateWithPhonesCalls);
+        Assert.Equal(2, fixture.Service.SyncCalls);
+        Assert.Null(GetPrivate(page.Instance, "_pendingPhoneSync"));
     }
 
     /// <summary>Добавление номера обновляет все прикладные фильтры и исключает его из следующего поиска.</summary>
@@ -353,6 +426,93 @@ public sealed class EquipmentFormTests
         Assert.Equal(reads + 1, fixture.Service.GetPhonesCalls);
     }
 
+    /// <summary>Подтверждённая очистка типа удаляет старые объекты и фильтр поиска модели.</summary>
+    [Fact]
+    public async Task TypeClearConfirmed_RemovesTypeModelAndSearchFilter()
+    {
+        var fixture = CreateFixture(network: true);
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+
+        await InvokeHandler(page, "OnTypeClearConfirmed");
+
+        Assert.Null(CurrentModel(page.Instance).EquipmentTypeId);
+        Assert.Null(CurrentModel(page.Instance).ModelId);
+        Assert.Null(GetPrivate(page.Instance, "_selectedType"));
+        Assert.Null(GetPrivate(page.Instance, "_selectedModel"));
+        Assert.Null(context.Services.GetRequiredService<EquipmentModelSelectDataSource>().Filter.EquipmentTypeId);
+        Assert.Null(context.Services.GetRequiredService<PhoneNumberSelectDataSource>().EquipmentTypeId);
+    }
+
+    /// <summary>Смена типа не очищает несохранённые сетевые и телефонные значения.</summary>
+    [Fact]
+    public async Task TypeSwitch_PreservesDirtyFeatureValues()
+    {
+        var fixture = CreateFixture(phones: true, phoneConfig: true);
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        CurrentModel(page.Instance).NetworkName = "draft-host";
+        CurrentModel(page.Instance).MacAddress = "001122334455";
+        CurrentModel(page.Instance).MacAddress2 = "a0b1c2d3e4f5";
+        CurrentModel(page.Instance).PhonePoolId = 12;
+        CurrentModel(page.Instance).CameraIsConnected = 1;
+
+        await InvokeHandler(page, "OnTypeChanged", new EquipmentType { Id = 104, Name = "Other" });
+
+        Assert.Equal("draft-host", CurrentModel(page.Instance).NetworkName);
+        Assert.Equal("001122334455", CurrentModel(page.Instance).MacAddress);
+        Assert.Equal("a0b1c2d3e4f5", CurrentModel(page.Instance).MacAddress2);
+        Assert.Equal(12, CurrentModel(page.Instance).PhonePoolId);
+        Assert.Equal(1, CurrentModel(page.Instance).CameraIsConnected);
+    }
+
+    /// <summary>Переход A→B→A сохраняет добавленный телефон и исходный diff baseline.</summary>
+    [Fact]
+    public async Task TypeSwitchAwayAndBack_PreservesUncommittedPhoneDiff()
+    {
+        var fixture = CreateFixture(phones: true, phoneConfig: true);
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        var originalType = (EquipmentType)GetPrivate(page.Instance, "_selectedType")!;
+        var phones = (List<EquipmentPhoneLink>)GetPrivate(page.Instance, "_phones")!;
+        phones.Add(new EquipmentPhoneLink { PhoneId = 99, EquipmentId = 7, Description = "draft" });
+        var reads = fixture.Service.GetPhonesCalls;
+
+        await InvokeHandler(page, "OnTypeChanged", new EquipmentType { Id = 31, Name = "Other", HasPhoneNumber = 1 });
+        await InvokeHandler(page, "OnTypeChanged", originalType);
+
+        Assert.Equal(reads, fixture.Service.GetPhonesCalls);
+        Assert.Contains(phones, item => item.PhoneId == 99);
+        Assert.Empty((List<EquipmentPhoneLink>)GetPrivate(page.Instance, "_originalPhones")!);
+        Assert.True(BoolProperty(page.Instance, "PhonesModified"));
+    }
+
+    /// <summary>Существующие компьютерные данные остаются видимыми read-only при несовместимом черновике типа.</summary>
+    [Fact]
+    public async Task DraftTypeChange_KeepsPersistedComputerDataVisibleReadOnly()
+    {
+        var fixture = CreateFixture(computer: true);
+        fixture.Service.StoredComputers.Add(new EquipmentComputerSnapshot
+        {
+            EquipmentId = 7, Date = new DateTime(2026, 11, 18), RamMb = 1024
+        });
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+
+        await InvokeHandler(page, "OnTypeChanged", new EquipmentType { Id = 104, Name = "Other" });
+
+        Assert.True(BoolProperty(page.Instance, "ShowComputer"));
+        Assert.False(BoolProperty(page.Instance, "CanEditComputer"));
+        Assert.Single((List<EquipmentComputerSnapshot>)GetPrivate(page.Instance, "_computerHistory")!);
+        var options = (ClayGridOptions)GetPrivate(page.Instance, "_computerGridOptions")!;
+        Assert.False(options.ShowAddButton);
+        page.WaitForAssertion(() => Assert.Single(page.FindAll("#equipment-computer tbody tr")));
+    }
+
     /// <summary>Число MAC-полей соответствует Net=0/1/2/3+ и отсутствию модели.</summary>
     [Theory]
     [InlineData(0, 0)]
@@ -455,6 +615,7 @@ public sealed class EquipmentFormTests
         var page = context.Render<EquipmentForm>();
         WaitForSn(page, "CLAY_TEST_7");
         SetPrivate(page.Instance, "_canEditSim", true);
+        SetPrivate(page.Instance, "_selectedType", new EquipmentType { Id = 27, HasSimCharacteristics = 1 });
         var dialogAdded = TrackNextDialog(context);
         var pending = InvokeHandler(page, "DeleteSimAsync");
         var dialog = await dialogAdded.Task.WaitAsync(TimeSpan.FromSeconds(2));
@@ -849,7 +1010,13 @@ public sealed class EquipmentFormTests
         Assert.Equal("Office 2026", link.TextContent);
     }
 
-    private static Fixture CreateFixture(bool phones = false, bool network = false, bool phoneConfig = false, bool computer = false)
+    private static Fixture CreateFixture(
+        bool phones = false,
+        bool network = false,
+        bool phoneConfig = false,
+        bool computer = false,
+        IReadOnlyList<DocumentLookup>? writeOffActs = null,
+        int? writeOffDocumentId = null)
     {
         DapperColumnMapper.Initialize();
         var context = new BunitContext();
@@ -873,7 +1040,15 @@ public sealed class EquipmentFormTests
             ["URI_equipment_form"] = "http://localhost/Equipment/EquipmentForm",
             ["URI_tel_form"] = "http://localhost/Telefon/Tel",
         };
-        var service = new FakeEquipmentFormService(CreateDb()) { PhoneConfig = phoneConfig };
+        var service = new FakeEquipmentFormService(CreateDb())
+        {
+            PhoneConfig = phoneConfig,
+            WriteOffDocumentId = writeOffDocumentId
+        };
+        var actRows = (writeOffActs ?? []).Select(item => Script.Row(
+            ("КодДокумента", item.Id), ("НазваниеДокумента", item.Name),
+            ("НомерДокумента", item.Number), ("ДатаДокумента", item.Date))).ToArray();
+        var writeOffEntries = Enumerable.Range(0, 8).Select(_ => Script.Rows(actRows)).ToArray();
         context.Services.AddSingleton<NavigationManager>(navigation);
         context.Services.AddSingleton<IConfiguration>(configuration);
         context.Services.AddSingleton<EquipmentFormService>(service);
@@ -893,7 +1068,7 @@ public sealed class EquipmentFormTests
         context.Services.AddSingleton(new EmployeeSelectDataSource(CreateDb()));
         context.Services.AddSingleton(new LocationSelectDataSource(CreateDb()));
         context.Services.AddKeyedSingleton<DocumentSelectDataSource>("receipt", new DocumentSelectDataSource(CreateDb()));
-        context.Services.AddKeyedSingleton<DocumentSelectDataSource>("writeoff", new DocumentSelectDataSource(CreateDb()));
+        context.Services.AddKeyedSingleton<DocumentSelectDataSource>("writeoff", new DocumentSelectDataSource(CreateDb(writeOffEntries)));
         context.Services.AddKeyedSingleton<UpsEquipmentSelectDataSource>("ups", new UpsEquipmentSelectDataSource(CreateDb(), true));
         context.Services.AddKeyedSingleton<UpsEquipmentSelectDataSource>("server", new UpsEquipmentSelectDataSource(CreateDb(), false));
         return new Fixture(context, service, navigation, js);
@@ -1007,11 +1182,13 @@ public sealed class EquipmentFormTests
         public FakeEquipmentFormService(DbManager db) : base(db) { }
         public EquipmentEntity? Updated { get; private set; }
         public Exception? SaveException { get; set; }
+        public Exception? SyncException { get; set; }
         public Exception? ResponsibleException { get; set; }
         public EquipmentResponsiblePeriod? ResponsibleUpdated { get; private set; }
         public bool DeferredUpdate { get; set; }
         public bool DeferredInitialLoad { get; set; }
         public bool PhoneConfig { get; set; }
+        public int? WriteOffDocumentId { get; set; }
         public bool RoleForPersonResult { get; set; } = true;
         public bool AccountingAvailable { get; set; } = true;
         public int UpdateCalls { get; private set; }
@@ -1051,6 +1228,7 @@ public sealed class EquipmentFormTests
                 Id = id, EquipmentTypeId = PhoneConfig ? 30 : 103, ModelId = 945, OwnerId = 1, TenantId = id,
                 LocationId = 55, SerialNumber = $"CLAY_TEST_{id}", Description = $"Copy{id}",
                 MacAddress = "001122334455", WriteOffAtUtc = WriteOffDates.GetValueOrDefault(id),
+                DocumentWriteOffId = WriteOffDocumentId,
                 ChangedById = 4, ChangedAtUtc = new DateTime(2026, 11, 18, 8, 0, 0), ChangedByName = "Тестов А.",
             };
         }
@@ -1232,6 +1410,8 @@ public sealed class EquipmentFormTests
             IReadOnlyCollection<EquipmentPhoneLink> current)
         {
             SyncCalls++;
+            if (SyncException is not null)
+                throw SyncException;
             return Task.FromResult<IReadOnlyList<string>>([]);
         }
 
