@@ -460,11 +460,13 @@ public sealed class ClaySelectTests : IDisposable
         Assert.Empty(cut.FindAll(".clay-select-popup"));
     }
 
-    /// <summary>Отключённое поле не показывает подсказку для ввода.</summary>
-    [Fact]
-    public void Disabled_HidesPlaceholder()
+    /// <summary>Неактивное поле не показывает подсказку для ввода.</summary>
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public void DisabledOrReadOnly_HidesPlaceholder(bool disabled, bool readOnly)
     {
-        var cut = Render(options: new ClaySelectOptions { Disabled = true, Placeholder = "Введите значение" });
+        var cut = Render(options: new ClaySelectOptions { Disabled = disabled, ReadOnly = readOnly, Placeholder = "Введите значение" });
 
         Assert.Null(cut.Find("input").GetAttribute("placeholder"));
     }
