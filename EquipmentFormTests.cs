@@ -357,6 +357,8 @@ public sealed class EquipmentFormTests
         public override Task<EquipmentActualInventory?> GetLastInventoryAsync(int equipmentId) =>
             Task.FromResult<EquipmentActualInventory?>(null);
 
+        public override Task<int> GetNetworkAttachmentCountAsync(int equipmentId) => Task.FromResult(0);
+
         public override Task<bool> CanUseAccountingAsync(int? personId) => Task.FromResult(true);
 
         public override Task<bool> HasRoleAsync(int roleId) => Task.FromResult(true);
