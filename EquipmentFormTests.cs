@@ -318,6 +318,9 @@ public sealed class EquipmentFormTests
         public override Task<IReadOnlyList<EquipmentResponsiblePeriod>> GetResponsiblesAsync(int equipmentId) =>
             Task.FromResult<IReadOnlyList<EquipmentResponsiblePeriod>>([]);
 
+        public override Task<IReadOnlyList<EquipmentAccount>> GetAccountsAsync(int equipmentId) =>
+            Task.FromResult<IReadOnlyList<EquipmentAccount>>([]);
+
         public override Task<bool> HasRoleAsync(int roleId) => Task.FromResult(true);
 
         public override async Task UpdateAsync(EquipmentEntity equipment)
