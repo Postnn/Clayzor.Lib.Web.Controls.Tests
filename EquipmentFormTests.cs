@@ -626,6 +626,7 @@ public sealed class EquipmentFormTests
         var page = context.Render<EquipmentForm>();
         WaitForSn(page, "CLAY_TEST_7");
         Assert.Contains("Операции", page.Markup);
+        Assert.Contains("Операции", page.FindAll(".clay-form-toolbar-button")[0].TextContent);
         Assert.DoesNotContain("Подключить сеть", page.Markup);
 
         fixture.Service.Roles.Remove(103);

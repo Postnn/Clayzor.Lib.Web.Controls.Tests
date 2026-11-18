@@ -366,20 +366,28 @@ public sealed class EquipmentInsTests
         fixture.Service.DeferredAccountingCompletion.SetResult(true);
         await first;
         Assert.True(PrivateBool(page.Instance, "_accountingAvailable"));
-        Assert.Single(page.FindAll("input[placeholder='Введите арендатора']"));
+        var tenantRow = page.FindAll(".equipment-ins-accounting-row").Single(row => row.TextContent.Contains("Арендатор:"));
+        var tenantInput = tenantRow.QuerySelector("input");
+        Assert.NotNull(tenantInput);
+        Assert.True(tenantInput.HasAttribute("disabled"));
+        Assert.Null(tenantInput.GetAttribute("placeholder"));
     }
 
-    /// <summary>При доступном бухучёте арендатор и бухгалтерский документ присутствуют с подсказками.</summary>
+    /// <summary>При доступном бухучёте отключённые поля видны без подсказок, редактируемый документ сохраняет подсказку.</summary>
     [Fact]
-    public async Task AccountingAvailable_ShowsTenantAndDocumentPlaceholders()
+    public async Task AccountingAvailable_HidesDisabledPlaceholders()
     {
         var fixture = CreateFixture("http://localhost/Equipment/EquipmentIns?copyId=7", accountingAvailable: true);
         await using var context = fixture.Context;
         var page = context.Render<EquipmentIns>();
         page.WaitForAssertion(() =>
         {
-            Assert.Single(page.FindAll("input[placeholder='Введите арендатора']"));
-            Assert.Equal(2, page.FindAll("input[placeholder='Введите документ поступления']").Count);
+            var tenantRow = page.FindAll(".equipment-ins-accounting-row").Single(row => row.TextContent.Contains("Арендатор:"));
+            var tenantInput = tenantRow.QuerySelector("input");
+            Assert.NotNull(tenantInput);
+            Assert.True(tenantInput.HasAttribute("disabled"));
+            Assert.Null(tenantInput.GetAttribute("placeholder"));
+            Assert.Single(page.FindAll("input[placeholder='Введите документ поступления']"));
         }, TimeSpan.FromSeconds(3));
     }
 

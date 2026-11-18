@@ -460,6 +460,15 @@ public sealed class ClaySelectTests : IDisposable
         Assert.Empty(cut.FindAll(".clay-select-popup"));
     }
 
+    /// <summary>Отключённое поле не показывает подсказку для ввода.</summary>
+    [Fact]
+    public void Disabled_HidesPlaceholder()
+    {
+        var cut = Render(options: new ClaySelectOptions { Disabled = true, Placeholder = "Введите значение" });
+
+        Assert.Null(cut.Find("input").GetAttribute("placeholder"));
+    }
+
     /// <summary>
     /// Отмена расширенного поиска сохраняет прежний выбор.
     /// </summary>
