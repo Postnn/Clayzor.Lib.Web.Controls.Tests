@@ -324,6 +324,13 @@ public sealed class EquipmentFormTests
         public override Task<IReadOnlyList<EquipmentSimCard>> GetSimCardsAsync(int equipmentId) =>
             Task.FromResult<IReadOnlyList<EquipmentSimCard>>([]);
 
+        public override Task<IReadOnlyList<EquipmentSimService>> GetSimServicesAsync(
+            int equipmentId, bool showHistory, bool showRequired) =>
+            Task.FromResult<IReadOnlyList<EquipmentSimService>>([]);
+
+        public override Task<IReadOnlyList<SimServiceType>> GetSimServiceTypesAsync() =>
+            Task.FromResult<IReadOnlyList<SimServiceType>>([]);
+
         public override Task<bool> HasRoleAsync(int roleId) => Task.FromResult(true);
 
         public override async Task UpdateAsync(EquipmentEntity equipment)
