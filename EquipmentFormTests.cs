@@ -321,6 +321,9 @@ public sealed class EquipmentFormTests
         public override Task<IReadOnlyList<EquipmentAccount>> GetAccountsAsync(int equipmentId) =>
             Task.FromResult<IReadOnlyList<EquipmentAccount>>([]);
 
+        public override Task<IReadOnlyList<EquipmentSimCard>> GetSimCardsAsync(int equipmentId) =>
+            Task.FromResult<IReadOnlyList<EquipmentSimCard>>([]);
+
         public override Task<bool> HasRoleAsync(int roleId) => Task.FromResult(true);
 
         public override async Task UpdateAsync(EquipmentEntity equipment)
