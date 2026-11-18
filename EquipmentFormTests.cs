@@ -3,7 +3,9 @@ using Clayzor.Lib.DALC;
 using Clayzor.Lib.Entities.Inventory;
 using Clayzor.Lib.Entities.MedicalTests;
 using Clayzor.Lib.Web.DBSelect.Documents;
+using Clayzor.Lib.Web.DBSelect.Employees;
 using Clayzor.Lib.Web.DBSelect.Equipment;
+using Clayzor.Lib.Web.DBSelect.Locations;
 using Clayzor.Lib.Web.DBSelect.Persons;
 using Kesco.App.Web.Inventory.Components.Pages.Equipment;
 using Kesco.App.Web.Inventory.Components.Pages.Equipment.Details;
@@ -223,6 +225,40 @@ public sealed class EquipmentFormTests
         Assert.Equal("old-host", Assert.Single(history).NetworkName);
     }
 
+    /// <summary>Открытое из формы перемещение «На руках» требует сотрудника и сохраняет обе связи.</summary>
+    [Fact]
+    public async Task OnHandsLocationFromForm_RequiresAndSavesResponsible()
+    {
+        var fixture = CreateFixture();
+        await using var context = fixture.Context;
+        var provider = context.Render<MudDialogProvider>();
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        var dialogAdded = TrackNextDialog(context);
+        var pending = InvokeHandler(page, "OpenLocationDialogAsync", (object?)null);
+        var reference = await dialogAdded.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        provider.WaitForAssertion(() => Assert.Single(provider.FindComponents<EquipmentLocationDialog>()));
+        var dialog = provider.FindComponent<EquipmentLocationDialog>();
+        Assert.True(dialog.Instance.RequireResponsible);
+
+        await page.InvokeAsync(() => reference.Close(DialogResult.Ok(
+            new EquipmentLocationDialogResult(55, DateTime.Now.AddMinutes(-1), null, "", null))));
+        await pending;
+        Assert.Empty(fixture.Service.LocationSaves);
+        Assert.Contains("укажите ответственного сотрудника", page.Markup);
+
+        dialogAdded = TrackNextDialog(context);
+        pending = InvokeHandler(page, "OpenLocationDialogAsync", (object?)null);
+        reference = await dialogAdded.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await page.InvokeAsync(() => reference.Close(DialogResult.Ok(
+            new EquipmentLocationDialogResult(55, DateTime.Now.AddMinutes(-1), null, "", 4))));
+        await pending;
+
+        var save = Assert.Single(fixture.Service.LocationSaves);
+        Assert.Equal(55, save.Location.LocationId);
+        Assert.Equal(4, save.Responsible?.EmployeeId);
+    }
+
     /// <summary>Диалог прежней записи после смены id не выполняет SQL для новой записи.</summary>
     [Fact]
     public async Task AccountDialogFromPreviousId_DoesNotSaveIntoNewEquipment()
@@ -273,13 +309,18 @@ public sealed class EquipmentFormTests
         var fixture = CreateFixture();
         var dateA = new DateTime(2026, 1, 10, 12, 0, 0, DateTimeKind.Utc);
         var dateB = new DateTime(2026, 7, 20, 15, 30, 0, DateTimeKind.Utc);
+        var sectionDateA = new DateTime(2026, 2, 11, 9, 45, 0, DateTimeKind.Utc);
         fixture.Service.WriteOffDates[7] = dateA;
         fixture.Service.WriteOffDates[8] = dateB;
+        fixture.Service.StoredLocations.Add(new EquipmentLocationPeriod
+        {
+            EquipmentId = 7, LocationId = 55, FromUtc = sectionDateA,
+        });
         await using var context = fixture.Context;
         var page = context.Render<EquipmentForm>();
         WaitForSn(page, "CLAY_TEST_7");
         fixture.Js.DeferredIdentifier = "clayGridTimeZone.getOffsetMinutes";
-        fixture.Js.DeferredArgument = dateA.ToString("O");
+        fixture.Js.DeferredArgument = sectionDateA.ToString("O");
         var loadA = InvokeHandler(page, "LoadCurrentAsync", 7);
         await fixture.Js.Requested.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
@@ -291,6 +332,8 @@ public sealed class EquipmentFormTests
         Assert.Equal(8, CurrentModel(page.Instance).Id);
         Assert.Equal(8, CurrentModel(page.Instance).TenantId);
         Assert.Equal(dateB.AddMinutes(180).Date, GetPrivate(page.Instance, "_writeOffDate"));
+        var localDates = (Dictionary<DateTime, DateTime>)GetPrivate(page.Instance, "_localDates")!;
+        Assert.False(localDates.ContainsKey(sectionDateA));
         Assert.False(IsModified(page.Instance));
     }
 
@@ -444,6 +487,8 @@ public sealed class EquipmentFormTests
             Script.Rows(PhoneNumberRow()), Script.Rows(PhoneNumberRow()), Script.Rows(PhoneNumberRow()))));
         context.Services.AddSingleton(new PersonSelectDataSource(CreateDb(
             Script.Rows(PersonRow()), Script.Rows(PersonRow()), Script.Rows(PersonRow()), Script.Rows(PersonRow()))));
+        context.Services.AddSingleton(new EmployeeSelectDataSource(CreateDb()));
+        context.Services.AddSingleton(new LocationSelectDataSource(CreateDb()));
         context.Services.AddKeyedSingleton<DocumentSelectDataSource>("receipt", new DocumentSelectDataSource(CreateDb()));
         context.Services.AddKeyedSingleton<DocumentSelectDataSource>("writeoff", new DocumentSelectDataSource(CreateDb()));
         context.Services.AddKeyedSingleton<UpsEquipmentSelectDataSource>("ups", new UpsEquipmentSelectDataSource(CreateDb(), true));
@@ -558,6 +603,8 @@ public sealed class EquipmentFormTests
         public HashSet<int> Roles { get; } = [42, 43, 102];
         public Dictionary<int, DateTime?> WriteOffDates { get; } = [];
         public List<EquipmentResponsiblePeriod> StoredResponsibles { get; } = [];
+        public List<EquipmentLocationPeriod> StoredLocations { get; } = [];
+        public List<(EquipmentLocationPeriod Location, EquipmentResponsiblePeriod? Responsible)> LocationSaves { get; } = [];
         public List<EquipmentAccounting> StoredAccounting { get; } = [];
         public List<(EquipmentResponsiblePeriod Current, EquipmentResponsiblePeriod? Next, EquipmentLocationPeriod? Location)> WithdrawCalls { get; } = [];
         public List<EquipmentPhoneLink> StoredPhones { get; private set; } = [];
@@ -665,6 +712,14 @@ public sealed class EquipmentFormTests
             return Task.CompletedTask;
         }
 
+        public override Task AddLocationAsync(
+            EquipmentLocationPeriod location,
+            EquipmentResponsiblePeriod? responsible = null)
+        {
+            LocationSaves.Add((location, responsible));
+            return Task.CompletedTask;
+        }
+
         public override Task UpdateResponsibleAsync(EquipmentResponsiblePeriod responsible)
         {
             ResponsibleUpdated = responsible;
@@ -686,7 +741,8 @@ public sealed class EquipmentFormTests
             Task.FromResult<int?>(8);
 
         public override Task<IReadOnlyList<EquipmentLocationPeriod>> GetLocationsAsync(int equipmentId) =>
-            Task.FromResult<IReadOnlyList<EquipmentLocationPeriod>>([]);
+            Task.FromResult<IReadOnlyList<EquipmentLocationPeriod>>(
+                StoredLocations.Where(item => item.EquipmentId == equipmentId).ToList());
 
         public override Task<bool> HasCurrentResponsibleAsync(int equipmentId) => Task.FromResult(false);
 

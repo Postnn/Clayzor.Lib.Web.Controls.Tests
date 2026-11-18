@@ -94,6 +94,25 @@ public sealed class EquipmentPhonePersistenceTests
         Assert.Equal(7, EquipmentId(Assert.Single(fallbackConnection.ParameterLog)));
     }
 
+    /// <summary>При смешанном наборе Xorcom имеет приоритет и CCM не вызывается, как в legacy.</summary>
+    [Fact]
+    public async Task SynchronizePhones_WithXorcomAndCcm_SkipsCcmBranch()
+    {
+        DapperColumnMapper.Initialize();
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([
+            Script.Rows(Script.Row(("КодТелефонногоНомера", 1), ("КодТелефоннойСтанции", 2), ("XorcomName", "X"))),
+            Script.Scalar(0), Script.NonQuery(),
+            Script.Rows(Script.Row(("КодТелефонногоНомера", 2), ("КодТелефоннойСтанции", 0), ("XorcomName", ""))),
+        ]));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+
+        await service.SynchronizePhonesAsync(7,
+            [Link(1, ConnectionEquipmentId: 8)], [Link(2, ConnectionEquipmentId: 8)]);
+
+        Assert.Contains(connection.CommandLog, sql => sql.Contains("sp_Xorcom_PhoneNumberSync"));
+        Assert.DoesNotContain(connection.CommandLog, sql => sql.Contains("sp_CCM_PhoneSync"));
+    }
+
     /// <summary>Чтение восстанавливает поля связи и срок возврата.</summary>
     [Fact]
     public async Task GetPhones_MapsAllColumns()

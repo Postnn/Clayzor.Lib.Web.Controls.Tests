@@ -31,7 +31,7 @@ public sealed class EquipmentEmployeeViewTests
         AssertEmployeeViewOpensUserForm<EquipmentLocationDialog>(parameters =>
         {
             parameters.Add(component => component.RequireResponsible, true);
-            parameters.Add(component => component.LocationId, 1);
+            parameters.Add(component => component.LocationId, 55);
             parameters.Add(component => component.EmployeeId, 4);
         });
 
