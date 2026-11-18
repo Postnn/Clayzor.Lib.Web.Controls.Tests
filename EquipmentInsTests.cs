@@ -82,6 +82,22 @@ public sealed class EquipmentInsTests
         Assert.Equal("http://localhost:5020/Equipment/EquipmentForm?id=123",
             EquipmentIns.BuildEditUrl("http://localhost:5020/Equipment/EquipmentForm", 123));
 
+    /// <summary>Выбранный ответственный открывает карточку сотрудника по настроенному URL.</summary>
+    [Fact]
+    public async Task ResponsibleViewItem_OpensConfiguredEmployeeCard()
+    {
+        var fixture = CreateFixture("http://localhost/Equipment/EquipmentIns?copyId=7");
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentIns>();
+        page.WaitForAssertion(() => Assert.Single(page.FindAll("textarea")), TimeSpan.FromSeconds(3));
+        var select = page.FindComponent<Clayzor.Lib.Web.Controls.Components.Select.ClaySelect<Employee, int?>>();
+        Assert.NotNull(select.Instance.ViewItem);
+        await page.InvokeAsync(() => select.Instance.ViewItem!(new Employee { Id = 4 }));
+        var invocation = Assert.Single(context.JSInterop.Invocations, call => call.Identifier == "open");
+        Assert.Equal("http://localhost/Users/UserForm?id=4", invocation.Arguments[0]);
+        Assert.Equal("_blank", invocation.Arguments[1]);
+    }
+
     /// <summary>SQL копирования восстанавливает тип, модель, владельца и расположение через Dapper-маппер.</summary>
     [Fact]
     public async Task CopyQuery_MapsAllLegacyFields()
@@ -378,7 +394,10 @@ public sealed class EquipmentInsTests
         context.Services.AddMudExtensions();
         var navigation = new FakeNavigationManager();
         navigation.NavigateTo(uri);
-        var configuration = new ConfigurationManager();
+        var configuration = new ConfigurationManager
+        {
+            ["URI_user_form"] = "http://localhost/Users/UserForm",
+        };
         if (includeEditUrl)
             configuration["URI_equipment_form"] = "http://localhost/Equipment/EquipmentForm";
         var service = new FakeEquipmentInsService(CreateDb()) { AccountingAvailable = accountingAvailable };
