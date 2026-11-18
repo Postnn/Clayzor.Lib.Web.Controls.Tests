@@ -700,6 +700,98 @@ public sealed class EquipmentFormTests
         Assert.True(button.HasAttribute("disabled"));
     }
 
+    /// <summary>Компьютерная секция сохраняет отдельные модули и даты стандартных конфигураций.</summary>
+    [Fact]
+    public void ComputerGrid_BuildsDynamicModuleAndConfigurationColumns()
+    {
+        var form = new EquipmentForm();
+        SetPrivate(form, "_computerHistory", new List<EquipmentComputerSnapshot>
+        {
+            new()
+            {
+                RamMb = 3072,
+                RamComponents = [1024, 2048],
+                HdGb = 1000,
+                HdComponents = [1000],
+                SsdGb = 500,
+                SsdComponents = [250, 250],
+                Configuration1Id = 1,
+                Configuration1Name = "Офисная",
+                Configuration1Date = new DateTime(2026, 1, 2),
+            },
+        });
+
+        var columns = (IReadOnlyList<Clayzor.Lib.Web.Controls.Components.Detail.ClayDetailColumn<EquipmentComputerSnapshot>>)typeof(EquipmentForm)
+            .GetProperty("_computerColumns", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .GetValue(form)!;
+
+        Assert.Equal(new[]
+        {
+            "Дата", "RAM, Мб", "RAM1", "RAM2", "HD, Гб", "HD1", "SSD, Гб", "SSD1", "SSD2",
+            "Стандартная конфигурация 1", "Лицензия", "Примечания", "Изменил", "Изменено",
+        }, columns.Select(column => column.Title));
+        Assert.Equal("2048", columns.Single(column => column.Title == "RAM2").TextSelector(((List<EquipmentComputerSnapshot>)GetPrivate(form, "_computerHistory")!)[0]));
+        Assert.Equal("Офисная [02.01.26]", columns.Single(column => column.Title == "Стандартная конфигурация 1")
+            .TextSelector(((List<EquipmentComputerSnapshot>)GetPrivate(form, "_computerHistory")!)[0]));
+    }
+
+    /// <summary>Телефонная секция выводит ссылки, условное подключение, просрочку и предупреждение отеля.</summary>
+    [Fact]
+    public async Task PhoneGrid_RestoresLegacyPresentation()
+    {
+        var fixture = CreateFixture(phones: true);
+        fixture.Service.StoredPhones.AddRange(
+        [
+            new()
+            {
+                PhoneId = 11,
+                Description = "101",
+                IsDefault = true,
+                ConnectionEquipmentId = 55,
+                ReturnDate = DateTime.UtcNow.Date.AddDays(-1),
+                ChangedByName = "Тестов А.",
+                ChangedAt = new DateTime(2026, 1, 1, 12, 0, 0),
+            },
+            new() { PhoneId = 12, Description = "102" },
+        ]);
+        fixture.Service.HotelPhoneCount = 2;
+        await using var context = fixture.Context;
+
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+
+        var phoneLink = page.Find("a[title^='Изменил:']");
+        Assert.Equal("http://localhost/Telefon/Tel?id=11", phoneLink.GetAttribute("href"));
+        Assert.Contains("01.01.2026 15:00:00", phoneLink.GetAttribute("title"));
+        Assert.Equal("http://localhost/Equipment/EquipmentForm?id=55", page.Find("a[title^='Оборудование подключения']").GetAttribute("href"));
+        Assert.Contains("(основной)", page.Markup);
+        Assert.Single(page.FindAll("tr.equipment-overdue"));
+        Assert.Contains("может быть только один телефонный номер", page.Markup);
+    }
+
+    /// <summary>ПО загружается по компьютерному признаку и ссылается на карточку ПО, а не установки.</summary>
+    [Fact]
+    public async Task SoftwareGrid_UsesComputerCharacteristicAndSoftwareId()
+    {
+        var fixture = CreateFixture(computer: true);
+        fixture.Service.StoredSoftware.Add(new()
+        {
+            Id = 1,
+            SoftwareId = 66,
+            SoftwareName = "Office",
+            Installed = "Office 2026",
+            InstalledAt = new DateTime(2026, 1, 1),
+        });
+        await using var context = fixture.Context;
+
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+
+        var link = page.Find("a[title='Открыть форму редактирования информации о ПО']");
+        Assert.Equal("http://localhost/Equipment/EquipmentForm?id=66", link.GetAttribute("href"));
+        Assert.Equal("Office 2026", link.TextContent);
+    }
+
     private static Fixture CreateFixture(bool phones = false, bool network = false, bool phoneConfig = false, bool computer = false)
     {
         DapperColumnMapper.Initialize();
@@ -717,6 +809,8 @@ public sealed class EquipmentFormTests
         {
             ["URI_user_form"] = "http://localhost/user",
             ["URI_model_form"] = "http://localhost/Equipment/ModelEquipmentForm",
+            ["URI_equipment_form"] = "http://localhost/Equipment/EquipmentForm",
+            ["URI_tel_form"] = "http://localhost/Telefon/Tel",
         };
         var service = new FakeEquipmentFormService(CreateDb()) { PhoneConfig = phoneConfig };
         context.Services.AddSingleton<NavigationManager>(navigation);
@@ -872,6 +966,8 @@ public sealed class EquipmentFormTests
         public List<EquipmentAccounting> StoredAccounting { get; } = [];
         public List<(EquipmentResponsiblePeriod Current, EquipmentResponsiblePeriod? Next, EquipmentLocationPeriod? Location)> WithdrawCalls { get; } = [];
         public List<EquipmentPhoneLink> StoredPhones { get; private set; } = [];
+        public List<EquipmentSoftwareInstallation> StoredSoftware { get; } = [];
+        public int HotelPhoneCount { get; set; }
         public List<(int[] Original, int[] Current)> PhoneSaves { get; } = [];
         public int UpdateWithPhonesCalls { get; private set; }
         public int SyncCalls { get; private set; }
@@ -926,7 +1022,7 @@ public sealed class EquipmentFormTests
             Task.FromResult<IReadOnlyList<LicenseType>>([]);
 
         public override Task<IReadOnlyList<EquipmentSoftwareInstallation>> GetSoftwareInstallationsAsync(int equipmentId) =>
-            Task.FromResult<IReadOnlyList<EquipmentSoftwareInstallation>>([]);
+            Task.FromResult<IReadOnlyList<EquipmentSoftwareInstallation>>(StoredSoftware.ToList());
 
         public override Task<IReadOnlyList<EquipmentAccounting>> GetAccountingAsync(int equipmentId) =>
             Task.FromResult<IReadOnlyList<EquipmentAccounting>>(StoredAccounting.ToList());
@@ -1021,6 +1117,8 @@ public sealed class EquipmentFormTests
             GetPhonesCalls++;
             return Task.FromResult<IReadOnlyList<EquipmentPhoneLink>>(StoredPhones.ToList());
         }
+
+        public override Task<int> GetHotelPhoneCountAsync(int equipmentId) => Task.FromResult(HotelPhoneCount);
 
         public override Task UpdateWithPhonesAsync(
             EquipmentEntity equipment,
