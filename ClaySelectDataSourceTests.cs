@@ -56,6 +56,21 @@ public sealed class ClaySelectDataSourceTests
         Assert.Contains("@EquipmentTypeId IS NULL", Assert.Single(connection.CommandLog));
     }
 
+    /// <summary>Выбор UPS применяет серверный фильтр текущего офиса и исключает склад.</summary>
+    [Fact]
+    public async Task UpsSearch_UsesLocationInOfficeFilter()
+    {
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Rows()]));
+        var source = new UpsEquipmentSelectDataSource(CreateDb(connection), true) { LocationId = 55 };
+
+        await source.SearchAsync(new ClaySelectSearchRequest { Limit = 8 });
+
+        var sql = Assert.Single(connection.CommandLog);
+        Assert.Contains("@LocationId IS NULL OR EXISTS", sql);
+        Assert.Contains("ParentLocation.Офис = 1", sql);
+        Assert.Contains("ChildLocation.РабочееМесто <> 4", sql);
+    }
+
     /// <summary>
     /// Источник сотрудников применяет Limit и восстанавливает английское имя.
     /// </summary>

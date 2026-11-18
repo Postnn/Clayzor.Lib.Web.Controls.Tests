@@ -82,7 +82,9 @@ public sealed class EquipmentResponsiblePersistenceTests
     [Fact]
     public async Task IssueAndUpdate_UseConfirmedSql()
     {
-        var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.NonQuery(), Script.NonQuery()]));
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([
+            Script.Scalar(1), Script.NonQuery(), Script.Scalar(1), Script.NonQuery(),
+        ]));
         var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
         var responsible = new EquipmentResponsiblePeriod
         {
@@ -92,8 +94,8 @@ public sealed class EquipmentResponsiblePersistenceTests
         await service.IssueResponsibleAsync(responsible);
         await service.UpdateResponsibleAsync(responsible);
 
-        Assert.Contains("INSERT ОборудованиеСотрудников", connection.CommandLog[0]);
-        Assert.Contains("UPDATE ОборудованиеСотрудников", connection.CommandLog[1]);
-        Assert.DoesNotContain("INSERT", connection.CommandLog[1], StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("INSERT ОборудованиеСотрудников", connection.CommandLog[1]);
+        Assert.Contains("UPDATE ОборудованиеСотрудников", connection.CommandLog[3]);
+        Assert.DoesNotContain("INSERT", connection.CommandLog[3], StringComparison.OrdinalIgnoreCase);
     }
 }

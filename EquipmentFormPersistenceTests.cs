@@ -38,12 +38,13 @@ public sealed class EquipmentFormPersistenceTests
     [Fact]
     public async Task Update_UsesConfirmedSql()
     {
-        var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.NonQuery()]));
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Scalar(1), Script.NonQuery()]));
         var service = new EquipmentFormService(CreateDb(connection));
 
         await service.UpdateAsync(new Equipment { Id = 7, ModelId = 5, OwnerId = 1 });
 
-        var sql = Assert.Single(connection.CommandLog);
+        Assert.Equal(2, connection.CommandLog.Count);
+        var sql = connection.CommandLog[1];
         Assert.Contains("UPDATE vwОборудование", sql);
         Assert.Contains("WHERE КодОборудования = @КодОборудования", sql);
         Assert.DoesNotContain("INSERT", sql, StringComparison.OrdinalIgnoreCase);
@@ -53,7 +54,7 @@ public sealed class EquipmentFormPersistenceTests
     [Fact]
     public async Task UpdateWithoutAffectedRow_Throws()
     {
-        var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.NonQuery(0)]));
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Scalar(1), Script.NonQuery(0)]));
         var service = new EquipmentFormService(CreateDb(connection));
 
         await Assert.ThrowsAsync<InvalidOperationException>(() =>

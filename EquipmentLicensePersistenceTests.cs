@@ -59,7 +59,12 @@ public sealed class EquipmentLicensePersistenceTests
     [Fact]
     public async Task SaveLicense_UsesUpsertAndExclusiveEnd()
     {
-        var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.NonQuery()]));
+        DapperColumnMapper.Initialize();
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([
+            Script.Rows(Script.Row(("КодОборудования", 7), ("КодТипаОборудования", 200), ("КодЛицаВладельца", 1))),
+            Script.Rows(Script.Row(("КодТипаОборудования", 200), ("ЕстьХарактеристикиSoft", (byte)1))),
+            Script.Scalar(1), Script.NonQuery(),
+        ]));
         var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
         var type = new LicenseType { Id = 2, Temporary = 1, Resale = 1 };
         var license = new EquipmentLicense
@@ -74,10 +79,27 @@ public sealed class EquipmentLicensePersistenceTests
 
         await service.SaveLicenseAsync(license, type);
 
-        Assert.Contains("IF EXISTS", connection.CommandLog[0]);
-        Assert.Contains("INSERT vwSoft", connection.CommandLog[0]);
-        Assert.Contains("ДействуетДо = @ДействуетДо", connection.CommandLog[0]);
-        Assert.DoesNotContain("DELETE", connection.CommandLog[0]);
+        Assert.Contains("IF EXISTS", connection.CommandLog[3]);
+        Assert.Contains("INSERT vwSoft", connection.CommandLog[3]);
+        Assert.Contains("ДействуетДо = @ДействуетДо", connection.CommandLog[3]);
+        Assert.DoesNotContain("DELETE", connection.CommandLog[3]);
+    }
+
+    /// <summary>Без роли 44 по владельцу лицензия не записывается.</summary>
+    [Fact]
+    public async Task SaveLicenseWithoutRole_DoesNotWrite()
+    {
+        DapperColumnMapper.Initialize();
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([
+            Script.Rows(Script.Row(("КодОборудования", 7), ("КодТипаОборудования", 200), ("КодЛицаВладельца", 1))),
+            Script.Rows(Script.Row(("КодТипаОборудования", 200), ("ЕстьХарактеристикиSoft", (byte)1))),
+            Script.Scalar(0),
+        ]));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.SaveLicenseAsync(
+            new EquipmentLicense { EquipmentId = 7 }, null));
+        Assert.DoesNotContain(connection.CommandLog, sql => sql.Contains("INSERT vwSoft"));
     }
 
     /// <summary>Чтение восстанавливает поля лицензии и включительную дату окончания.</summary>

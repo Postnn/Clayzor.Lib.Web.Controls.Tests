@@ -71,43 +71,54 @@ public sealed class EquipmentSimPersistenceTests
     [Fact]
     public async Task SaveSimWithDuplicate_ComposesSingleTransaction()
     {
-        var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.NonQuery()]));
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Scalar(1), Script.NonQuery()]));
         var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
         var sim = ValidSim();
 
         await service.SaveSimAsync(sim, 8);
 
-        Assert.Contains("BEGIN TRANSACTION", connection.CommandLog[0]);
-        Assert.Contains("UPDATE vwОборудование", connection.CommandLog[0]);
-        Assert.Contains("UPDATE vwSIMКарты", connection.CommandLog[0]);
-        Assert.Contains("COMMIT TRANSACTION", connection.CommandLog[0]);
-        Assert.Contains("COALESCE", connection.CommandLog[0]);
+        Assert.Contains("BEGIN TRANSACTION", connection.CommandLog[1]);
+        Assert.Contains("UPDATE vwОборудование", connection.CommandLog[1]);
+        Assert.Contains("UPDATE vwSIMКарты", connection.CommandLog[1]);
+        Assert.Contains("COMMIT TRANSACTION", connection.CommandLog[1]);
+        Assert.Contains("COALESCE", connection.CommandLog[1]);
     }
 
     /// <summary>Без дубликата не изменяется другая запись оборудования.</summary>
     [Fact]
     public async Task SaveSimWithoutDuplicate_DoesNotWriteOtherEquipment()
     {
-        var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.NonQuery()]));
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Scalar(1), Script.NonQuery()]));
         var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
 
         await service.SaveSimAsync(ValidSim());
 
-        Assert.DoesNotContain("UPDATE vwОборудование", connection.CommandLog[0]);
-        Assert.Contains("IF EXISTS", connection.CommandLog[0]);
+        Assert.DoesNotContain("UPDATE vwОборудование", connection.CommandLog[1]);
+        Assert.Contains("IF EXISTS", connection.CommandLog[1]);
     }
 
     /// <summary>Удаление затрагивает только представление SIM.</summary>
     [Fact]
     public async Task DeleteSim_DoesNotDeleteEquipment()
     {
-        var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.NonQuery()]));
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Scalar(1), Script.NonQuery()]));
         var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
 
         await service.DeleteSimAsync(7);
 
-        Assert.Contains("DELETE vwSIMКарты", connection.CommandLog[0]);
-        Assert.DoesNotContain("Оборудование SET", connection.CommandLog[0]);
+        Assert.Contains("DELETE vwSIMКарты", connection.CommandLog[1]);
+        Assert.DoesNotContain("Оборудование SET", connection.CommandLog[1]);
+    }
+
+    /// <summary>Без роли 42 удаление SIM не выполняется.</summary>
+    [Fact]
+    public async Task DeleteSimWithoutRole_DoesNotWrite()
+    {
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Scalar(0)]));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.DeleteSimAsync(7));
+        Assert.DoesNotContain(connection.CommandLog, sql => sql.Contains("DELETE vwSIMКарты"));
     }
 
     private static EquipmentSimCard ValidSim() => new()

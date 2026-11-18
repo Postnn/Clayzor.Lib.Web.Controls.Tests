@@ -383,7 +383,7 @@ public sealed class EquipmentFormTests
     [Fact]
     public async Task AccountDialogFromPreviousId_DoesNotSaveIntoNewEquipment()
     {
-        var fixture = CreateFixture();
+        var fixture = CreateFixture(network: true);
         await using var context = fixture.Context;
         var provider = context.Render<MudDialogProvider>();
         var page = context.Render<EquipmentForm>();
@@ -552,6 +552,86 @@ public sealed class EquipmentFormTests
         Assert.Equal(reads, fixture.Service.GetPhonesCalls);
     }
 
+    /// <summary>Учётные записи отображаются только для MAC-типа и роли 102.</summary>
+    [Fact]
+    public async Task AccountsVisibility_RequiresMacTypeAndDutyRole()
+    {
+        var fixture = CreateFixture(network: true);
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        Assert.Contains("Учётные записи", page.Markup);
+
+        fixture.Service.Roles.Remove(102);
+        await InvokeHandler(page, "LoadCurrentAsync", 7);
+        Assert.DoesNotContain("Учётные записи", page.Markup);
+    }
+
+    /// <summary>Команда рабочей сети требует компьютерную характеристику и роль 103.</summary>
+    [Fact]
+    public async Task NetworkCommand_RequiresComputerTypeAndSupportRole()
+    {
+        var fixture = CreateFixture(computer: true);
+        fixture.Service.Roles.Add(103);
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        Assert.Contains("Подключить сеть", page.Markup);
+
+        fixture.Service.Roles.Remove(103);
+        await InvokeHandler(page, "LoadCurrentAsync", 7);
+        Assert.DoesNotContain("Подключить сеть", page.Markup);
+    }
+
+    /// <summary>Добавление UPS скрывается при отсутствии роли 43 по владельцу, чтение секции остаётся.</summary>
+    [Fact]
+    public async Task UpsCommand_RequiresInventoryRoleForOwner()
+    {
+        var fixture = CreateFixture(phoneConfig: true);
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        Assert.Contains("Подключить UPS:", page.Markup);
+
+        fixture.Service.RoleForPersonResult = false;
+        await InvokeHandler(page, "LoadCurrentAsync", 7);
+        Assert.DoesNotContain("Подключить UPS:", page.Markup);
+        Assert.Contains("Подключённые UPS", page.Markup);
+    }
+
+    /// <summary>Бухгалтерская секция доступна для чтения при отсутствии права изменения.</summary>
+    [Fact]
+    public async Task AccountingWithoutWriteAccess_RemainsVisible()
+    {
+        var fixture = CreateFixture();
+        fixture.Service.AccountingAvailable = false;
+        fixture.Service.StoredAccounting.Add(new EquipmentAccounting { EquipmentId = 7, OwnerName = "Read only owner" });
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+
+        Assert.Contains("Бухгалтерский учёт", page.Markup);
+        Assert.Contains("Read only owner", page.Markup);
+        Assert.False(PrivateBool(page.Instance, "_canUseAccounting"));
+    }
+
+    /// <summary>Право лицензии пересчитывается при смене владельца.</summary>
+    [Fact]
+    public async Task OwnerChange_RecalculatesLicenseAccess()
+    {
+        var fixture = CreateFixture();
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        SetPrivate(page.Instance, "_selectedType", new EquipmentType { Id = 200, HasSoftwareCharacteristics = 1 });
+
+        await InvokeHandler(page, "OnOwnerChangedAsync", 2);
+        Assert.True(PrivateBool(page.Instance, "_canEditLicense"));
+        fixture.Service.RoleForPersonResult = false;
+        await InvokeHandler(page, "OnOwnerChangedAsync", 3);
+        Assert.False(PrivateBool(page.Instance, "_canEditLicense"));
+    }
+
     /// <summary>Кнопка конфигурации следует роли 102 независимо от роли редактирования 43.</summary>
     [Fact]
     public async Task PhoneConfigAccess_UsesRole102InsteadOfEditRole()
@@ -572,7 +652,7 @@ public sealed class EquipmentFormTests
         Assert.True(button.HasAttribute("disabled"));
     }
 
-    private static Fixture CreateFixture(bool phones = false, bool network = false, bool phoneConfig = false)
+    private static Fixture CreateFixture(bool phones = false, bool network = false, bool phoneConfig = false, bool computer = false)
     {
         DapperColumnMapper.Initialize();
         var context = new BunitContext();
@@ -595,8 +675,8 @@ public sealed class EquipmentFormTests
         context.Services.AddSingleton<IConfiguration>(configuration);
         context.Services.AddSingleton<EquipmentFormService>(service);
         context.Services.AddSingleton(new EquipmentTypeSelectDataSource(CreateDb(
-            Script.Rows(TypeRow(phones, network, phoneConfig)), Script.Rows(TypeRow(phones, network, phoneConfig)),
-            Script.Rows(TypeRow(phones, network, phoneConfig)), Script.Rows(TypeRow(phones, network, phoneConfig)))));
+            Script.Rows(TypeRow(phones, network, phoneConfig, computer)), Script.Rows(TypeRow(phones, network, phoneConfig, computer)),
+            Script.Rows(TypeRow(phones, network, phoneConfig, computer)), Script.Rows(TypeRow(phones, network, phoneConfig, computer)))));
         context.Services.AddSingleton(new EquipmentModelSelectDataSource(CreateDb(
             Script.Rows(ModelRow(network, phoneConfig)),
             Script.Rows(ModelRow(network, phoneConfig)),
@@ -686,10 +766,12 @@ public sealed class EquipmentFormTests
         .GetMethod("ValidateBusinessRules", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
         .Invoke(page, null)!;
 
-    private static Dictionary<string, object?> TypeRow(bool phones = false, bool network = false, bool phoneConfig = false) => Script.Row(
+    private static Dictionary<string, object?> TypeRow(
+        bool phones = false, bool network = false, bool phoneConfig = false, bool computer = false) => Script.Row(
         ("КодТипаОборудования", phoneConfig ? 30 : 103), ("ТипОборудования", phoneConfig ? "IP-телефон" : "Шторы"),
         ("SNобязателен", (byte)0), ("ЕстьХарактеристикиМонитора", (byte)0),
-        ("ЕстьТелефонныйНомер", phones ? (byte)1 : (byte)0), ("ЕстьMACадрес", (byte)0),
+        ("ЕстьТелефонныйНомер", phones ? (byte)1 : (byte)0), ("ЕстьMACадрес", network ? (byte)1 : (byte)0),
+        ("ЕстьХарактеристикиКомпьютера", computer ? (byte)1 : (byte)0),
         ("ЕстьСетевоеИмя", network ? (byte)1 : (byte)0));
 
     private static Dictionary<string, object?> ModelRow(bool network = false, bool phoneConfig = false) => Script.Row(
@@ -727,6 +809,8 @@ public sealed class EquipmentFormTests
         public bool DeferredUpdate { get; set; }
         public bool DeferredInitialLoad { get; set; }
         public bool PhoneConfig { get; set; }
+        public bool RoleForPersonResult { get; set; } = true;
+        public bool AccountingAvailable { get; set; } = true;
         public int UpdateCalls { get; private set; }
         public int AddAccountCalls { get; private set; }
         public int DeleteSimCalls { get; private set; }
@@ -767,6 +851,12 @@ public sealed class EquipmentFormTests
 
         public override Task<IReadOnlyList<EquipmentResponsiblePeriod>> GetResponsiblesAsync(int equipmentId) =>
             Task.FromResult<IReadOnlyList<EquipmentResponsiblePeriod>>(StoredResponsibles.ToList());
+
+        public override Task<IReadOnlyList<EquipmentComputerSnapshot>> GetComputerHistoryAsync(int equipmentId) =>
+            Task.FromResult<IReadOnlyList<EquipmentComputerSnapshot>>([]);
+
+        public override Task<IReadOnlyList<StandardConfiguration>> GetStandardConfigurationsAsync() =>
+            Task.FromResult<IReadOnlyList<StandardConfiguration>>([]);
 
         public override Task<IReadOnlyList<EquipmentAccount>> GetAccountsAsync(int equipmentId) =>
             Task.FromResult<IReadOnlyList<EquipmentAccount>>([]);
@@ -813,11 +903,11 @@ public sealed class EquipmentFormTests
                 new() { EquipmentId = equipmentId, NetworkName = "old-host", ChangedAtUtc = new DateTime(2026, 11, 18), ChangedByName = "Тестовый сотрудник" },
             ]);
 
-        public override Task<bool> CanUseAccountingAsync(int? personId) => Task.FromResult(true);
+        public override Task<bool> CanUseAccountingAsync(int? personId) => Task.FromResult(AccountingAvailable);
 
         public override Task<bool> HasRoleAsync(int roleId) => Task.FromResult(Roles.Contains(roleId));
 
-        public override Task<bool> HasRoleForPersonAsync(int roleId, int? personId) => Task.FromResult(true);
+        public override Task<bool> HasRoleForPersonAsync(int roleId, int? personId) => Task.FromResult(RoleForPersonResult);
 
         public override async Task UpdateAsync(EquipmentEntity equipment)
         {

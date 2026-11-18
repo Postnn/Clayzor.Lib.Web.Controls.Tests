@@ -12,15 +12,39 @@ public sealed class EquipmentUpsPersistenceTests
     [Fact]
     public async Task QuickLink_UsesUpsAndServerIds()
     {
-        var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.NonQuery(), Script.NonQuery()]));
+        DapperColumnMapper.Initialize();
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([
+            Script.Rows(Script.Row(("КодОборудования", 7), ("КодТипаОборудования", 1), ("КодЛицаВладельца", 1))),
+            Script.Rows(Script.Row(("КодТипаОборудования", 1), ("ЕстьХарактеристикиSIM", (byte)0))),
+            Script.Scalar(1), Script.NonQuery(),
+            Script.Rows(Script.Row(("КодОборудования", 7), ("КодТипаОборудования", 1), ("КодЛицаВладельца", 1))),
+            Script.Rows(Script.Row(("КодТипаОборудования", 1), ("ЕстьХарактеристикиSIM", (byte)0))),
+            Script.Scalar(1), Script.NonQuery(),
+        ]));
         var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
 
         await service.AddUpsLinkAsync(10, 7);
         await service.DeleteUpsLinkAsync(10, 7);
 
-        Assert.Contains("INSERT vwПодключенияUPS", connection.CommandLog[0]);
-        Assert.Contains("НастроеноВыключение", connection.CommandLog[0]);
-        Assert.Contains("DELETE vwПодключенияUPS", connection.CommandLog[1]);
+        Assert.Contains("INSERT vwПодключенияUPS", connection.CommandLog[3]);
+        Assert.Contains("НастроеноВыключение", connection.CommandLog[3]);
+        Assert.Contains("DELETE vwПодключенияUPS", connection.CommandLog[7]);
+    }
+
+    /// <summary>Без роли 43 по владельцу связь UPS не добавляется.</summary>
+    [Fact]
+    public async Task QuickLinkWithoutOwnerRole_DoesNotWrite()
+    {
+        DapperColumnMapper.Initialize();
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([
+            Script.Rows(Script.Row(("КодОборудования", 7), ("КодТипаОборудования", 1), ("КодЛицаВладельца", 1))),
+            Script.Rows(Script.Row(("КодТипаОборудования", 1), ("ЕстьХарактеристикиSIM", (byte)0))),
+            Script.Scalar(0),
+        ]));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.AddUpsLinkAsync(10, 7));
+        Assert.DoesNotContain(connection.CommandLog, sql => sql.Contains("INSERT vwПодключенияUPS"));
     }
 
     /// <summary>Diff удаляет только связи, меняет флаги и сохраняет тесты одной транзакцией.</summary>

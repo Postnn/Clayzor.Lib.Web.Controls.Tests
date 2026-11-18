@@ -70,7 +70,7 @@ public sealed class EquipmentLocationPersistenceTests
     [Fact]
     public async Task Update_UsesConfirmedSql()
     {
-        var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.NonQuery()]));
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Scalar(1), Script.NonQuery()]));
         var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
 
         await service.UpdateLocationAsync(new EquipmentLocationPeriod
@@ -78,7 +78,8 @@ public sealed class EquipmentLocationPersistenceTests
             EquipmentId = 7, FromUtc = new DateTime(2026, 11, 18, 9, 30, 0), Notes = "changed",
         });
 
-        var sql = Assert.Single(connection.CommandLog);
+        Assert.Equal(2, connection.CommandLog.Count);
+        var sql = connection.CommandLog[1];
         Assert.Contains("UPDATE ОборудованиеРасположение", sql);
         Assert.Contains("SET СрокВозврата = @СрокВозврата, Примечания = @Примечания", sql);
         Assert.DoesNotContain("INSERT", sql, StringComparison.OrdinalIgnoreCase);

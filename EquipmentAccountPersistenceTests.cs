@@ -14,6 +14,7 @@ public sealed class EquipmentAccountPersistenceTests
     {
         DapperColumnMapper.Initialize();
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([
+            Script.Scalar(1),
             Script.Rows(Script.Row(("КодОборудования", 7), ("Логин", "test"),
                 ("ОграниченныеПрава", (byte)1), ("Примечание", "note"))),
         ]));
@@ -25,7 +26,7 @@ public sealed class EquipmentAccountPersistenceTests
         Assert.Equal("test", account.Login);
         Assert.Equal(1, account.LimitedRights);
         Assert.Equal("note", account.Notes);
-        Assert.DoesNotContain("Пароль", connection.CommandLog[0]);
+        Assert.DoesNotContain("Пароль", connection.CommandLog[1]);
     }
 
     /// <summary>Добавление, изменение и удаление используют подтверждённый составной ключ.</summary>
@@ -33,7 +34,9 @@ public sealed class EquipmentAccountPersistenceTests
     public async Task AccountCrud_UsesEquipmentAndLoginKey()
     {
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([
-            Script.NonQuery(), Script.NonQuery(), Script.NonQuery(),
+            Script.Scalar(1), Script.Scalar(1), Script.NonQuery(),
+            Script.Scalar(1), Script.Scalar(1), Script.NonQuery(),
+            Script.Scalar(1), Script.Scalar(1), Script.NonQuery(),
         ]));
         var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
         var account = new EquipmentAccount { EquipmentId = 7, Login = "test", Password = "secret", Notes = "note" };
@@ -42,10 +45,24 @@ public sealed class EquipmentAccountPersistenceTests
         await service.UpdateAccountAsync(account);
         await service.DeleteAccountAsync(account);
 
-        Assert.Contains("INSERT ОборудованиеУчётныеЗаписи", connection.CommandLog[0]);
-        Assert.Contains("UPDATE ОборудованиеУчётныеЗаписи", connection.CommandLog[1]);
-        Assert.Contains("DELETE ОборудованиеУчётныеЗаписи", connection.CommandLog[2]);
-        Assert.All(connection.CommandLog, sql => Assert.Contains("Логин", sql));
+        Assert.Contains("INSERT ОборудованиеУчётныеЗаписи", connection.CommandLog[2]);
+        Assert.Contains("UPDATE ОборудованиеУчётныеЗаписи", connection.CommandLog[5]);
+        Assert.Contains("DELETE ОборудованиеУчётныеЗаписи", connection.CommandLog[8]);
+        Assert.All(new[] { connection.CommandLog[2], connection.CommandLog[5], connection.CommandLog[8] },
+            sql => Assert.Contains("Логин", sql));
+    }
+
+    /// <summary>Запись учётной записи без роли 43 отклоняется до SQL.</summary>
+    [Fact]
+    public async Task AddAccountWithoutInventoryRole_DoesNotWrite()
+    {
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Scalar(1), Script.Scalar(0)]));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.AddAccountAsync(
+            new EquipmentAccount { EquipmentId = 7, Login = "test" }));
+
+        Assert.DoesNotContain(connection.CommandLog, sql => sql.Contains("INSERT"));
     }
 
     /// <summary>Пароль запрашивается отдельно после успешной проверки роли.</summary>
