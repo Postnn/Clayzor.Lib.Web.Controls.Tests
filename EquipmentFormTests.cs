@@ -183,7 +183,21 @@ public sealed class EquipmentFormTests
         Assert.Empty(fixture.Service.PhoneSaves[1].Current);
     }
 
-    private static Fixture CreateFixture(bool phones = false)
+    /// <summary>Сетевая история загружается для оборудования с сетевым именем.</summary>
+    [Fact]
+    public async Task NetworkHistory_LoadsForNetworkEquipment()
+    {
+        var fixture = CreateFixture(network: true);
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+
+        Assert.Contains(page.FindAll("button"), button => button.TextContent.Trim() == "История имён");
+        var history = (IReadOnlyList<EquipmentNetworkNameHistory>)GetPrivate(page.Instance, "_networkNameHistory")!;
+        Assert.Equal("old-host", Assert.Single(history).NetworkName);
+    }
+
+    private static Fixture CreateFixture(bool phones = false, bool network = false)
     {
         DapperColumnMapper.Initialize();
         var context = new BunitContext();
@@ -204,7 +218,7 @@ public sealed class EquipmentFormTests
         context.Services.AddSingleton<IConfiguration>(configuration);
         context.Services.AddSingleton<EquipmentFormService>(service);
         context.Services.AddSingleton(new EquipmentTypeSelectDataSource(CreateDb(
-            Script.Rows(TypeRow(phones)), Script.Rows(TypeRow(phones)), Script.Rows(TypeRow(phones)), Script.Rows(TypeRow(phones)))));
+            Script.Rows(TypeRow(phones, network)), Script.Rows(TypeRow(phones, network)), Script.Rows(TypeRow(phones, network)), Script.Rows(TypeRow(phones, network)))));
         context.Services.AddSingleton(new EquipmentModelSelectDataSource(CreateDb(
             Script.Rows(ModelRow()), Script.Rows(ModelRow()), Script.Rows(ModelRow()), Script.Rows(ModelRow()))));
         context.Services.AddSingleton(new PhonePoolSelectDataSource(CreateDb()));
@@ -258,10 +272,10 @@ public sealed class EquipmentFormTests
         .GetMethod("ValidateBusinessRules", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
         .Invoke(page, null)!;
 
-    private static Dictionary<string, object?> TypeRow(bool phones = false) => Script.Row(
+    private static Dictionary<string, object?> TypeRow(bool phones = false, bool network = false) => Script.Row(
         ("КодТипаОборудования", 103), ("ТипОборудования", "Шторы"), ("SNобязателен", (byte)0),
         ("ЕстьХарактеристикиМонитора", (byte)0), ("ЕстьТелефонныйНомер", phones ? (byte)1 : (byte)0),
-        ("ЕстьMACадрес", (byte)0), ("ЕстьСетевоеИмя", (byte)0));
+        ("ЕстьMACадрес", (byte)0), ("ЕстьСетевоеИмя", network ? (byte)1 : (byte)0));
 
     private static Dictionary<string, object?> ModelRow() => Script.Row(
         ("КодМоделиОборудования", 945), ("МодельОборудования", "Шторы"),
@@ -358,6 +372,12 @@ public sealed class EquipmentFormTests
             Task.FromResult<EquipmentActualInventory?>(null);
 
         public override Task<int> GetNetworkAttachmentCountAsync(int equipmentId) => Task.FromResult(0);
+
+        public override Task<IReadOnlyList<EquipmentNetworkNameHistory>> GetNetworkNameHistoryAsync(int equipmentId) =>
+            Task.FromResult<IReadOnlyList<EquipmentNetworkNameHistory>>(
+            [
+                new() { EquipmentId = equipmentId, NetworkName = "old-host", ChangedAtUtc = new DateTime(2026, 11, 18), ChangedByName = "Тестовый сотрудник" },
+            ]);
 
         public override Task<bool> CanUseAccountingAsync(int? personId) => Task.FromResult(true);
 
