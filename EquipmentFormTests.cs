@@ -6,7 +6,9 @@ using Clayzor.Lib.Web.DBSelect.Documents;
 using Clayzor.Lib.Web.DBSelect.Equipment;
 using Clayzor.Lib.Web.DBSelect.Persons;
 using Kesco.App.Web.Inventory.Components.Pages.Equipment;
+using Kesco.App.Web.Inventory.Components.Pages.Equipment.Details;
 using Kesco.App.Web.Inventory.Services;
+using MudBlazor;
 using Microsoft.AspNetCore.Components;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -287,6 +289,7 @@ public sealed class EquipmentFormTests
         public bool DeferredInitialLoad { get; set; }
         public int UpdateCalls { get; private set; }
         public List<int> Requests { get; } = [];
+        public List<(EquipmentResponsiblePeriod Current, EquipmentResponsiblePeriod? Next, EquipmentLocationPeriod? Location)> WithdrawCalls { get; } = [];
         public List<EquipmentPhoneLink> StoredPhones { get; private set; } = [];
         public List<(int[] Original, int[] Current)> PhoneSaves { get; } = [];
         public int UpdateWithPhonesCalls { get; private set; }
@@ -312,6 +315,9 @@ public sealed class EquipmentFormTests
             };
         }
 
+        public override Task<IReadOnlyList<EquipmentResponsiblePeriod>> GetResponsiblesAsync(int equipmentId) =>
+            Task.FromResult<IReadOnlyList<EquipmentResponsiblePeriod>>([]);
+
         public override Task<bool> HasRoleAsync(int roleId) => Task.FromResult(true);
 
         public override async Task UpdateAsync(EquipmentEntity equipment)
@@ -325,6 +331,15 @@ public sealed class EquipmentFormTests
             }
             if (SaveException is not null)
                 throw SaveException;
+        }
+
+        public override Task WithdrawResponsibleAsync(
+            EquipmentResponsiblePeriod current,
+            EquipmentResponsiblePeriod? next,
+            EquipmentLocationPeriod? location)
+        {
+            WithdrawCalls.Add((current, next, location));
+            return Task.CompletedTask;
         }
 
         public override Task<int?> GetConnectionEquipmentIdAsync(int phoneId, int? employeeId, int locationId) =>
@@ -373,4 +388,5 @@ public sealed class EquipmentFormTests
             Assert.True(_updateRequested.Task.IsCompleted, "Отложенное сохранение не было начато");
         }
     }
+
 }
