@@ -343,6 +343,12 @@ public sealed class EquipmentFormTests
         public override Task<IReadOnlyList<EquipmentAccounting>> GetAccountingAsync(int equipmentId) =>
             Task.FromResult<IReadOnlyList<EquipmentAccounting>>([]);
 
+        public override Task<EquipmentRouterInfo?> GetRouterInfoAsync(int equipmentId) =>
+            Task.FromResult<EquipmentRouterInfo?>(null);
+
+        public override Task<IReadOnlyList<EquipmentRouterInventoryItem>> GetRouterInventoryAsync(int equipmentId) =>
+            Task.FromResult<IReadOnlyList<EquipmentRouterInventoryItem>>([]);
+
         public override Task<bool> CanUseAccountingAsync(int? personId) => Task.FromResult(true);
 
         public override Task<bool> HasRoleAsync(int roleId) => Task.FromResult(true);
