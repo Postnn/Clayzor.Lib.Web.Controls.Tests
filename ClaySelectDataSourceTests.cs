@@ -1,6 +1,7 @@
 using Clayzor.Lib.DALC;
 using Clayzor.Lib.Entities.MedicalTests;
 using Clayzor.Lib.Web.Controls.Components.Select;
+using Clayzor.Lib.Web.DBSelect.Documents;
 using Clayzor.Lib.Web.DBSelect.Employees;
 using Clayzor.Lib.Web.DBSelect.Equipment;
 
@@ -54,6 +55,47 @@ public sealed class ClaySelectDataSourceTests
         Assert.Equal(2, model.NetworkInterfaces);
         Assert.Equal("DDR4", model.MemoryTypeName);
         Assert.Contains("@EquipmentTypeId IS NULL", Assert.Single(connection.CommandLog));
+    }
+
+    /// <summary>Телефонный источник использует legacy-функцию и параметризованные прикладные фильтры.</summary>
+    [Fact]
+    public async Task PhoneSearch_UsesLegacyFiltersAndExcludesCurrentIds()
+    {
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Rows()]));
+        var source = new PhoneNumberSelectDataSource(CreateDb(connection))
+        {
+            LocationId = 55, EmployeeId = 4, EquipmentTypeId = 30, PhoneIdBase = 10, EquipmentId = 7,
+            ExcludedPhoneIds = [11, 12, 11],
+        };
+
+        await source.SearchAsync(new ClaySelectSearchRequest { SearchText = "101", Limit = 8 });
+
+        var sql = Assert.Single(connection.CommandLog);
+        Assert.Contains("fn_НомераДляТелАппаратов", sql);
+        Assert.Contains("NOT IN (@ExcludedPhoneId0, @ExcludedPhoneId1)", sql);
+        Assert.DoesNotContain("NOT IN (11", sql);
+        var parameters = Assert.Single(connection.ParameterLog);
+        Assert.Equal(55, parameters["LocationId"]);
+        Assert.Equal(4, parameters["EmployeeId"]);
+        Assert.Equal(30, parameters["EquipmentTypeId"]);
+        Assert.Equal(10, parameters["PhoneIdBase"]);
+        Assert.Equal(7, parameters["EquipmentId"]);
+        Assert.Equal(2, parameters.Count(item => item.Key.StartsWith("ExcludedPhoneId")));
+    }
+
+    /// <summary>Документы списания фильтруются по лицу и точному legacy-типу 2365.</summary>
+    [Fact]
+    public async Task DocumentSearch_UsesPersonAndDocumentTypeFilters()
+    {
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Rows()]));
+        var source = new DocumentSelectDataSource(CreateDb(connection)) { PersonId = 1, DocumentTypeId = 2365 };
+
+        await source.SearchAsync(new ClaySelectSearchRequest { Limit = 8 });
+
+        var sql = Assert.Single(connection.CommandLog);
+        Assert.Contains("T0.КодТипаДокумента = @DocumentTypeId", sql);
+        Assert.Contains("P.КодЛица = @PersonId", sql);
+        Assert.Equal(2365, Assert.Single(connection.ParameterLog)["DocumentTypeId"]);
     }
 
     /// <summary>Выбор UPS применяет серверный фильтр текущего офиса и исключает склад.</summary>

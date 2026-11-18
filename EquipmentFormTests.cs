@@ -2,6 +2,7 @@ using Bunit;
 using Clayzor.Lib.DALC;
 using Clayzor.Lib.Entities.Inventory;
 using Clayzor.Lib.Entities.MedicalTests;
+using Clayzor.Lib.Web.Controls.Components.Select;
 using Clayzor.Lib.Web.DBSelect.Documents;
 using Clayzor.Lib.Web.DBSelect.Employees;
 using Clayzor.Lib.Web.DBSelect.Equipment;
@@ -184,6 +185,53 @@ public sealed class EquipmentFormTests
         Assert.Equal(2, fixture.Service.SyncCalls);
         Assert.Equal(new[] { 11 }, fixture.Service.PhoneSaves[1].Original);
         Assert.Empty(fixture.Service.PhoneSaves[1].Current);
+    }
+
+    /// <summary>Добавление номера обновляет все прикладные фильтры и исключает его из следующего поиска.</summary>
+    [Fact]
+    public async Task PhoneFilters_FollowCurrentStateAndAddedNumbers()
+    {
+        var fixture = CreateFixture(phones: true);
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        CurrentModel(page.Instance).EmployeeId = 4;
+        SetPrivate(page.Instance, "_phoneToAdd", 11);
+
+        await InvokeHandler(page, "AddPhoneAsync");
+
+        var source = context.Services.GetRequiredService<PhoneNumberSelectDataSource>();
+        Assert.Equal(55, source.LocationId);
+        Assert.Equal(4, source.EmployeeId);
+        Assert.Equal(103, source.EquipmentTypeId);
+        Assert.Equal(7, source.EquipmentId);
+        Assert.Equal(11, Assert.Single(source.ExcludedPhoneIds));
+    }
+
+    /// <summary>Смена владельца меняет фильтры и права, но не уничтожает документы и поставщика.</summary>
+    [Fact]
+    public async Task OwnerChange_PreservesDocumentsAndShipper()
+    {
+        var fixture = CreateFixture();
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        CurrentModel(page.Instance).DocumentReceiptOuId = 10;
+        CurrentModel(page.Instance).DocumentWriteOffId = 11;
+        CurrentModel(page.Instance).ShipperId = 12;
+
+        await InvokeHandler(page, "OnOwnerChangedAsync", 2);
+
+        Assert.Equal(10, CurrentModel(page.Instance).DocumentReceiptOuId);
+        Assert.Equal(11, CurrentModel(page.Instance).DocumentWriteOffId);
+        Assert.Equal(12, CurrentModel(page.Instance).ShipperId);
+        Assert.Equal(2, context.Services.GetRequiredKeyedService<DocumentSelectDataSource>("receipt").PersonId);
+        Assert.Equal(2, context.Services.GetRequiredKeyedService<DocumentSelectDataSource>("writeoff").PersonId);
+        Assert.True(((ClaySelectOptions)GetPrivate(page.Instance, "_tenantOptions")!).ReadOnly);
+
+        await InvokeHandler(page, "OnOwnerChangedAsync", (int?)null);
+        Assert.Null(context.Services.GetRequiredKeyedService<DocumentSelectDataSource>("receipt").PersonId);
+        Assert.Null(context.Services.GetRequiredKeyedService<DocumentSelectDataSource>("writeoff").PersonId);
     }
 
     /// <summary>Форма использует всю ширину, legacy-порядок команд и отображает ФИО изменившего.</summary>

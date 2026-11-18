@@ -82,8 +82,11 @@ public sealed class EquipmentPhonePersistenceTests
 
         static object? EquipmentId(Dictionary<string, object?> parameters) =>
             parameters.GetValueOrDefault("@КодОборудования") ?? parameters["КодОборудования"];
-        Assert.Equal([8, 9], connection.ParameterLog.Select(EquipmentId).ToArray());
-        Assert.DoesNotContain(connection.ParameterLog, item => Equals(EquipmentId(item), 7));
+        static bool HasEquipmentId(Dictionary<string, object?> parameters) =>
+            parameters.ContainsKey("@КодОборудования") || parameters.ContainsKey("КодОборудования");
+        var recipients = connection.ParameterLog.Where(HasEquipmentId).ToList();
+        Assert.Equal([8, 9], recipients.Select(EquipmentId).ToArray());
+        Assert.DoesNotContain(recipients, item => Equals(EquipmentId(item), 7));
 
         var fallbackConnection = new ScriptedConnection(new Queue<ScriptEntry>([
             Script.Rows(Script.Row(("КодТелефонногоНомера", 1), ("КодТелефоннойСтанции", 0), ("XorcomName", ""))),
@@ -91,7 +94,7 @@ public sealed class EquipmentPhonePersistenceTests
         ]));
         var fallbackService = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => fallbackConnection));
         await fallbackService.SynchronizePhonesAsync(7, [], [Link(1)]);
-        Assert.Equal(7, EquipmentId(Assert.Single(fallbackConnection.ParameterLog)));
+        Assert.Equal(7, EquipmentId(fallbackConnection.ParameterLog.Single(HasEquipmentId)));
     }
 
     /// <summary>При смешанном наборе Xorcom имеет приоритет и CCM не вызывается, как в legacy.</summary>

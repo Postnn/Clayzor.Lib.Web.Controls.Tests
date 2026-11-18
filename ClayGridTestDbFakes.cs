@@ -167,6 +167,8 @@ internal sealed class ScriptedCommand : DbCommand
     {
         var e = GetEntry();
         CommandLog.Add(CommandText);
+        _owner.ParameterLog.Add(DbParameterCollection.Cast<DbParameter>()
+            .ToDictionary(parameter => parameter.ParameterName, parameter => parameter.Value));
         if (e.Exception is not null) throw e.Exception;
         return Task.FromResult<DbDataReader>(new ScriptedDataReader(e.Rows ?? []));
     }
