@@ -616,7 +616,7 @@ public sealed class EquipmentFormTests
         Assert.Empty(page.FindAll("#equipment-accounts"));
     }
 
-    /// <summary>Команда рабочей сети требует компьютерную характеристику и роль 103.</summary>
+    /// <summary>Команда рабочей сети находится в меню «Операции» и требует роль 103.</summary>
     [Fact]
     public async Task NetworkCommand_RequiresComputerTypeAndSupportRole()
     {
@@ -625,14 +625,15 @@ public sealed class EquipmentFormTests
         await using var context = fixture.Context;
         var page = context.Render<EquipmentForm>();
         WaitForSn(page, "CLAY_TEST_7");
-        Assert.Contains("Подключить сеть", page.Markup);
+        Assert.Contains("Операции", page.Markup);
+        Assert.DoesNotContain("Подключить сеть", page.Markup);
 
         fixture.Service.Roles.Remove(103);
         await InvokeHandler(page, "LoadCurrentAsync", 7);
-        Assert.DoesNotContain("Подключить сеть", page.Markup);
+        Assert.DoesNotContain("Операции", page.Markup);
     }
 
-    /// <summary>Добавление UPS скрывается при отсутствии роли 43 по владельцу, чтение секции остаётся.</summary>
+    /// <summary>Добавление UPS находится в меню «Операции» и зависит от роли 43 по владельцу.</summary>
     [Fact]
     public async Task UpsCommand_RequiresInventoryRoleForOwner()
     {
@@ -640,12 +641,14 @@ public sealed class EquipmentFormTests
         await using var context = fixture.Context;
         var page = context.Render<EquipmentForm>();
         WaitForSn(page, "CLAY_TEST_7");
-        Assert.Contains("Подключить UPS:", page.Markup);
+        Assert.Contains("Операции", page.Markup);
+        Assert.DoesNotContain("Подключить UPS:", page.Markup);
 
         fixture.Service.RoleForPersonResult = false;
         await InvokeHandler(page, "LoadCurrentAsync", 7);
         Assert.DoesNotContain("Подключить UPS:", page.Markup);
-        Assert.NotNull(page.Find("#equipment-ups"));
+        Assert.DoesNotContain("Операции", page.Markup);
+        Assert.Empty(page.FindAll("#equipment-ups"));
     }
 
     /// <summary>Бухгалтерская секция доступна для чтения при отсутствии права изменения.</summary>
