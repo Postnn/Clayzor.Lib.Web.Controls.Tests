@@ -76,7 +76,8 @@ public sealed class EquipmentFormPersistenceTests
                 ("MACадрес2", "66778899AABB"), ("MACадресILO", "CCDDEEFF0011"),
                 ("Примечания", "note"), ("КодЛицаВладельца", 1), ("КодЛицаАрендатора", 2),
                 ("КодЛицаПоставщика", 3), ("КодПулаТелефонов", 4), ("КодДокументаПоступления", 6),
-                ("Изменил", 4), ("Изменено", changed), ("КодРасположения", 55), ("КодСотрудника", 9))),
+                ("Изменил", 4), ("Изменено", changed), ("ИзменилФИО", "Тестов А."),
+                ("КодРасположения", 55), ("КодСотрудника", 9))),
         ]));
         var service = new EquipmentFormService(CreateDb(connection));
 
@@ -94,6 +95,7 @@ public sealed class EquipmentFormPersistenceTests
         Assert.Equal(6, equipment.DocumentReceiptOuId);
         Assert.Equal(4, equipment.ChangedById);
         Assert.Equal(changed, equipment.ChangedAtUtc);
+        Assert.Equal("Тестов А.", equipment.ChangedByName);
         Assert.Equal(55, equipment.LocationId);
         Assert.Equal(9, equipment.EmployeeId);
     }

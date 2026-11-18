@@ -47,6 +47,20 @@ public sealed class ClayFormControlsTests
         Assert.Equal(int.MaxValue.ToString(), cut.Find("textarea").GetAttribute("maxlength"));
     }
 
+    /// <summary>Time использует общий компактный класс и отображает секунды полностью.</summary>
+    [Fact]
+    public async Task Time_UsesSharedCompactClassAndSecondsFormat()
+    {
+        await using var ctx = new BunitContext();
+        ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+        ctx.Services.AddMudServices();
+        var cut = ctx.Render<ClayTime>(parameters => parameters
+            .Add(component => component.Value, TimeSpan.Zero));
+
+        Assert.NotNull(cut.Find(".clay-time.mud-picker"));
+        Assert.Equal("00:00:00", cut.Find("input").GetAttribute("value"));
+    }
+
     /// <summary>Changed запрашивает смещение на дату записи, учитывая сезонные переходы.</summary>
     [Fact]
     public void Changed_UsesOffsetAtRecordedUtcDate()

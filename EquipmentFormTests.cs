@@ -183,6 +183,31 @@ public sealed class EquipmentFormTests
         Assert.Empty(fixture.Service.PhoneSaves[1].Current);
     }
 
+    /// <summary>Форма использует всю ширину, legacy-порядок команд и отображает ФИО изменившего.</summary>
+    [Fact]
+    public async Task Layout_UsesFullWidthLegacyOrderAndChangedEmployeeName()
+    {
+        var fixture = CreateFixture(network: true);
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+
+        var style = page.Find(".equipment-form").GetAttribute("style") ?? string.Empty;
+        Assert.Contains("max-width:100%", style.Replace(" ", string.Empty));
+        var commands = page.FindAll("button").Select(button => button.TextContent.Trim()).Take(5).ToArray();
+        Assert.Equal(new[] { "OK", "Применить", "Копировать", "Обновить", "Отмена" }, commands);
+        var pairs = page.FindAll(".equipment-form-pair");
+        Assert.Contains("equipment-form-writeoff-row", pairs[0].ClassList);
+        Assert.Contains("SN:", pairs[0].TextContent);
+        Assert.Contains("Списано:", pairs[0].TextContent);
+        Assert.Contains("Тип:", pairs[1].TextContent);
+        Assert.Contains("Модель:", pairs[1].TextContent);
+        Assert.Equal("Тестов А.", page.Find(".clay-changed-user").TextContent.Trim());
+        Assert.Equal("http://localhost/user?id=4", page.Find(".clay-changed-user").GetAttribute("href"));
+        Assert.Contains(page.FindAll("input"), input => input.GetAttribute("value") == "001122334455");
+        Assert.DoesNotContain(page.FindAll("input"), input => input.GetAttribute("value")?.StartsWith("_model.MacAddress") == true);
+    }
+
     /// <summary>Сетевая история загружается для оборудования с сетевым именем.</summary>
     [Fact]
     public async Task NetworkHistory_LoadsForNetworkEquipment()
@@ -220,7 +245,10 @@ public sealed class EquipmentFormTests
         context.Services.AddSingleton(new EquipmentTypeSelectDataSource(CreateDb(
             Script.Rows(TypeRow(phones, network)), Script.Rows(TypeRow(phones, network)), Script.Rows(TypeRow(phones, network)), Script.Rows(TypeRow(phones, network)))));
         context.Services.AddSingleton(new EquipmentModelSelectDataSource(CreateDb(
-            Script.Rows(ModelRow()), Script.Rows(ModelRow()), Script.Rows(ModelRow()), Script.Rows(ModelRow()))));
+            Script.Rows(ModelRow(network)),
+            Script.Rows(ModelRow(network)),
+            Script.Rows(ModelRow(network)),
+            Script.Rows(ModelRow(network)))));
         context.Services.AddSingleton(new PhonePoolSelectDataSource(CreateDb()));
         context.Services.AddSingleton(new PhoneNumberSelectDataSource(CreateDb(
             Script.Rows(PhoneNumberRow()), Script.Rows(PhoneNumberRow()), Script.Rows(PhoneNumberRow()))));
@@ -277,9 +305,9 @@ public sealed class EquipmentFormTests
         ("ЕстьХарактеристикиМонитора", (byte)0), ("ЕстьТелефонныйНомер", phones ? (byte)1 : (byte)0),
         ("ЕстьMACадрес", (byte)0), ("ЕстьСетевоеИмя", network ? (byte)1 : (byte)0));
 
-    private static Dictionary<string, object?> ModelRow() => Script.Row(
+    private static Dictionary<string, object?> ModelRow(bool network = false) => Script.Row(
         ("КодМоделиОборудования", 945), ("МодельОборудования", "Шторы"),
-        ("КодТипаОборудования", 103), ("Net", 0));
+        ("КодТипаОборудования", 103), ("Net", network ? 1 : 0));
 
     private static Dictionary<string, object?> PhoneNumberRow() => Script.Row(
         ("КодТелефонногоНомера", 11), ("Телефон", "101"),
@@ -326,8 +354,8 @@ public sealed class EquipmentFormTests
             return new EquipmentEntity
             {
                 Id = id, EquipmentTypeId = 103, ModelId = 945, OwnerId = 1, LocationId = 55,
-                SerialNumber = $"CLAY_TEST_{id}", Description = $"Copy{id}",
-                ChangedById = 4, ChangedAtUtc = new DateTime(2026, 11, 18, 8, 0, 0),
+                SerialNumber = $"CLAY_TEST_{id}", Description = $"Copy{id}", MacAddress = "001122334455",
+                ChangedById = 4, ChangedAtUtc = new DateTime(2026, 11, 18, 8, 0, 0), ChangedByName = "Тестов А.",
             };
         }
 
