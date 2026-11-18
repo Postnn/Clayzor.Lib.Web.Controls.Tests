@@ -34,19 +34,26 @@ public sealed class ClaySelectDataSourceTests
     }
 
     /// <summary>
-    /// До выбора типа источник моделей не обращается к БД и возвращает пустой результат.
+    /// До выбора типа источник моделей выполняет серверный поиск без фильтра типа.
     /// </summary>
     [Fact]
-    public async Task EquipmentModelWithoutType_ReturnsEmptyWithoutDatabaseCall()
+    public async Task EquipmentModelWithoutType_SearchesAllModels()
     {
-        var connection = new ScriptedConnection(new Queue<ScriptEntry>());
+        DapperColumnMapper.Initialize();
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([
+            Script.Rows(Script.Row(("КодМоделиОборудования", 945), ("МодельОборудования", "Model"),
+                ("КодТипаОборудования", 30), ("Net", 2), ("ТипПамяти", "DDR4"))),
+        ]));
         var source = new EquipmentModelSelectDataSource(CreateDb(connection));
 
         var result = await source.SearchAsync(new ClaySelectSearchRequest { SearchText = "model", Limit = 8 });
 
-        Assert.Empty(result.Items);
-        Assert.False(result.HasMore);
-        Assert.Empty(connection.CommandLog);
+        var model = Assert.Single(result.Items);
+        Assert.Equal(945, model.Id);
+        Assert.Equal(30, model.EquipmentTypeId);
+        Assert.Equal(2, model.NetworkInterfaces);
+        Assert.Equal("DDR4", model.MemoryTypeName);
+        Assert.Contains("@EquipmentTypeId IS NULL", Assert.Single(connection.CommandLog));
     }
 
     /// <summary>

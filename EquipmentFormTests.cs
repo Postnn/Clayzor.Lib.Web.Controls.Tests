@@ -225,6 +225,126 @@ public sealed class EquipmentFormTests
         Assert.Equal("old-host", Assert.Single(history).NetworkName);
     }
 
+    /// <summary>Все характеристики выбранной модели выводятся в разметке формы.</summary>
+    [Fact]
+    public async Task ModelCharacteristics_RenderCompleteLegacyMetadata()
+    {
+        var fixture = CreateFixture(network: true);
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+
+        Assert.Contains("PN-945", page.Markup);
+        Assert.Contains("Мультимедиа", page.Markup);
+        Assert.Contains("Диагональ: 24,0", page.Markup);
+        Assert.Contains("CPU-X", page.Markup);
+        Assert.Contains("Ethernet", page.Markup);
+        Assert.Contains("DDR4", page.Markup);
+        Assert.Contains("кол-во банков: 2", page.Markup);
+        Assert.Contains("Driver-X", page.Markup);
+        Assert.Contains("100000 часов", page.Markup);
+        Assert.Contains("Model notes", page.Markup);
+    }
+
+    /// <summary>Очистка модели скрывает её характеристики, а восстановление ID использует сохранённый объект.</summary>
+    [Fact]
+    public async Task ModelClearAndRestore_DoesNotKeepStaleVisibleState()
+    {
+        var fixture = CreateFixture(network: true);
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        var backup = GetPrivate(page.Instance, "_selectedModel");
+
+        await InvokeHandler(page, "OnModelIdChanged", (int?)null);
+        Assert.False(BoolProperty(page.Instance, "HasSelectedModel"));
+        Assert.Equal(0, IntProperty(page.Instance, "MacCount"));
+        Assert.Same(backup, GetPrivate(page.Instance, "_selectedModel"));
+
+        await InvokeHandler(page, "OnModelIdChanged", 945);
+        Assert.True(BoolProperty(page.Instance, "HasSelectedModel"));
+        Assert.Same(backup, GetPrivate(page.Instance, "_selectedModel"));
+    }
+
+    /// <summary>Подтверждённая смена типа сбрасывает модель и её устаревшие признаки.</summary>
+    [Fact]
+    public async Task TypeChange_ClearsModelAndDependentSelection()
+    {
+        var fixture = CreateFixture(network: true);
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+
+        await InvokeHandler(page, "OnTypeIdChanged", 30);
+
+        Assert.Equal(30, CurrentModel(page.Instance).EquipmentTypeId);
+        Assert.Null(CurrentModel(page.Instance).ModelId);
+        Assert.Null(GetPrivate(page.Instance, "_selectedType"));
+        Assert.Null(GetPrivate(page.Instance, "_selectedModel"));
+        Assert.Equal(30, context.Services.GetRequiredService<EquipmentModelSelectDataSource>().Filter.EquipmentTypeId);
+    }
+
+    /// <summary>Выбор модели без типа автоматически восстанавливает тип и загружает телефонные связи.</summary>
+    [Fact]
+    public async Task ModelWithoutType_SelectsTypeAndLoadsPhones()
+    {
+        var fixture = CreateFixture(phones: true, phoneConfig: true);
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        CurrentModel(page.Instance).EquipmentTypeId = null;
+        CurrentModel(page.Instance).ModelId = null;
+        SetPrivate(page.Instance, "_selectedType", null);
+        SetPrivate(page.Instance, "_selectedModel", null);
+        var reads = fixture.Service.GetPhonesCalls;
+
+        await InvokeHandler(page, "OnModelChangedAsync", new EquipmentModel
+        {
+            Id = 945, EquipmentTypeId = 30, Name = "Phone", NetworkInterfaces = 1,
+        });
+
+        Assert.Equal(30, CurrentModel(page.Instance).EquipmentTypeId);
+        Assert.Equal(30, ((EquipmentType)GetPrivate(page.Instance, "_selectedType")!).Id);
+        Assert.Equal(reads + 1, fixture.Service.GetPhonesCalls);
+    }
+
+    /// <summary>Число MAC-полей соответствует Net=0/1/2/3+ и отсутствию модели.</summary>
+    [Theory]
+    [InlineData(0, 0)]
+    [InlineData(1, 1)]
+    [InlineData(2, 2)]
+    [InlineData(3, 3)]
+    [InlineData(5, 3)]
+    public async Task MacCount_FollowsModelNetworkInterfaces(int interfaces, int expected)
+    {
+        var fixture = CreateFixture(network: true);
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+
+        SetPrivate(page.Instance, "_selectedModel", new EquipmentModel { Id = 945, NetworkInterfaces = interfaces });
+        Assert.Equal(expected, IntProperty(page.Instance, "MacCount"));
+    }
+
+    /// <summary>Камера и пул относятся только к IP-телефону, а не к monitor-признаку.</summary>
+    [Fact]
+    public async Task CameraAndPhonePool_RequireIpPhoneType()
+    {
+        var fixture = CreateFixture(phones: true, phoneConfig: true);
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        Assert.True(BoolProperty(page.Instance, "ShowCamera"));
+        Assert.True(BoolProperty(page.Instance, "ShowPhonePool"));
+
+        var type = (EquipmentType)GetPrivate(page.Instance, "_selectedType")!;
+        type.Id = 104;
+        type.HasMonitorCharacteristics = 1;
+        Assert.False(BoolProperty(page.Instance, "ShowCamera"));
+        Assert.False(BoolProperty(page.Instance, "ShowPhonePool"));
+        Assert.True(BoolProperty(page.Instance, "ShowPhones"));
+    }
+
     /// <summary>Открытое из формы перемещение «На руках» требует сотрудника и сохраняет обе связи.</summary>
     [Fact]
     public async Task OnHandsLocationFromForm_RequiresAndSavesResponsible()
@@ -550,6 +670,14 @@ public sealed class EquipmentFormTests
 
     private static bool PrivateBool(EquipmentForm page, string name) => (bool)GetPrivate(page, name)!;
 
+    private static bool BoolProperty(EquipmentForm page, string name) => (bool)typeof(EquipmentForm)
+        .GetProperty(name, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+        .GetValue(page)!;
+
+    private static int IntProperty(EquipmentForm page, string name) => (int)typeof(EquipmentForm)
+        .GetProperty(name, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+        .GetValue(page)!;
+
     private static bool IsModified(EquipmentForm page) => (bool)typeof(EquipmentForm)
         .GetProperty("IsModified", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
         .GetValue(page)!;
@@ -567,7 +695,11 @@ public sealed class EquipmentFormTests
     private static Dictionary<string, object?> ModelRow(bool network = false, bool phoneConfig = false) => Script.Row(
         ("КодМоделиОборудования", 945), ("МодельОборудования", phoneConfig ? "Phone" : "Шторы"),
         ("КодТипаОборудования", phoneConfig ? 30 : 103), ("Net", network ? 1 : 0),
-        ("ШаблонТелефона", phoneConfig ? "template" : ""));
+        ("ШаблонТелефона", phoneConfig ? "template" : ""), ("PN", "PN-945"),
+        ("Мультимедиа", true), ("РазмерМонитора", 24.0), ("CPU", "CPU-X"),
+        ("НазваниеNet", "Ethernet"), ("КодТипаПамяти", 1), ("БанковПамяти", 2),
+        ("ТипПамяти", "DDR4"), ("Драйвер", "Driver-X"), ("Ресурс", "100000 часов"),
+        ("Примечания", "Model notes"));
 
     private static Dictionary<string, object?> PhoneNumberRow() => Script.Row(
         ("КодТелефонногоНомера", 11), ("Телефон", "101"),
