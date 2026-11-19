@@ -90,10 +90,12 @@ public sealed class TelAsyncStateTests
     {
         await using var fixture = new TelFixture();
         fixture.PrepareXorcomStationChange();
+        fixture.Service.SavedFullNumber = "2001";
 
         await fixture.Invoke("SaveAsync", true);
 
         Assert.Equal(["sync:old:True", "save", "sync:new:False"], fixture.Service.Calls);
+        Assert.Equal(1, fixture.Service.Calls.Count(call => call == "sync:old:True"));
     }
 
     /// <summary>Ошибка SQL после очистки старой Xorcom вызывает компенсационное восстановление.</summary>
@@ -125,6 +127,73 @@ public sealed class TelAsyncStateTests
         Assert.Contains("Данные не сохранены", fixture.Get<string?>("_validationMessage"));
     }
 
+    /// <summary>Итоговый план строится после серверного перерасчёта полного номера.</summary>
+    [Theory]
+    [InlineData(33, "pbx")]
+    [InlineData(32, "99/70")]
+    public async Task Save_ServerFullNumberChangeTriggersPostSync(int stationId, string key)
+    {
+        await using var fixture = new TelFixture();
+        fixture.PrepareSameStation(stationId, key);
+        fixture.Service.SavedFullNumber = "2001";
+
+        await fixture.Invoke("SaveAsync", true);
+
+        Assert.Equal(["save", $"sync:{key}:False"], fixture.Service.Calls);
+        Assert.Equal("2001", Assert.Single(fixture.Service.SaveRequests).Phone.FullNumber);
+    }
+
+    /// <summary>Неизменный серверный полный номер не создаёт лишнюю синхронизацию.</summary>
+    [Fact]
+    public async Task Save_UnchangedServerFullNumberDoesNotSync()
+    {
+        await using var fixture = new TelFixture();
+        fixture.PrepareSameStation(33, "pbx");
+
+        await fixture.Invoke("SaveAsync", true);
+
+        Assert.Equal(["save"], fixture.Service.Calls);
+    }
+
+    /// <summary>Delete использует актуальные сохранённые EquipmentId, а не исходный или черновой список.</summary>
+    [Fact]
+    public async Task Delete_UsesFreshPersistedEquipment()
+    {
+        await using var fixture = new TelFixture();
+        fixture.PrepareWrite();
+        fixture.Model.StationId = 0;
+        fixture.Service.PersistedSnapshot = new PhoneDeleteSnapshot
+        {
+            Phone = fixture.Model,
+            Station = new PhoneStationLookup { Id = 0 },
+            Relations = new PhoneRelationsSnapshot
+            {
+                Equipment = [new PhoneEquipmentLink { EquipmentId = 7 }, new PhoneEquipmentLink { EquipmentId = 8 }],
+            },
+        };
+        fixture.Get<PhoneRelationsSnapshot>("_relations").Equipment.Add(new PhoneEquipmentLink { EquipmentId = 99 });
+
+        await fixture.Invoke("DeleteConfirmedAsync");
+
+        Assert.Equal(["read", "delete", "sync:7:False", "sync:8:False"], fixture.Service.Calls);
+        Assert.DoesNotContain(fixture.Service.Calls, call => call.Contains("99"));
+    }
+
+    /// <summary>Уже удалённая другим оператором запись не вызывает АТС или повторный Delete.</summary>
+    [Fact]
+    public async Task Delete_MissingPersistedPhoneDoesNotSync()
+    {
+        await using var fixture = new TelFixture();
+        fixture.PrepareWrite();
+        fixture.Service.PersistedSnapshot = null;
+
+        await fixture.Invoke("DeleteConfirmedAsync");
+
+        Assert.Equal(["read"], fixture.Service.Calls);
+        Assert.False(fixture.Get<bool>("_deleted"));
+        Assert.Contains("уже удалён", fixture.Get<string?>("_validationMessage"));
+    }
+
     /// <summary>Бизнес-валидация блокирует pre-sync до внешнего эффекта Xorcom.</summary>
     [Fact]
     public async Task Xorcom_BusinessValidationBlocksPreSync()
@@ -149,7 +218,7 @@ public sealed class TelAsyncStateTests
 
         await fixture.Invoke("DeleteConfirmedAsync");
 
-        Assert.Equal(["sync:old:True", "delete"], fixture.Service.Calls);
+        Assert.Equal(["read", "sync:old:True", "delete"], fixture.Service.Calls);
     }
 
     /// <summary>Ошибка SQL Delete после очистки Xorcom вызывает восстановление номера.</summary>
@@ -165,8 +234,34 @@ public sealed class TelAsyncStateTests
 
         await fixture.Invoke("DeleteConfirmedAsync");
 
-        Assert.Equal(["sync:old:True", "delete", "sync:old:False"], fixture.Service.Calls);
+        Assert.Equal(["read", "sync:old:True", "delete", "sync:old:False"], fixture.Service.Calls);
         Assert.False(fixture.Get<bool>("_deleted"));
+    }
+
+    /// <summary>Общее предупреждение Cancel, навигации и Delete различает SQL Save и АТС pending.</summary>
+    [Fact]
+    public async Task PendingSync_CloseConfirmationExplainsSavedDataAndManualSync()
+    {
+        await using var fixture = new TelFixture();
+        fixture.PrepareWrite();
+        fixture.SetMember("_pendingOperations", new[] { new PhoneSyncOperation(PhoneSyncKind.Xorcom, "old") });
+
+        var message = fixture.InvokeText("CloseConfirmation", "Черновик не сохранён");
+
+        Assert.Contains("Данные уже сохранены в БД", message);
+        Assert.Contains("синхронизация АТС не завершена", message);
+        Assert.Contains("потребуется ручная синхронизация", message);
+        Assert.DoesNotContain("Черновик не сохранён", message);
+    }
+
+    /// <summary>Без АТС pending сохраняется прежнее предупреждение о черновике.</summary>
+    [Fact]
+    public async Task Draft_CloseConfirmationKeepsOriginalMessage()
+    {
+        await using var fixture = new TelFixture();
+        fixture.PrepareWrite();
+
+        Assert.Equal("Черновик не сохранён", fixture.InvokeText("CloseConfirmation", "Черновик не сохранён"));
     }
 
     private sealed class TelFixture : IAsyncDisposable
@@ -214,6 +309,10 @@ public sealed class TelAsyncStateTests
             Set("_loaded", true);
             Set("_loading", false);
             Set("_canEdit", true);
+            Service.PersistedSnapshot = new PhoneDeleteSnapshot
+            {
+                Phone = Model, Station = new PhoneStationLookup { Id = 1, XorcomName = "old" },
+            };
         }
 
         internal void PrepareXorcomStationChange()
@@ -225,8 +324,26 @@ public sealed class TelAsyncStateTests
                 StationId = 1, ServicesKind = Model.ServicesKind, ViewInDirectory = Model.ViewInDirectory, Connected = Model.Connected,
             });
             Set("_originalStation", new PhoneStationLookup { Id = 1, XorcomName = "old" });
+            Service.PersistedSnapshot = new PhoneDeleteSnapshot
+            {
+                Phone = Get<Phone>("_originalPhone"), Station = new PhoneStationLookup { Id = 1, XorcomName = "old" },
+            };
             Model.StationId = 2;
             Set("_selectedStation", new PhoneStationLookup { Id = 2, XorcomName = "new" });
+        }
+
+        internal void PrepareSameStation(int stationId, string key)
+        {
+            PrepareWrite();
+            Model.StationId = stationId;
+            Model.AtsPort = stationId == 32 ? key : string.Empty;
+            Model.FullNumber = "1001";
+            var original = Model.CopyForNew();
+            original.Id = Model.Id;
+            Set("_originalPhone", original);
+            var station = new PhoneStationLookup { Id = stationId, XorcomName = stationId == 32 ? string.Empty : key };
+            Set("_originalStation", station);
+            Set("_selectedStation", station);
         }
 
         internal void SetMember(string name, object? value) => Set(name, value);
@@ -236,6 +353,9 @@ public sealed class TelAsyncStateTests
         internal Task Invoke(string name, params object?[] arguments) =>
             _context.Renderer.Dispatcher.InvokeAsync(() =>
                 (Task)typeof(Tel).GetMethod(name, BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(_tel, arguments)!);
+
+        internal string InvokeText(string name, params object?[] arguments) =>
+            (string)typeof(Tel).GetMethod(name, BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(_tel, arguments)!;
 
         private void Set(string name, object? value) => Member(name).SetValue(_tel, value);
 
@@ -286,6 +406,8 @@ public sealed class TelAsyncStateTests
         internal bool ThrowOnDelete { get; set; }
         internal bool FailDeletingXorcom { get; set; }
         internal List<PhoneValidationIssue> ValidationIssues { get; } = [];
+        internal string? SavedFullNumber { get; set; }
+        internal PhoneDeleteSnapshot? PersistedSnapshot { get; set; }
 
         internal TaskCompletionSource<PhoneCapabilities> EnqueueCapabilities()
         {
@@ -295,7 +417,7 @@ public sealed class TelAsyncStateTests
         }
 
         public override Task<PhoneCapabilities> GetCapabilitiesAsync(int? stationId, int? phoneTypeId, int phoneId) =>
-            _capabilities.Count > 0 ? _capabilities.Dequeue().Task : Task.FromResult(new PhoneCapabilities());
+            _capabilities.Count > 0 ? _capabilities.Dequeue().Task : Task.FromResult(new PhoneCapabilities { HasPorts = stationId == 32 });
 
         public override Task<IReadOnlyList<PhoneValidationIssue>> ValidateServerAsync(PhoneSaveRequest request) =>
             Task.FromResult<IReadOnlyList<PhoneValidationIssue>>(ValidationIssues);
@@ -304,8 +426,15 @@ public sealed class TelAsyncStateTests
         {
             Calls.Add("save");
             if (ThrowOnSave) throw new InvalidOperationException("SQL Save failed");
+            if (SavedFullNumber is not null) request.Phone.FullNumber = SavedFullNumber;
             SaveRequests.Add(request);
             return Task.FromResult(new PhoneSaveResult { PhoneId = request.Phone.Id, Saved = true });
+        }
+
+        public override Task<PhoneDeleteSnapshot?> GetDeleteSnapshotAsync(int id)
+        {
+            Calls.Add("read");
+            return Task.FromResult(PersistedSnapshot);
         }
 
         public override Task DeleteAsync(int id)
