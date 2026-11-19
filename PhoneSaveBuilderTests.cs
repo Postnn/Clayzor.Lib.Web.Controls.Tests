@@ -102,6 +102,73 @@ public sealed class PhoneSaveBuilderTests
         Assert.Equal([7, 8], ccm.Where(item => item.Kind == PhoneSyncKind.Ccm).Select(item => int.Parse(item.Key)).Order().ToArray());
     }
 
+    /// <summary>Смена подключения заменяет связь по точному старому и новому составному ключу.</summary>
+    [Fact]
+    public void Build_ConnectionChangeUsesPreciseDeleteAndInsert()
+    {
+        var request = Request();
+        request.OriginalRelations.Equipment.Add(new PhoneEquipmentLink { EquipmentId = 7, ConnectionEquipmentId = 8, Notes = "old" });
+        request.Relations.Equipment.Add(new PhoneEquipmentLink { EquipmentId = 7, ConnectionEquipmentId = 9, Notes = "new" });
+
+        var command = PhoneSaveBuilder.Build(request);
+
+        Assert.Equal(8, command.Parameters.Get<int>("@delEquipment0ConnectionEquipmentId"));
+        Assert.Equal(9, command.Parameters.Get<int>("@newEquipment1ConnectionEquipmentId"));
+        Assert.Contains("NULLIF(КодОборудованияПодключения, 0) = @delEquipment0ConnectionEquipmentId", command.Sql);
+        Assert.DoesNotContain("UPDATE ТелефонныеНомераОборудование", command.Sql);
+    }
+
+    /// <summary>Физический PK запрещает две строки одного оборудования даже с разными подключениями.</summary>
+    [Fact]
+    public void Build_DuplicateEquipmentIsRejectedRegardlessOfConnection()
+    {
+        var request = Request();
+        request.Relations.Equipment.Add(new PhoneEquipmentLink { EquipmentId = 7, ConnectionEquipmentId = 8 });
+        request.Relations.Equipment.Add(new PhoneEquipmentLink { EquipmentId = 7, ConnectionEquipmentId = 9 });
+        Assert.Throws<InvalidOperationException>(() => PhoneSaveBuilder.Build(request));
+    }
+
+    /// <summary>NULL и 0 обозначают одну связь без оборудования подключения.</summary>
+    [Fact]
+    public void EquipmentKey_NormalizesEmptyConnection()
+    {
+        Assert.Equal(new PhoneEquipmentKey(7, null), new PhoneEquipmentKey(7, 0));
+    }
+
+    /// <summary>Для существующего номера группа сохраняется до основной записи, для нового — после.</summary>
+    [Fact]
+    public void Build_UsesLegacyGroupAndMainWriteOrder()
+    {
+        var existing = Request();
+        existing.Phone.Notes = "changed";
+        existing.Relations.GroupMembers.Add(new PhoneGroupMember { PhoneId = 8 });
+        var existingSql = PhoneSaveBuilder.Build(existing).Sql;
+        Assert.True(existingSql.IndexOf("INSERT INTO ТелефонныеНомераГруппы", StringComparison.Ordinal) <
+                    existingSql.IndexOf("UPDATE vwТелефонныеНомераИзменение", StringComparison.Ordinal));
+
+        var inserted = Request();
+        inserted.Phone.Id = 0;
+        inserted.Relations.GroupMembers.Add(new PhoneGroupMember { PhoneId = 8 });
+        var insertedSql = PhoneSaveBuilder.Build(inserted).Sql;
+        Assert.True(insertedSql.IndexOf("INSERT INTO vwТелефонныеНомераИзменение", StringComparison.Ordinal) <
+                    insertedSql.IndexOf("INSERT INTO ТелефонныеНомераГруппы", StringComparison.Ordinal));
+    }
+
+    /// <summary>Изменения PBX и параллельных вызовов запускают синхронизацию станции.</summary>
+    [Fact]
+    public void Sync_IncludesGroupAndParallelCallChanges()
+    {
+        var groupRequest = Request();
+        groupRequest.Relations.GroupMembers.Add(new PhoneGroupMember { PhoneId = 8 });
+        Assert.Contains(PhoneSyncPlanner.Build(groupRequest, new PhoneSyncStation(1, "pbx"), new PhoneSyncStation(1, "pbx")),
+            item => item.Kind == PhoneSyncKind.Xorcom);
+
+        var parallelRequest = Request();
+        parallelRequest.Relations.ParallelCalls.Add(new PhoneParallelCall { CallNumber = "102", NotUsed = true });
+        Assert.Contains(PhoneSyncPlanner.Build(parallelRequest, new PhoneSyncStation(1, "pbx"), new PhoneSyncStation(1, "pbx")),
+            item => item.Kind == PhoneSyncKind.Xorcom);
+    }
+
     private static PhoneSaveRequest Request() => new()
     {
         Phone = new Phone { Id = 5, Number = "101", FullNumber = "101", PhoneTypeId = 1, StationId = 1, Notes = "old" },

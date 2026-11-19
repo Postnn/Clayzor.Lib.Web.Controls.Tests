@@ -113,6 +113,55 @@ public sealed class PhoneFormValidationTests
         Assert.Equal(3, PhoneTypeChoiceRules.ResolveServices(1, 3));
     }
 
+    /// <summary>Новый обычный номер не получает неявный нулевой выбор, PBX получает скрытие из справочника.</summary>
+    [Fact]
+    public void NewChoices_DistinguishNullFromZero()
+    {
+        Assert.Null(PhoneTypeChoiceRules.ResolveServices(1, null));
+        Assert.Equal(0, PhoneTypeChoiceRules.ResolveDirectory(0, null, isNew: true));
+        Assert.Null(PhoneTypeChoiceRules.ResolveDirectory(1, null, isNew: true));
+        Assert.Equal(2, PhoneTypeChoiceRules.ResolveDirectory(0, 2, isNew: false));
+        var request = ValidRequest();
+        request.Phone.ServicesKind = null;
+        request.Phone.ViewInDirectory = null;
+        var issues = PhoneFormValidator.Validate(request);
+        Assert.Contains(issues, item => item.Field == "ServicesKind");
+        Assert.Contains(issues, item => item.Field == "ViewInDirectory");
+    }
+
+    /// <summary>Основной номер включает отображение, не изменяя осознанные режимы.</summary>
+    [Theory]
+    [InlineData(null, 1)]
+    [InlineData(0, 1)]
+    [InlineData(2, 2)]
+    [InlineData(6, 6)]
+    public void DefaultPhone_UpdatesOnlyEmptyOrHiddenDirectory(int? current, int? expected) =>
+        Assert.Equal(expected, PhoneTypeChoiceRules.ResolveDirectoryAfterDefault(true, current));
+
+    /// <summary>Диалог параллельного вызова получает ошибки до изменения исходной коллекции.</summary>
+    [Fact]
+    public void ParallelCallDialogValidation_ChecksFormatDelayAndDuplicates()
+    {
+        var call = new PhoneParallelCall { CallNumber = "12A", DelayBeforeCall = 256 };
+        var errors = PhoneFormValidator.ValidateParallelCall(call, "101", ["102"]);
+        Assert.Contains(errors, item => item.Contains("до 50"));
+        Assert.Contains(errors, item => item.Contains("Задержки"));
+        Assert.NotEmpty(PhoneFormValidator.ValidateParallelCall(new PhoneParallelCall { CallNumber = "101" }, "101", []));
+        Assert.NotEmpty(PhoneFormValidator.ValidateParallelCall(new PhoneParallelCall { CallNumber = "102" }, "101", ["102"]));
+        Assert.Empty(PhoneFormValidator.ValidateParallelCall(new PhoneParallelCall { CallNumber = "+102" }, "101", []));
+    }
+
+    /// <summary>Отсутствие конфигурации не разрешает произвольную группу перехвата.</summary>
+    [Fact]
+    public void PickupGroup_MissingConfigurationFailsClosed()
+    {
+        var request = ValidRequest();
+        request.Phone.StationId = 0;
+        request.Phone.PickupGroup = "arbitrary";
+        request.AvailablePickupGroups = [];
+        Assert.Contains(PhoneFormValidator.Validate(request), item => item.Field == "PickupGroup");
+    }
+
     private static PhoneSaveRequest ValidRequest(string number = "101") => new()
     {
         Phone = new Phone

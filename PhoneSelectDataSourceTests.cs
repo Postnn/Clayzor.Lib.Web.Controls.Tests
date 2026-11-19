@@ -69,6 +69,31 @@ public sealed class PhoneSelectDataSourceTests
         Assert.Single(connection.CommandLog);
     }
 
+    /// <summary>Оборудование без расположения не переключает розетки на офис станции.</summary>
+    [Fact]
+    public async Task Socket_DraftEquipmentWithoutLocationFailsClosed()
+    {
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>());
+        var source = new PhoneSocketSelectDataSource(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection))
+        { StationId = 1, HasDraftEquipment = true };
+        var result = await source.SearchAsync(new ClaySelectSearchRequest { Limit = 20 });
+        Assert.Empty(result.Items);
+        Assert.Empty(connection.CommandLog);
+    }
+
+    /// <summary>Фильтр оборудования учитывает физический запрет повторного EquipmentId.</summary>
+    [Fact]
+    public async Task Equipment_ExcludesEquipmentIdRegardlessOfConnection()
+    {
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Rows()]));
+        var source = new PhoneEquipmentSelectDataSource(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection))
+        { PhoneTypeId = 1, StationId = 1, ExcludedKeys = [new PhoneEquipmentKey(7, 8)] };
+        await source.SearchAsync(new ClaySelectSearchRequest { Limit = 20 });
+        Assert.Contains("F.КодОборудования <> @ExcludedEquipment0", connection.CommandLog[0]);
+        Assert.DoesNotContain("ExcludedConnection", connection.CommandLog[0]);
+        Assert.Equal(7, connection.ParameterLog[0]["ExcludedEquipment0"]);
+    }
+
     /// <summary>Черновые расположения оборудования передаются параметрами.</summary>
     [Fact]
     public async Task Socket_UsesDraftEquipmentLocations()

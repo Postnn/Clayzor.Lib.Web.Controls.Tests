@@ -90,6 +90,25 @@ public sealed class ClayFormControlsTests
         Assert.Equal(winterUtc, invocations[1].Arguments.Single());
     }
 
+    /// <summary>LocalTime применяет смещение браузера на дату события, включая лето и зиму.</summary>
+    [Fact]
+    public void LocalTime_UsesOffsetAtRecordedUtcDate()
+    {
+        using var ctx = new BunitContext();
+        var summer = new DateTime(2026, 7, 15, 12, 0, 0, DateTimeKind.Utc);
+        var winter = new DateTime(2026, 1, 15, 12, 0, 0, DateTimeKind.Utc);
+        ctx.JSInterop.Setup<int>("clayGridTimeZone.getOffsetMinutes", invocation =>
+            Equals(invocation.Arguments.Single(), summer.ToString("O"))).SetResult(120);
+        ctx.JSInterop.Setup<int>("clayGridTimeZone.getOffsetMinutes", invocation =>
+            Equals(invocation.Arguments.Single(), winter.ToString("O"))).SetResult(60);
+        var cut = ctx.Render<ClayLocalTime>(parameters => parameters.Add(component => component.Value, summer));
+
+        cut.WaitForAssertion(() => Assert.Equal("15.07.2026 14:00:00", cut.Find("time").TextContent));
+        cut.Render(parameters => parameters.Add(component => component.Value, winter));
+
+        cut.WaitForAssertion(() => Assert.Equal("15.01.2026 13:00:00", cut.Find("time").TextContent));
+    }
+
     /// <summary>Каркас оставляет toolbar и footer вне прокручиваемого содержимого.</summary>
     [Fact]
     public void EntityForm_KeepsToolbarAndFooterOutsideScrollableContent()
