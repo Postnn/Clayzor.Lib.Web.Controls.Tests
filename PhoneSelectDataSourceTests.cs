@@ -39,6 +39,8 @@ public sealed class PhoneSelectDataSourceTests
         Assert.Contains("P.КодТелефонногоНомера <> @Excluded0", connection.CommandLog[0]);
         Assert.Equal(5, connection.ParameterLog[0]["Excluded0"]);
         Assert.Equal(8, connection.ParameterLog[0]["Excluded1"]);
+        Assert.Equal(1, connection.CommandLog[0].Split(["ORDER BY"], StringSplitOptions.None).Length - 1);
+        Assert.EndsWith("ORDER BY Телефон", connection.CommandLog[0]);
     }
 
     /// <summary>Составной ключ оборудования восстанавливается без строки с разделителем.</summary>
