@@ -1,3 +1,4 @@
+using Clayzor.Lib.DALC;
 using Clayzor.Lib.Entities.Inventory;
 using Kesco.App.Web.Inventory.Services;
 
@@ -160,6 +161,22 @@ public sealed class PhoneFormValidationTests
         request.Phone.PickupGroup = "arbitrary";
         request.AvailablePickupGroups = [];
         Assert.Contains(PhoneFormValidator.Validate(request), item => item.Field == "PickupGroup");
+    }
+
+    /// <summary>Ошибка авторитетного расчёта полного номера прерывает Save без SQL-записи.</summary>
+    [Fact]
+    public async Task Save_FullNumberConnectivityErrorFailsClosed()
+    {
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([
+            Script.Scalar(1),
+            Script.Error(SqlExceptionFactory.Create(number: 53, message: "connection error")),
+        ]));
+        var service = new PhoneFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+
+        await Assert.ThrowsAsync<Microsoft.Data.SqlClient.SqlException>(() => service.SaveAsync(ValidRequest()));
+
+        Assert.Equal(2, connection.CommandLog.Count);
+        Assert.DoesNotContain(connection.CommandLog, sql => sql.Contains("UPDATE ") || sql.Contains("INSERT "));
     }
 
     private static PhoneSaveRequest ValidRequest(string number = "101") => new()

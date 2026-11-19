@@ -196,6 +196,26 @@ public sealed class PhoneSaveBuilderTests
             item => item.Kind == PhoneSyncKind.Xorcom);
     }
 
+    /// <summary>Delete игнорирует черновые станцию и оборудование, используя только сохранённое состояние.</summary>
+    [Fact]
+    public void Sync_DeleteUsesPersistedStationAndEquipmentOnly()
+    {
+        var request = Request();
+        request.OriginalPhone.StationId = 33;
+        request.OriginalPhone.AtsPort = "old-port";
+        request.Phone.StationId = 0;
+        request.Phone.AtsPort = "draft-port";
+        request.OriginalRelations.Equipment.Add(new PhoneEquipmentLink { EquipmentId = 7 });
+        request.Relations.Equipment.Add(new PhoneEquipmentLink { EquipmentId = 99 });
+
+        var xorcom = PhoneSyncPlanner.BuildDelete(request, new PhoneSyncStation(33, "saved"));
+        var ccm = PhoneSyncPlanner.BuildDelete(request, new PhoneSyncStation(0, ""));
+
+        Assert.Equal([new PhoneSyncOperation(PhoneSyncKind.Xorcom, "saved", true)], xorcom.ToArray());
+        Assert.Equal([new PhoneSyncOperation(PhoneSyncKind.Ccm, "7")], ccm.ToArray());
+        Assert.DoesNotContain(xorcom.Concat(ccm), item => item.Key is "draft-port" or "99");
+    }
+
     private static PhoneSaveRequest Request() => new()
     {
         Phone = new Phone { Id = 5, Number = "101", FullNumber = "101", PhoneTypeId = 1, StationId = 1, Notes = "old" },

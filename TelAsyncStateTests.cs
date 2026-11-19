@@ -125,15 +125,27 @@ public sealed class TelAsyncStateTests
         Assert.Contains("Данные не сохранены", fixture.Get<string?>("_validationMessage"));
     }
 
-    /// <summary>Удаление Xorcom выполняется до физического удаления записи.</summary>
+    /// <summary>Бизнес-валидация блокирует pre-sync до внешнего эффекта Xorcom.</summary>
+    [Fact]
+    public async Task Xorcom_BusinessValidationBlocksPreSync()
+    {
+        await using var fixture = new TelFixture();
+        fixture.PrepareXorcomStationChange();
+        fixture.Service.ValidationIssues.Add(new PhoneValidationIssue("AtsPort", "Порт занят"));
+
+        await fixture.Invoke("SaveAsync", true);
+
+        Assert.Empty(fixture.Service.Calls);
+        Assert.Empty(fixture.Service.SaveRequests);
+        Assert.Contains("Порт занят", fixture.Get<string?>("_validationMessage"));
+    }
+
+    /// <summary>Delete после черновой смены A→B очищает только сохранённую станцию A до SQL DELETE.</summary>
     [Fact]
     public async Task Xorcom_DeleteRunsBeforeSqlDelete()
     {
         await using var fixture = new TelFixture();
-        fixture.PrepareWrite();
-        fixture.SetMember("_originalPhone", fixture.Model);
-        fixture.SetMember("_originalStation", new PhoneStationLookup { Id = 1, XorcomName = "old" });
-        fixture.SetMember("_selectedStation", new PhoneStationLookup { Id = 1, XorcomName = "old" });
+        fixture.PrepareXorcomStationChange();
 
         await fixture.Invoke("DeleteConfirmedAsync");
 
@@ -189,7 +201,7 @@ public sealed class TelAsyncStateTests
             Set("_model", new Phone
             {
                 Id = 1002, Number = "101", FullNumber = "101", PhoneTypeId = 1, StationId = 1, CustomerId = 1,
-                ServicesKind = 1, ViewInDirectory = 1, Connected = "Room",
+                EmployeeId = 4, AtsDescription = "Test", ServicesKind = 1, ViewInDirectory = 1, Connected = "Room",
             });
         }
 
@@ -273,6 +285,7 @@ public sealed class TelAsyncStateTests
         internal bool ThrowOnSave { get; set; }
         internal bool ThrowOnDelete { get; set; }
         internal bool FailDeletingXorcom { get; set; }
+        internal List<PhoneValidationIssue> ValidationIssues { get; } = [];
 
         internal TaskCompletionSource<PhoneCapabilities> EnqueueCapabilities()
         {
@@ -283,6 +296,9 @@ public sealed class TelAsyncStateTests
 
         public override Task<PhoneCapabilities> GetCapabilitiesAsync(int? stationId, int? phoneTypeId, int phoneId) =>
             _capabilities.Count > 0 ? _capabilities.Dequeue().Task : Task.FromResult(new PhoneCapabilities());
+
+        public override Task<IReadOnlyList<PhoneValidationIssue>> ValidateServerAsync(PhoneSaveRequest request) =>
+            Task.FromResult<IReadOnlyList<PhoneValidationIssue>>(ValidationIssues);
 
         public override Task<PhoneSaveResult> SaveAsync(PhoneSaveRequest request)
         {
