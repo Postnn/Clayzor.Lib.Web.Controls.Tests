@@ -769,7 +769,7 @@ public sealed class EquipmentFormTests
 
         await InvokeHandler(page, "OpenModelViewAsync", new EquipmentModel { Id = 945 });
 
-        var open = Assert.Single(context.JSInterop.Invocations, call => call.Identifier == "open");
+        var open = Assert.Single(context.JSInterop.Invocations, call => call.Identifier == "clayOpen");
         Assert.Contains("id=945", open.Arguments[0]?.ToString());
         Assert.Equal("_blank", open.Arguments[1]);
         Assert.DoesNotContain(context.JSInterop.Invocations, call => call.Identifier == "clayModelEquipmentForm.close");

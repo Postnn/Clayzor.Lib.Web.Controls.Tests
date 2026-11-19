@@ -93,7 +93,7 @@ public sealed class EquipmentInsTests
         var select = page.FindComponent<Clayzor.Lib.Web.Controls.Components.Select.ClaySelect<Employee, int?>>();
         Assert.NotNull(select.Instance.ViewItem);
         await page.InvokeAsync(() => select.Instance.ViewItem!(new Employee { Id = 4 }));
-        var invocation = Assert.Single(context.JSInterop.Invocations, call => call.Identifier == "open");
+        var invocation = Assert.Single(context.JSInterop.Invocations, call => call.Identifier == "clayOpen");
         Assert.Equal("http://localhost/Users/UserForm?id=4", invocation.Arguments[0]);
         Assert.Equal("_blank", invocation.Arguments[1]);
     }

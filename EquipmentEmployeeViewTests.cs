@@ -58,7 +58,7 @@ public sealed class EquipmentEmployeeViewTests
 
         view.Click();
 
-        var call = Assert.Single(context.JSInterop.Invocations, invocation => invocation.Identifier == "open");
+        var call = Assert.Single(context.JSInterop.Invocations, invocation => invocation.Identifier == "clayOpen");
         Assert.Equal("http://localhost/Users/UserForm?id=4", call.Arguments[0]);
         Assert.Equal("_blank", call.Arguments[1]);
     }
