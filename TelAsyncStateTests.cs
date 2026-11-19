@@ -238,13 +238,12 @@ public sealed class TelAsyncStateTests
         Assert.False(fixture.Get<bool>("_deleted"));
     }
 
-    /// <summary>Общее предупреждение Cancel, навигации и Delete различает SQL Save и АТС pending.</summary>
+    /// <summary>Предупреждение о pending без нового черновика не сообщает о несохранённых правках.</summary>
     [Fact]
     public async Task PendingSync_CloseConfirmationExplainsSavedDataAndManualSync()
     {
         await using var fixture = new TelFixture();
-        fixture.PrepareWrite();
-        fixture.SetMember("_pendingOperations", new[] { new PhoneSyncOperation(PhoneSyncKind.Xorcom, "old") });
+        fixture.PrepareCloseState(draft: false, pendingSync: true);
 
         var message = fixture.InvokeText("CloseConfirmation", "Черновик не сохранён");
 
@@ -259,14 +258,140 @@ public sealed class TelAsyncStateTests
     public async Task Draft_CloseConfirmationKeepsOriginalMessage()
     {
         await using var fixture = new TelFixture();
-        fixture.PrepareWrite();
+        fixture.PrepareCloseState(draft: true, pendingSync: false);
 
         Assert.Equal("Черновик не сохранён", fixture.InvokeText("CloseConfirmation", "Черновик не сохранён"));
+    }
+
+    /// <summary>Реальный Cancel различает черновик и pending; отказ не закрывает форму и не меняет данные.</summary>
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task Cancel_ConfirmationSeparatesDraftAndPending(bool draft, bool pendingSync)
+    {
+        await using var fixture = new TelFixture();
+        fixture.PrepareCloseState(draft, pendingSync);
+        if (!draft && !pendingSync)
+        {
+            await fixture.Invoke("CancelAsync").WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.True(fixture.Get<bool>("_allowNavigation"));
+            fixture.AssertNoConfirmation();
+            return;
+        }
+
+        var action = fixture.Invoke("CancelAsync");
+        var message = fixture.WaitForConfirmation();
+        Assert.Equal(draft, message.Contains("Закрыть форму без сохранения изменений?", StringComparison.Ordinal));
+        Assert.Equal(pendingSync, message.Contains("синхронизация АТС не завершена", StringComparison.Ordinal));
+
+        fixture.RespondToConfirmation("Нет");
+        await action.WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.False(fixture.Get<bool>("_allowNavigation"));
+        Assert.Equal(draft ? "draft" : string.Empty, fixture.Model.Notes);
+        Assert.Equal(pendingSync ? 1 : 0, fixture.PendingCount);
+        Assert.Empty(fixture.Service.Calls);
+    }
+
+    /// <summary>Реальный Delete всегда называет удаляемые данные; отказ не выполняет чтение или удаление.</summary>
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task Delete_ConfirmationAlwaysExplainsDeletion(bool draft, bool pendingSync)
+    {
+        await using var fixture = new TelFixture();
+        fixture.PrepareCloseState(draft, pendingSync);
+
+        var action = fixture.Invoke("DeleteAsync");
+        var message = fixture.WaitForConfirmation();
+        Assert.Contains("Удалить номер, состав его PBX-группы, связи с оборудованием и параллельные вызовы?", message);
+        Assert.Equal(pendingSync, message.Contains("синхронизация АТС не завершена", StringComparison.Ordinal));
+
+        fixture.RespondToConfirmation("Нет");
+        await action.WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.Empty(fixture.Service.Calls);
+        Assert.False(fixture.Get<bool>("_deleted"));
+        Assert.False(fixture.Get<bool>("_allowNavigation"));
+        Assert.Equal(draft ? "draft" : string.Empty, fixture.Model.Notes);
+        Assert.Equal(pendingSync ? 1 : 0, fixture.PendingCount);
+    }
+
+    /// <summary>Подтверждённый Delete с черновиком и pending выполняет удаление и закрывает форму.</summary>
+    [Fact]
+    public async Task Delete_ConfirmedDraftAndPendingDeletesPhone()
+    {
+        await using var fixture = new TelFixture();
+        fixture.PrepareCloseState(draft: true, pendingSync: true);
+
+        var action = fixture.Invoke("DeleteAsync");
+        _ = fixture.WaitForConfirmation();
+        fixture.RespondToConfirmation("Да");
+        await action.WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.Equal(["read", "delete"], fixture.Service.Calls);
+        Assert.True(fixture.Get<bool>("_deleted"));
+        Assert.True(fixture.Get<bool>("_allowNavigation"));
+    }
+
+    /// <summary>Refresh подтверждает только сброс черновика и сохраняет pending при загрузке.</summary>
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task Refresh_PreservesPendingAndOnlyConfirmsDraft(bool draft, bool pendingSync)
+    {
+        await using var fixture = new TelFixture();
+        fixture.PrepareCloseState(draft, pendingSync);
+        if (!draft)
+        {
+            await fixture.Invoke("RefreshAsync").WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.Equal(1, fixture.Service.LoadCalls);
+            Assert.Equal("reloaded", fixture.Model.Number);
+            Assert.Equal(pendingSync ? 1 : 0, fixture.PendingCount);
+            fixture.AssertNoConfirmation();
+            return;
+        }
+
+        var action = fixture.Invoke("RefreshAsync");
+        var message = fixture.WaitForConfirmation();
+        Assert.Contains("Отменить несохранённые изменения и загрузить запись повторно?", message);
+        Assert.DoesNotContain("повтор из этой формы будет недоступен", message);
+
+        fixture.RespondToConfirmation("Нет");
+        await action.WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.Equal(0, fixture.Service.LoadCalls);
+        Assert.Equal("draft", fixture.Model.Notes);
+        Assert.Equal(pendingSync ? 1 : 0, fixture.PendingCount);
+    }
+
+    /// <summary>Подтверждённый Refresh сбрасывает черновик, но не теряет возможность повтора АТС.</summary>
+    [Fact]
+    public async Task Refresh_ConfirmedDraftReloadsAndPreservesPending()
+    {
+        await using var fixture = new TelFixture();
+        fixture.PrepareCloseState(draft: true, pendingSync: true);
+
+        var action = fixture.Invoke("RefreshAsync");
+        _ = fixture.WaitForConfirmation();
+        fixture.RespondToConfirmation("Да");
+        await action.WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.Equal(1, fixture.Service.LoadCalls);
+        Assert.Equal("reloaded", fixture.Model.Number);
+        Assert.Equal(1, fixture.PendingCount);
     }
 
     private sealed class TelFixture : IAsyncDisposable
     {
         private readonly BunitContext _context;
+        private readonly IRenderedComponent<MudBlazor.MudDialogProvider> _dialogProvider;
         private readonly Tel _tel;
 
         internal TelFixture()
@@ -292,6 +417,7 @@ public sealed class TelAsyncStateTests
             services.AddKeyedSingleton("drivenBy", new PhoneDirectorySelectDataSource(db) { Mode = PhoneDirectoryMode.DrivenBy });
             services.AddKeyedSingleton("displayedFrom", new PhoneDirectorySelectDataSource(db) { Mode = PhoneDirectoryMode.DisplayedFrom });
             _context.Services.GetRequiredService<Microsoft.AspNetCore.Components.NavigationManager>().NavigateTo("/Telefon/Tel?id=-1&copyId=-1");
+            _dialogProvider = _context.Render<MudBlazor.MudDialogProvider>();
             _tel = _context.Render<Tel>().Instance;
             Set("_model", new Phone
             {
@@ -302,6 +428,7 @@ public sealed class TelAsyncStateTests
 
         internal DelayedPhoneFormService Service { get; }
         internal Phone Model => Get<Phone>("_model");
+        internal int PendingCount => Get<IReadOnlyList<PhoneSyncOperation>>("_pendingOperations").Count;
 
         internal void PrepareWrite()
         {
@@ -313,6 +440,38 @@ public sealed class TelAsyncStateTests
             {
                 Phone = Model, Station = new PhoneStationLookup { Id = 1, XorcomName = "old" },
             };
+        }
+
+        internal void PrepareCloseState(bool draft, bool pendingSync)
+        {
+            PrepareWrite();
+            _tel.Id = Model.Id;
+            Set("_loadedKey", (Model.Id, _tel.CopyId));
+            Model.PhoneTypeId = null;
+            Model.StationId = null;
+            Model.CustomerId = null;
+            Model.EmployeeId = null;
+            Model.DrivenById = null;
+            Model.DisplayedFromId = null;
+            Set("_selectedType", null);
+            Set("_selectedStation", null);
+            Set("_selectedEmployee", null);
+            Set("_selectedDrivenBy", null);
+            Set("_selectedDisplayedFrom", null);
+            var original = Model.CopyForNew();
+            original.Id = Model.Id;
+            Set("_originalPhone", original);
+            var relations = Get<PhoneRelationsSnapshot>("_relations");
+            Set("_originalRelations", relations.Clone());
+            Set("_originalRelationsSnapshot", System.Text.Json.JsonSerializer.Serialize(relations));
+            Set("_pendingOperations", pendingSync
+                ? new[] { new PhoneSyncOperation(PhoneSyncKind.Xorcom, "old") }
+                : Array.Empty<PhoneSyncOperation>());
+            Service.PersistedSnapshot = new PhoneDeleteSnapshot
+            {
+                Phone = original, Station = new PhoneStationLookup { Id = 0 }, Relations = relations.Clone(),
+            };
+            if (draft) Model.Notes = "draft";
         }
 
         internal void PrepareXorcomStationChange()
@@ -345,6 +504,22 @@ public sealed class TelAsyncStateTests
             Set("_originalStation", station);
             Set("_selectedStation", station);
         }
+
+        internal string WaitForConfirmation()
+        {
+            _dialogProvider.WaitForAssertion(() =>
+                Assert.Single(_dialogProvider.FindComponents<global::Clayzor.Lib.Web.Controls.Components.ConfirmDialog>()), TimeSpan.FromSeconds(2));
+            return _dialogProvider.FindComponent<global::Clayzor.Lib.Web.Controls.Components.ConfirmDialog>().Instance.Message;
+        }
+
+        internal void RespondToConfirmation(string buttonText)
+        {
+            var dialog = _dialogProvider.FindComponent<global::Clayzor.Lib.Web.Controls.Components.ConfirmDialog>();
+            dialog.FindAll("button").Single(button => button.TextContent.Trim() == buttonText).Click();
+        }
+
+        internal void AssertNoConfirmation() =>
+            Assert.Empty(_dialogProvider.FindComponents<global::Clayzor.Lib.Web.Controls.Components.ConfirmDialog>());
 
         internal void SetMember(string name, object? value) => Set(name, value);
 
@@ -408,6 +583,17 @@ public sealed class TelAsyncStateTests
         internal List<PhoneValidationIssue> ValidationIssues { get; } = [];
         internal string? SavedFullNumber { get; set; }
         internal PhoneDeleteSnapshot? PersistedSnapshot { get; set; }
+        internal int LoadCalls { get; private set; }
+
+        public override Task<PhoneFormData?> GetAsync(int id, bool copy = false)
+        {
+            LoadCalls++;
+            Calls.Add("load");
+            return Task.FromResult<PhoneFormData?>(new PhoneFormData
+            {
+                Phone = new Phone { Id = id, Number = "reloaded", FullNumber = "reloaded" }, CanEdit = true,
+            });
+        }
 
         internal TaskCompletionSource<PhoneCapabilities> EnqueueCapabilities()
         {
