@@ -1,4 +1,5 @@
 using Clayzor.Lib.DALC;
+using Clayzor.Lib.Entities;
 using Clayzor.Lib.Entities.Inventory;
 using Clayzor.Lib.Web.Controls.Components.Select;
 using Clayzor.Lib.Web.DBSelect.Phones;
@@ -99,11 +100,41 @@ public sealed class PhoneSelectDataSourceTests
     public async Task Socket_UsesDraftEquipmentLocations()
     {
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Rows()]));
-        var source = new PhoneSocketSelectDataSource(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection)) { EquipmentLocationIds = [10, 20] };
+        var source = new PhoneSocketSelectDataSource(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection)) { StationId = 1, EquipmentLocationIds = [10, 20] };
         await source.SearchAsync(new ClaySelectSearchRequest { Limit = 20 });
         Assert.Contains("IN (@LocationId0,@LocationId1)", connection.CommandLog[0]);
         Assert.Equal(10, connection.ParameterLog[0]["LocationId0"]);
         Assert.Equal(20, connection.ParameterLog[0]["LocationId1"]);
         Assert.DoesNotContain(connection.CommandLog, sql => sql.Contains("ОборудованиеРасположение R ON R.КодОборудования = S.КодОборудования"));
+    }
+
+    /// <summary>Оборудование не открывает поиск розеток без станции.</summary>
+    [Fact]
+    public async Task Socket_MissingStationFailsClosedWithEquipmentLocations()
+    {
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>());
+        var source = new PhoneSocketSelectDataSource(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection))
+        { EquipmentLocationIds = [10, 20] };
+        var result = await source.SearchAsync(new ClaySelectSearchRequest { Limit = 20 });
+        Assert.Empty(result.Items);
+        Assert.Empty(connection.CommandLog);
+    }
+
+    /// <summary>Проверка розетки использует дерево офиса и не освобождает собственную связь от контекста.</summary>
+    [Fact]
+    public void SocketValidation_UsesOfficeSubtreeAndChecksContextForCurrentSocket()
+    {
+        const string own = "P.КодТелефонногоНомера = @PhoneId";
+        const string free = "NOT EXISTS (SELECT 1 FROM vwТелефонныеНомераИзменение P WHERE P.КодРозетки = S.КодРозетки)";
+        var office = SQLQueries.SELECT_ТелефонРозеткаДопустимаВОфисе;
+        Assert.Contains("SL.L >= O.L AND SL.R <= O.R", office);
+        Assert.Contains("L.L >= O.L AND L.R <= O.R", office);
+        Assert.DoesNotContain("SL.КодРасположения = S.КодРасположения", office);
+        Assert.True(office.IndexOf("S.Работает = 1", StringComparison.Ordinal) < office.IndexOf(own, StringComparison.Ordinal));
+        Assert.True(office.IndexOf(free, StringComparison.Ordinal) < office.IndexOf("AND EXISTS (SELECT 1 FROM vwТелефонныеСтанции ST", StringComparison.Ordinal));
+
+        var equipment = SQLQueries.SELECT_ТелефонРозеткаДопустимаОборудования;
+        Assert.True(equipment.IndexOf("S.Работает = 1", StringComparison.Ordinal) < equipment.IndexOf(own, StringComparison.Ordinal));
+        Assert.True(equipment.IndexOf(free, StringComparison.Ordinal) < equipment.IndexOf("AND S.КодРасположения IN (@LocationIds)", StringComparison.Ordinal));
     }
 }

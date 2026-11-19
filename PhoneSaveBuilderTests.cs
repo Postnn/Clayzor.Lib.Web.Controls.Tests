@@ -102,6 +102,33 @@ public sealed class PhoneSaveBuilderTests
         Assert.Equal([7, 8], ccm.Where(item => item.Kind == PhoneSyncKind.Ccm).Select(item => int.Parse(item.Key)).Order().ToArray());
     }
 
+    /// <summary>Добавление, удаление и замена оборудования запускают соответствующую синхронизацию станции.</summary>
+    [Theory]
+    [InlineData(PhoneSyncKind.Ccm)]
+    [InlineData(PhoneSyncKind.Meridian)]
+    [InlineData(PhoneSyncKind.Xorcom)]
+    public void Sync_StructuralEquipmentDiffIncludesStation(PhoneSyncKind kind)
+    {
+        for (var change = 0; change < 3; change++)
+        {
+            var request = Request();
+            request.OriginalPhone.AtsPort = request.Phone.AtsPort = "99/70";
+            if (change is 1 or 2) request.OriginalRelations.Equipment.Add(new PhoneEquipmentLink { EquipmentId = 7 });
+            if (change is 0 or 2) request.Relations.Equipment.Add(new PhoneEquipmentLink { EquipmentId = change == 2 ? 8 : 7 });
+            var station = kind switch
+            {
+                PhoneSyncKind.Meridian => new PhoneSyncStation(32, ""),
+                PhoneSyncKind.Xorcom => new PhoneSyncStation(33, "pbx"),
+                _ => new PhoneSyncStation(0, ""),
+            };
+            var operations = PhoneSyncPlanner.Build(request, station, station);
+
+            Assert.Contains(operations, item => item.Kind == kind);
+            if (kind == PhoneSyncKind.Ccm && change == 2)
+                Assert.Equal([7, 8], operations.Where(item => item.Kind == kind).Select(item => int.Parse(item.Key)).Order().ToArray());
+        }
+    }
+
     /// <summary>Смена подключения заменяет связь по точному старому и новому составному ключу.</summary>
     [Fact]
     public void Build_ConnectionChangeUsesPreciseDeleteAndInsert()
