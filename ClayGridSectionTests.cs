@@ -56,6 +56,26 @@ public sealed class ClayGridSectionTests
         Assert.NotNull(cut.Find("thead th button"));
     }
 
+    /// <summary>Container-height включает отдельный класс, а hidetitle скрывает только текст заголовка.</summary>
+    [Fact]
+    public async Task SectionGrid_FillHeightAndHiddenTitlePreserveToolbar()
+    {
+        await using var ctx = CreateContext();
+        var options = Options();
+        options.ShowToolbar = true;
+        options.ShowTitle = false;
+        options.FillAvailableHeight = true;
+        var cut = ctx.Render<ClayGrid<string>>(parameters => parameters
+            .Add(component => component.Items, ["101"])
+            .Add(component => component.Options, options)
+            .Add(component => component.ColumnDefs, ColumnDefs())
+            .Add(component => component.Columns, Columns()));
+
+        Assert.Contains("clay-grid--fill-height", cut.Markup);
+        Assert.DoesNotContain("<h5", cut.Markup);
+        Assert.NotNull(cut.Find(".toolbar-columns-btn"));
+    }
+
     private static BunitContext CreateContext()
     {
         var ctx = new BunitContext();

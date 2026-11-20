@@ -142,6 +142,51 @@ public class ClayGridReinitTests : IDisposable
         Assert.NotNull(instance.GetColumnMeta("ColumnB"));
     }
 
+    /// <summary>После переинициализации A→B busy-overlay обязан быть снят.</summary>
+    [Fact]
+    public void AtoB_BusyOverlayClearedAfterLoad()
+    {
+        AppendScript(BuildInitScript(101, "Grid A", "SELECT * FROM A", "ColumnA", "Колонка A", 1));
+        _nav.NavigateTo("http://localhost/?id=101&CLID=1");
+        var cut = _ctx.Render<ClayGrid<ClayDynamicRow>>(parameters =>
+            parameters.Add(component => component.Options, new ClayGridOptions { Dynamic = true }));
+        cut.WaitForState(() => _globalQueue.Count == 0, TimeSpan.FromSeconds(10));
+
+        AppendScript(BuildInitScript(202, "Grid B", "SELECT * FROM B", "ColumnB", "Колонка B", 2));
+        _nav.NavigateTo("http://localhost/?id=202&CLID=2");
+        cut.Render(parameters => parameters.Add(component => component.Options, new ClayGridOptions { Dynamic = true }));
+        cut.WaitForState(() => _globalQueue.Count == 0, TimeSpan.FromSeconds(10));
+
+        Assert.False(GetFld<bool>(cut.Instance, "_isExporting"));
+        Assert.Null(GetFld<string?>(cut.Instance, "_busyLabel"));
+    }
+
+    /// <summary>Два параллельных запуска одной identity не смешивают колонки и не читают definition дважды.</summary>
+    [Fact]
+    public async Task ConcurrentSameIdentityInit_UsesSingleDefinitionAndUniqueColumns()
+    {
+        AppendScript(BuildInitScript(101, "Grid A", "SELECT * FROM A", "ColumnA", "Колонка A", 1));
+        _nav.NavigateTo("http://localhost/?id=101&CLID=1");
+        var cut = _ctx.Render<ClayGrid<ClayDynamicRow>>(parameters =>
+            parameters.Add(component => component.Options, new ClayGridOptions { Dynamic = true }));
+        cut.WaitForState(() => _globalQueue.Count == 0, TimeSpan.FromSeconds(10));
+
+        var connection = AppendScript(BuildInitScript(202, "Grid B", "SELECT * FROM B", "ColumnB", "Колонка B", 2));
+        var definitionsBeforeB = DefCount(connection);
+        _nav.NavigateTo("http://localhost/?id=202&CLID=2");
+        var method = typeof(ClayGrid<ClayDynamicRow>).GetMethod("OnParametersSetAsync",
+            BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var first = cut.InvokeAsync(() => (Task)method.Invoke(cut.Instance, null)!);
+        var second = cut.InvokeAsync(() => (Task)method.Invoke(cut.Instance, null)!);
+        await Task.WhenAll(first, second).WaitAsync(TimeSpan.FromSeconds(10));
+        cut.WaitForState(() => _globalQueue.Count == 0, TimeSpan.FromSeconds(10));
+
+        Assert.Equal(definitionsBeforeB + 1, DefCount(connection));
+        var columns = GetFld<List<int>>(cut.Instance, "_columnOrder")!;
+        Assert.Equal(columns.Count, columns.Distinct().Count());
+        Assert.False(GetFld<bool>(cut.Instance, "_isExporting"));
+    }
+
     [Fact]
     public void SameKey_PresentationChange_NoReinit()
     {
@@ -276,6 +321,64 @@ public class ClayGridReinitTests : IDisposable
 
         Assert.Null(cut.Instance.GetColumnMeta("ColA"));
         Assert.Null(GetFld<ClayGridDynamicKey?>(cut.Instance, "_currentDynamicKey"));
+    }
+
+    /// <summary>Очистка через toolbar сохраняет дефолты и не возвращает старое состояние из кеша.</summary>
+    [Fact]
+    public async Task ClearDynamicState_WritesDefaultsWithoutStaleCacheRestore()
+    {
+        var connection = AppendScript(BuildInitScript(101, "Grid", "SELECT * FROM T", "ColA", "Колонка A", 1));
+        _nav.NavigateTo("http://localhost/?id=101&CLID=1");
+        var provider = _ctx.Render<MudBlazor.MudDialogProvider>();
+        var popovers = _ctx.Render<MudBlazor.MudPopoverProvider>();
+        var cut = _ctx.Render<ClayGrid<ClayDynamicRow>>(parameters =>
+            parameters.Add(component => component.Options, new ClayGridOptions { Dynamic = true, PageSize = 50 }));
+        cut.WaitForState(() => _globalQueue.Count == 0, TimeSpan.FromSeconds(10));
+        cut.Find(".toolbar-batch-btn button").Click();
+        popovers.WaitForAssertion(() => Assert.Contains("Очистить параметры формы", popovers.Markup));
+
+        SetField(cut.Instance, "_pageSize", 99);
+        SetField(cut.Instance, "_searchText", "stale");
+        GetFld<List<string>>(cut.Instance, "_groupColumns")!.Add("ColA");
+        GetFld<Dictionary<string, string>>(cut.Instance, "_dynamicSavedParams")!["pgs101"] = "99";
+        _globalQueue.Enqueue(Script.NonQuery());
+        _globalQueue.Enqueue(Script.Rows(Script.Row(("cnt", 0))));
+        _globalQueue.Enqueue(Script.Rows());
+        var dialogAdded = new TaskCompletionSource<MudBlazor.IDialogReference>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _ctx.Services.GetRequiredService<MudBlazor.IDialogService>().DialogInstanceAddedAsync += reference =>
+        {
+            dialogAdded.TrySetResult(reference);
+            return Task.CompletedTask;
+        };
+
+        var pending = cut.InvokeAsync(() =>
+            (Task)typeof(ClayGrid<ClayDynamicRow>).GetMethod("ClearDynamicStateAsync",
+                BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(cut.Instance, null)!);
+        var dialog = await dialogAdded.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        provider.WaitForAssertion(() => Assert.Contains("Вы действительно хотите очистить параметры формы?", provider.Markup));
+        await cut.InvokeAsync(() => dialog.Close(MudBlazor.DialogResult.Ok(true)));
+        await pending.WaitAsync(TimeSpan.FromSeconds(5));
+        cut.WaitForState(() => _globalQueue.Count == 0, TimeSpan.FromSeconds(10));
+
+        Assert.Equal(50, GetFld<int>(cut.Instance, "_pageSize"));
+        Assert.Null(GetFld<string?>(cut.Instance, "_searchText"));
+        Assert.Empty(GetFld<List<string>>(cut.Instance, "_groupColumns")!);
+        Assert.Equal("50", GetFld<Dictionary<string, string>>(cut.Instance, "_dynamicSavedParams")!["pgs101"]);
+        Assert.DoesNotContain(connection.ParameterLog, parameters =>
+            parameters.Values.Any(value => string.Equals(value?.ToString(), "99", StringComparison.Ordinal)));
+    }
+
+    private static void SetField(object instance, string name, object? value)
+    {
+        var flags = BindingFlags.Instance | BindingFlags.NonPublic;
+        for (var type = instance.GetType(); type is not null; type = type.BaseType)
+        {
+            var field = type.GetField(name, flags);
+            if (field is null) continue;
+            field.SetValue(instance, value);
+            return;
+        }
+        throw new MissingFieldException(instance.GetType().Name, name);
     }
 }
 
