@@ -67,6 +67,44 @@ public sealed class ClayNavigationMenuTests
         Assert.Equal("Нет URI", links[1].GetAttribute("title"));
     }
 
+    [Fact]
+    public void AdditionalContent_IsInsideRootMenuBar()
+    {
+        using var context = new BunitContext();
+        context.JSInterop.Mode = JSRuntimeMode.Loose;
+        context.Services.AddMudServices();
+        Microsoft.AspNetCore.Components.RenderFragment action = builder =>
+        {
+            builder.OpenElement(0, "button");
+            builder.AddAttribute(1, "id", "theme-action");
+            builder.AddContent(2, "Тема");
+            builder.CloseElement();
+        };
+
+        var cut = context.Render<ClayNavigationMenu>(parameters => parameters
+            .Add(component => component.Items, Items(1))
+            .Add(component => component.AdditionalContent, action));
+
+        var actions = cut.Find(".clay-navigation-menu__actions");
+        Assert.NotNull(actions);
+        Assert.NotNull(actions.QuerySelector("#theme-action"));
+        Assert.Equal("clay-navigation-menu__roots", actions.ParentElement?.ClassName);
+    }
+
+    [Fact]
+    public void ActiveDot_IsRenderedOnlyForActiveItem()
+    {
+        using var context = new BunitContext();
+        context.JSInterop.Mode = JSRuntimeMode.Loose;
+        context.Services.AddMudServices();
+        var cut = context.Render<ClayNavigationMenu>(parameters => parameters.Add(component => component.Items, Items(2)));
+
+        cut.Find(".clay-navigation-menu__root-button").Click();
+
+        var dot = Assert.Single(cut.FindAll(".clay-navigation-menu__active-dot"));
+        Assert.Contains("is-active", dot.ClassList);
+    }
+
     private static IReadOnlyList<ClayNavigationMenuItem> Items(int count) =>
     [
         new ClayNavigationMenuItem

@@ -65,6 +65,7 @@ public sealed class ClayGridSectionTests
         options.ShowToolbar = true;
         options.ShowTitle = false;
         options.FillAvailableHeight = true;
+        options.CompactLayout = true;
         var cut = ctx.Render<ClayGrid<string>>(parameters => parameters
             .Add(component => component.Items, ["101"])
             .Add(component => component.Options, options)
@@ -72,6 +73,7 @@ public sealed class ClayGridSectionTests
             .Add(component => component.Columns, Columns()));
 
         Assert.Contains("clay-grid--fill-height", cut.Markup);
+        Assert.Contains("clay-grid--compact-layout", cut.Markup);
         Assert.DoesNotContain("<h5", cut.Markup);
         Assert.NotNull(cut.Find(".toolbar-columns-btn"));
     }

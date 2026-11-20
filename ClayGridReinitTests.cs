@@ -120,6 +120,60 @@ public class ClayGridReinitTests : IDisposable
 
     // ═══ Тесты ═════════════════════════════════════════════════════════════════
 
+    /// <summary>Ошибка SQL не разрывает render/circuit и может быть повторена той же компонентой.</summary>
+    [Fact]
+    public void SqlError_ShowsRecoverableAlertAndRetriesSameInstance()
+    {
+        AppendScript([Script.Error(SqlExceptionFactory.Create(208, "Invalid object"))]);
+        _nav.NavigateTo("http://localhost/?id=101&CLID=1");
+
+        var cut = _ctx.Render<ClayGrid<ClayDynamicRow>>(parameters =>
+            parameters.Add(component => component.Options, new ClayGridOptions { Dynamic = true }));
+
+        Assert.Contains("Не удалось загрузить данные запроса Список #101.", cut.Markup);
+        Assert.Contains("Ошибка: Invalid object", cut.Markup);
+        Assert.Contains("Строка подключения:", cut.Markup);
+        Assert.Contains("test", cut.Markup);
+        Assert.False(GetFld<bool>(cut.Instance, "_isExporting"));
+        var instance = cut.Instance;
+
+        AppendScript(BuildInitScript(101, "Grid A", "SELECT * FROM A", "ColumnA", "Колонка A", 1));
+        cut.Find("button").Click();
+        cut.WaitForState(() => _globalQueue.Count == 0, TimeSpan.FromSeconds(10));
+
+        Assert.Same(instance, cut.Instance);
+        Assert.NotNull(cut.Instance.GetColumnMeta("ColumnA"));
+        Assert.Null(GetFld<string?>(cut.Instance, "_dynamicError"));
+    }
+
+    /// <summary>Из строки подключения маскируются только значения Password/Pwd.</summary>
+    [Theory]
+    [InlineData("Server=sql01;Database=Inventory;User Id=user;Password=secret")]
+    [InlineData("Pwd=secret;Server=sql01;Database=Inventory")]
+    [InlineData("Server=sql01;Database=Inventory;Password=secret;Broken")]
+    public void ConnectionStringError_MaskOnlyPasswordValue(string connectionString)
+    {
+        var masked = ClayGrid<ClayDynamicRow>.MaskConnectionStringPassword(connectionString);
+
+        Assert.DoesNotContain("secret", masked);
+        Assert.Contains("***", masked);
+        Assert.Contains("sql01", masked);
+        Assert.Contains("Inventory", masked);
+    }
+
+    /// <summary>Integrated Security не добавляет отсутствующий пароль в сообщение.</summary>
+    [Fact]
+    public void ConnectionStringError_DoesNotAddPasswordWhenAbsent()
+    {
+        var masked = ClayGrid<ClayDynamicRow>.MaskConnectionStringPassword(
+            "Server=localhost;Database=Inventory;Integrated Security=true");
+
+        Assert.DoesNotContain("Password", masked, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Pwd", masked, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("localhost", masked);
+        Assert.Contains("Inventory", masked);
+    }
+
     [Fact]
     public void AtoB_SameInstance_ColumnsReplaced()
     {
@@ -146,10 +200,13 @@ public class ClayGridReinitTests : IDisposable
     [Fact]
     public void AtoB_BusyOverlayClearedAfterLoad()
     {
+        var titles = new List<string>();
         AppendScript(BuildInitScript(101, "Grid A", "SELECT * FROM A", "ColumnA", "Колонка A", 1));
         _nav.NavigateTo("http://localhost/?id=101&CLID=1");
         var cut = _ctx.Render<ClayGrid<ClayDynamicRow>>(parameters =>
-            parameters.Add(component => component.Options, new ClayGridOptions { Dynamic = true }));
+            parameters.Add(component => component.Options, new ClayGridOptions { Dynamic = true })
+                .Add(component => component.TitleChanged,
+                    EventCallback.Factory.Create<string>(this, title => titles.Add(title))));
         cut.WaitForState(() => _globalQueue.Count == 0, TimeSpan.FromSeconds(10));
 
         AppendScript(BuildInitScript(202, "Grid B", "SELECT * FROM B", "ColumnB", "Колонка B", 2));
@@ -159,6 +216,7 @@ public class ClayGridReinitTests : IDisposable
 
         Assert.False(GetFld<bool>(cut.Instance, "_isExporting"));
         Assert.Null(GetFld<string?>(cut.Instance, "_busyLabel"));
+        Assert.Equal("Grid B", titles.LastOrDefault());
     }
 
     /// <summary>Два параллельных запуска одной identity не смешивают колонки и не читают definition дважды.</summary>
