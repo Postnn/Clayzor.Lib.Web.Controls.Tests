@@ -52,6 +52,8 @@ public sealed class InventoryHomeTests
         context.Services.AddMudServices();
         context.Services.AddMudExtensions();
         context.Services.AddHttpContextAccessor();
+        context.Services.AddSingleton<Microsoft.AspNetCore.Components.Authorization.AuthenticationStateProvider>(
+            new FakeAuthenticationStateProvider());
         context.Services.AddSingleton(new Clayzor.Lib.Web.Settings.ClayAppSettings());
         context.Services.AddSingleton(new Clayzor.Lib.Web.Controls.ClayErrorService());
         context.Services.AddSingleton<ISqlErrorHandler, FakeSqlErrorHandler>();
@@ -72,4 +74,13 @@ public sealed class InventoryHomeTests
         ["ПунктМенюОтчета"] = string.Empty,
         ["ФормаОтчета"] = string.Empty,
     };
+
+    private sealed class FakeAuthenticationStateProvider
+        : Microsoft.AspNetCore.Components.Authorization.AuthenticationStateProvider
+    {
+        /// <inheritdoc />
+        public override Task<Microsoft.AspNetCore.Components.Authorization.AuthenticationState> GetAuthenticationStateAsync() =>
+            Task.FromResult(new Microsoft.AspNetCore.Components.Authorization.AuthenticationState(
+                new System.Security.Claims.ClaimsPrincipal(new System.Security.Claims.ClaimsIdentity())));
+    }
 }

@@ -16,6 +16,7 @@ using Kesco.App.Web.Inventory.Components.Pages.Equipment.Details;
 using Kesco.App.Web.Inventory.Services;
 using MudBlazor;
 using Microsoft.AspNetCore.Components;
+using Microsoft.AspNetCore.Components.Routing;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.JSInterop;
@@ -250,11 +251,158 @@ public sealed class EquipmentFormTests
         Assert.NotNull(GetPrivate(page.Instance, "_pendingPhoneSync"));
         fixture.Service.SyncException = null;
 
-        await InvokeSave(page, false);
+        var apply = page.FindAll("button").Single(item => item.TextContent.Trim() == "Применить");
+        Assert.False(apply.HasAttribute("disabled"));
+        await apply.ClickAsync();
+        page.WaitForAssertion(() => Assert.Null(GetPrivate(page.Instance, "_pendingPhoneSync")));
 
         Assert.Equal(1, fixture.Service.UpdateWithPhonesCalls);
         Assert.Equal(2, fixture.Service.SyncCalls);
+    }
+
+    /// <summary>После частичной ошибки повтор через отрисованную кнопку выполняет только неудачную операцию.</summary>
+    [Fact]
+    public async Task SyncPartialFailure_RetryUsesOnlyFailedOperation()
+    {
+        var fixture = CreateFixture(phones: true);
+        var succeeded = new PhoneSyncOperation(PhoneSyncKind.Ccm, "8");
+        var failed = new PhoneSyncOperation(PhoneSyncKind.Ccm, "9");
+        fixture.Service.SyncResults =
+        [
+            new PhoneSyncResult(succeeded, null),
+            new PhoneSyncResult(failed, "sync failed"),
+        ];
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        await InvokeHandler(page, "OnPhoneToAddChangedAsync", 11);
+        await InvokeSave(page, false);
+
+        var pending = GetPrivate(page.Instance, "_pendingPhoneSync")!;
+        var operations = (IReadOnlyList<PhoneSyncOperation>)pending.GetType()
+            .GetProperty("Operations")!.GetValue(pending)!;
+        Assert.Equal(failed, Assert.Single(operations));
+        fixture.Service.SyncResults = [];
+
+        var apply = page.FindAll("button").Single(item => item.TextContent.Trim() == "Применить");
+        Assert.False(apply.HasAttribute("disabled"));
+        await apply.ClickAsync();
+        page.WaitForAssertion(() => Assert.Null(GetPrivate(page.Instance, "_pendingPhoneSync")));
+
+        Assert.Equal(failed, Assert.Single(fixture.Service.LastSyncOperations));
+        Assert.Equal(1, fixture.Service.UpdateWithPhonesCalls);
+        Assert.Equal(2, fixture.Service.SyncCalls);
+    }
+
+    /// <summary>Отмена pending предупреждает о сохранённом SQL и при отказе не закрывает форму.</summary>
+    [Fact]
+    public async Task CancelPendingSync_ShowsWarningAndHonoursRejection()
+    {
+        var fixture = CreateFixture(phones: true);
+        await using var context = fixture.Context;
+        var provider = context.Render<MudDialogProvider>();
+        var page = context.Render<EquipmentForm>();
+        await CreatePendingSync(fixture, page);
+
+        page.FindAll("button").Single(item => item.TextContent.Trim() == "Отмена").Click();
+        provider.WaitForAssertion(() => Assert.Contains("При закрытии повтор из этой формы будет потерян", provider.Markup));
+        await provider.FindAll("button").Single(item => item.TextContent.Trim() == "Нет").ClickAsync();
+        provider.WaitForAssertion(() => Assert.DoesNotContain("Закрытие формы", provider.Markup));
+
+        Assert.NotNull(GetPrivate(page.Instance, "_pendingPhoneSync"));
+        Assert.DoesNotContain(context.JSInterop.Invocations.ToList(),
+            invocation => invocation.Identifier == "clayModelEquipmentForm.close");
+    }
+
+    /// <summary>Подтверждение закрытия pending выполняется через реальные Отмена и Да.</summary>
+    [Fact]
+    public async Task CancelPendingSync_ConfirmationClosesForm()
+    {
+        var fixture = CreateFixture(phones: true);
+        await using var context = fixture.Context;
+        var provider = context.Render<MudDialogProvider>();
+        var page = context.Render<EquipmentForm>();
+        await CreatePendingSync(fixture, page);
+
+        page.FindAll("button").Single(item => item.TextContent.Trim() == "Отмена").Click();
+        provider.WaitForAssertion(() => Assert.Contains("При закрытии повтор из этой формы будет потерян", provider.Markup));
+        await provider.FindAll("button").Single(item => item.TextContent.Trim() == "Да").ClickAsync();
+
+        page.WaitForAssertion(() => Assert.Contains(context.JSInterop.Invocations,
+            invocation => invocation.Identifier == "clayModelEquipmentForm.close"));
+    }
+
+    /// <summary>Refresh после подтверждения перезагружает запись и сохраняет pending для повтора.</summary>
+    [Fact]
+    public async Task RefreshPendingSync_PreservesRetryInCurrentCircuit()
+    {
+        var fixture = CreateFixture(phones: true);
+        await using var context = fixture.Context;
+        var provider = context.Render<MudDialogProvider>();
+        var page = context.Render<EquipmentForm>();
+        await CreatePendingSync(fixture, page);
+        var requestCount = fixture.Service.Requests.Count;
+
+        page.FindAll("button").Single(item => item.TextContent.Trim() == "Обновить").Click();
+        provider.WaitForAssertion(() => Assert.Contains("Обновление записи сохранит ожидающую синхронизацию", provider.Markup));
+        await provider.FindAll("button").Single(item => item.TextContent.Trim() == "Да").ClickAsync();
+
+        page.WaitForAssertion(() => Assert.Equal(requestCount + 1, fixture.Service.Requests.Count));
+        Assert.NotNull(GetPrivate(page.Instance, "_pendingPhoneSync"));
+        Assert.Equal(1, fixture.Service.UpdateWithPhonesCalls);
+    }
+
+    /// <summary>Переход по id сначала предупреждает, а после подтверждения не переносит pending на другую запись.</summary>
+    [Fact]
+    public async Task NavigationPendingSync_ConfirmsAndDoesNotCarryPendingToNewId()
+    {
+        var fixture = CreateFixture(phones: true);
+        await using var context = fixture.Context;
+        var provider = context.Render<MudDialogProvider>();
+        var page = context.Render<EquipmentForm>();
+        await CreatePendingSync(fixture, page);
+
+        var rejectedChange = new LocationChangingContext { TargetLocation = "http://localhost/Equipment/EquipmentForm?id=8" };
+        var rejectedTask = InvokeHandler(page, "BeforeInternalNavigationAsync", rejectedChange);
+        provider.WaitForAssertion(() => Assert.Contains("При закрытии повтор из этой формы будет потерян", provider.Markup));
+        await provider.FindAll("button").Single(item => item.TextContent.Trim() == "Нет").ClickAsync();
+        await rejectedTask;
+        WaitForSn(page, "CLAY_TEST_7");
+        Assert.NotNull(GetPrivate(page.Instance, "_pendingPhoneSync"));
+
+        var confirmedChange = new LocationChangingContext { TargetLocation = "http://localhost/Equipment/EquipmentForm?id=8" };
+        var confirmedTask = InvokeHandler(page, "BeforeInternalNavigationAsync", confirmedChange);
+        provider.WaitForAssertion(() => Assert.Contains("При закрытии повтор из этой формы будет потерян", provider.Markup));
+        await provider.FindAll("button").Single(item => item.TextContent.Trim() == "Да").ClickAsync();
+        await confirmedTask;
+        await page.InvokeAsync(() => fixture.Navigation.NavigateTo(confirmedChange.TargetLocation));
+
+        WaitForSn(page, "CLAY_TEST_8");
         Assert.Null(GetPrivate(page.Instance, "_pendingPhoneSync"));
+    }
+
+    /// <summary>Ошибка первичного SELECT или batch секций показывает Retry и восстанавливается без разрыва circuit.</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task LoadSqlFailure_ShowsRetryAndRecovers(bool batchError)
+    {
+        var fixture = CreateFixture();
+        var exception = SqlExceptionFactory.Create(53, "connection error");
+        if (batchError) fixture.Service.DetailsException = exception;
+        else fixture.Service.LoadException = exception;
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+
+        page.WaitForAssertion(() => Assert.Contains("Не удалось загрузить оборудование", page.Markup));
+        Assert.DoesNotContain("Оборудование с указанным идентификатором не найдено", page.Markup);
+        var retry = page.FindAll(".mud-alert button").Single(item => item.TextContent.Trim() == "Обновить");
+        Assert.False(retry.HasAttribute("disabled"));
+
+        await retry.ClickAsync();
+
+        WaitForSn(page, "CLAY_TEST_7");
+        Assert.DoesNotContain("Не удалось загрузить оборудование", page.Markup);
     }
 
     /// <summary>Добавление номера обновляет все прикладные фильтры и исключает его из следующего поиска.</summary>
@@ -736,6 +884,29 @@ public sealed class EquipmentFormTests
         Assert.Equal(999, CurrentModel(page.Instance).TenantId);
         Assert.Equal(888, CurrentModel(page.Instance).DocumentReceiptOuId);
         Assert.Equal(50, CurrentModel(page.Instance).DocumentWriteOffId);
+        Assert.True(IsModified(page.Instance));
+    }
+
+    /// <summary>Дочернее сохранение без основного черновика обновляет snapshot и не оставляет форму dirty.</summary>
+    [Fact]
+    public async Task RefreshAccountingWithoutDraft_UpdatesOriginalSnapshot()
+    {
+        var fixture = CreateFixture();
+        fixture.Service.StoredAccounting.Add(new EquipmentAccounting
+        {
+            EquipmentId = 7, OwnerId = 20, TenantId = 30, ReceiptDocumentId = 40, WriteOffDocumentId = 50,
+        });
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+
+        await InvokeHandler(page, "RefreshAccountingAsync");
+
+        Assert.Equal(20, CurrentModel(page.Instance).OwnerId);
+        Assert.Equal(30, CurrentModel(page.Instance).TenantId);
+        Assert.Equal(40, CurrentModel(page.Instance).DocumentReceiptOuId);
+        Assert.Equal(50, CurrentModel(page.Instance).DocumentWriteOffId);
+        Assert.False(IsModified(page.Instance));
     }
 
     /// <summary>Восстановление того же типа после Escape не перечитывает и не очищает телефонные правки.</summary>
@@ -1092,6 +1263,17 @@ public sealed class EquipmentFormTests
                 await task;
         });
 
+    private static async Task CreatePendingSync(
+        Fixture fixture,
+        IRenderedComponent<EquipmentForm> page)
+    {
+        fixture.Service.SyncException = new InvalidOperationException("АТС недоступна");
+        WaitForSn(page, "CLAY_TEST_7");
+        await InvokeHandler(page, "OnPhoneToAddChangedAsync", 11);
+        await InvokeSave(page, false);
+        Assert.NotNull(GetPrivate(page.Instance, "_pendingPhoneSync"));
+    }
+
     private static TaskCompletionSource<IDialogReference> TrackNextDialog(BunitContext context)
     {
         var result = new TaskCompletionSource<IDialogReference>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1187,6 +1369,8 @@ public sealed class EquipmentFormTests
         public EquipmentResponsiblePeriod? ResponsibleUpdated { get; private set; }
         public bool DeferredUpdate { get; set; }
         public bool DeferredInitialLoad { get; set; }
+        public Exception? LoadException { get; set; }
+        public Exception? DetailsException { get; set; }
         public bool PhoneConfig { get; set; }
         public int? WriteOffDocumentId { get; set; }
         public bool RoleForPersonResult { get; set; } = true;
@@ -1210,6 +1394,8 @@ public sealed class EquipmentFormTests
         public List<(int[] Original, int[] Current)> PhoneSaves { get; } = [];
         public int UpdateWithPhonesCalls { get; private set; }
         public int SyncCalls { get; private set; }
+        public IReadOnlyList<PhoneSyncResult>? SyncResults { get; set; }
+        public IReadOnlyList<PhoneSyncOperation> LastSyncOperations { get; private set; } = [];
         public TaskCompletionSource UpdateCompletion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource InitialLoadCompletion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource InitialLoadReturned { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1217,6 +1403,12 @@ public sealed class EquipmentFormTests
         public override async Task<EquipmentEntity?> GetAsync(int id)
         {
             Requests.Add(id);
+            if (LoadException is not null)
+            {
+                var exception = LoadException;
+                LoadException = null;
+                throw exception;
+            }
             if (DeferredInitialLoad && id == 7)
             {
                 _getRequested.TrySetResult();
@@ -1236,6 +1428,12 @@ public sealed class EquipmentFormTests
         /// <summary>Собирает пакетный результат из тех же тестовых данных, не обращаясь к БД.</summary>
         public override async Task<EquipmentFormReadResult> GetFormDataAsync(EquipmentFormReadRequest request)
         {
+            if (DetailsException is not null)
+            {
+                var exception = DetailsException;
+                DetailsException = null;
+                throw exception;
+            }
             var phones = request.IncludePhones
                 ? await GetPhonesAsync(request.EquipmentId)
                 : (IReadOnlyList<EquipmentPhoneLink>)[];
@@ -1404,7 +1602,7 @@ public sealed class EquipmentFormTests
             return Task.CompletedTask;
         }
 
-        public override Task<IReadOnlyList<string>> SynchronizePhonesAsync(
+        public override Task<IReadOnlyList<PhoneSyncResult>> SynchronizePhoneOperationsAsync(
             int equipmentId,
             IReadOnlyCollection<EquipmentPhoneLink> original,
             IReadOnlyCollection<EquipmentPhoneLink> current)
@@ -1412,7 +1610,17 @@ public sealed class EquipmentFormTests
             SyncCalls++;
             if (SyncException is not null)
                 throw SyncException;
-            return Task.FromResult<IReadOnlyList<string>>([]);
+            return Task.FromResult(SyncResults ?? (IReadOnlyList<PhoneSyncResult>)[]);
+        }
+
+        public override Task<IReadOnlyList<PhoneSyncResult>> ExecutePhoneSyncOperationsAsync(
+            IEnumerable<PhoneSyncOperation> operations)
+        {
+            SyncCalls++;
+            LastSyncOperations = operations.ToArray();
+            if (SyncException is not null)
+                throw SyncException;
+            return Task.FromResult(SyncResults ?? (IReadOnlyList<PhoneSyncResult>)[]);
         }
 
         public void WaitForGetRequest()

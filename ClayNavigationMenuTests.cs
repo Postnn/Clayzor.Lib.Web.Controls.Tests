@@ -64,6 +64,7 @@ public sealed class ClayNavigationMenuTests
         Assert.Equal("/?id=1", links[0].GetAttribute("href"));
         Assert.Equal("page", links[0].GetAttribute("aria-current"));
         Assert.Null(links[1].GetAttribute("href"));
+        Assert.Equal("true", links[1].GetAttribute("aria-disabled"));
         Assert.Equal("Нет URI", links[1].GetAttribute("title"));
     }
 

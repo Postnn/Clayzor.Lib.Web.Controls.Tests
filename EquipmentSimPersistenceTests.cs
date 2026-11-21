@@ -67,6 +67,52 @@ public sealed class EquipmentSimPersistenceTests
         Assert.Contains("fn_ТекущиеРоли", connection.CommandLog[0]);
     }
 
+    /// <summary>После ошибки повторное чтение может вернуть легитимные пустые коды без записи.</summary>
+    [Fact]
+    public async Task GetSimSecretsAfterFailure_RetryCanReturnLegitimateEmpty()
+    {
+        DapperColumnMapper.Initialize();
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([
+            Script.Scalar(1), Script.Error(SqlExceptionFactory.Create(53, "connection error")),
+            Script.Scalar(1), Script.Rows(Script.Row(("PIN", string.Empty), ("PIN2", string.Empty),
+                ("PUK", string.Empty), ("PUK2", string.Empty))),
+        ]));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+
+        await Assert.ThrowsAsync<Microsoft.Data.SqlClient.SqlException>(() => service.GetSimSecretsAsync(7));
+        var secrets = await service.GetSimSecretsAsync(7);
+        Assert.Equal(string.Empty, secrets.Pin);
+        Assert.Equal(string.Empty, secrets.Puk2);
+        Assert.DoesNotContain(connection.CommandLog, sql => sql.Contains("UPDATE"));
+    }
+
+    /// <summary>Ошибка соединения при чтении SIM-кодов не превращается в пустой объект.</summary>
+    [Theory]
+    [InlineData(53)]
+    [InlineData(-2)]
+    [InlineData(10054)]
+    public async Task GetSimSecretsConnectivity_ThrowsInsteadOfReturningEmpty(int errorNumber)
+    {
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([
+            Script.Scalar(1), Script.Error(SqlExceptionFactory.Create(errorNumber, "connection error")),
+        ]));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+
+        await Assert.ThrowsAsync<Microsoft.Data.SqlClient.SqlException>(() => service.GetSimSecretsAsync(7));
+        Assert.DoesNotContain(connection.CommandLog, sql => sql.Contains("UPDATE"));
+    }
+
+    /// <summary>Отсутствие строки SIM отличается от легитимных пустых кодов.</summary>
+    [Fact]
+    public async Task GetSimSecretsNoRow_ThrowsInsteadOfReturningEmpty()
+    {
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Scalar(1), Script.Rows()]));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.GetSimSecretsAsync(7));
+        Assert.DoesNotContain(connection.CommandLog, sql => sql.Contains("UPDATE"));
+    }
+
     /// <summary>Подтверждённый дубликат списывается в той же транзакции, что и UPSERT.</summary>
     [Fact]
     public async Task SaveSimWithDuplicate_ComposesSingleTransaction()

@@ -489,7 +489,7 @@ public sealed class ClaySelectTests : IDisposable
     [InlineData(false, true)]
     public void DisabledOrReadOnly_HidesPlaceholder(bool disabled, bool readOnly)
     {
-        var cut = Render(options: new ClaySelectOptions { Disabled = disabled, ReadOnly = readOnly, Placeholder = "Введите значение" });
+        var cut = Render(options: new ClaySelectOptions { Disabled = disabled, ReadOnly = readOnly, Placeholder = "Выберите значение" });
 
         Assert.Null(cut.Find("input").GetAttribute("placeholder"));
     }

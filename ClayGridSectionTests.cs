@@ -34,6 +34,7 @@ public sealed class ClayGridSectionTests
         Assert.DoesNotContain("Секция", cut.Markup);
         Assert.DoesNotContain("clay-grid-search", cut.Markup);
         Assert.DoesNotContain("clay-grid-paginator", cut.Markup);
+        Assert.Empty(cut.FindAll(".filter-tray"));
         Assert.Contains("width:88px", cut.Find("thead th").GetAttribute("style"));
         Assert.NotNull(cut.Find(".clay-grid-service-add"));
         cut.Find("thead th button").Click();
@@ -56,6 +57,27 @@ public sealed class ClayGridSectionTests
         Assert.NotNull(cut.Find("thead th button"));
     }
 
+    /// <summary>Панель фильтрации учитывает начальную настройку и сохраняет ручное переключение.</summary>
+    [Fact]
+    public async Task FilterTray_UsesConfiguredInitialStateAndToggle()
+    {
+        await using var ctx = CreateContext();
+        var options = Options();
+        options.ShowToolbar = true;
+        options.FilterTrayExpandedByDefault = true;
+        var cut = ctx.Render<ClayGrid<string>>(parameters => parameters
+            .Add(component => component.Items, ["101"])
+            .Add(component => component.Options, options)
+            .Add(component => component.ColumnDefs, ColumnDefs())
+            .Add(component => component.Columns, Columns()));
+
+        Assert.Single(cut.FindAll(".filter-tray"));
+        cut.Find(".filter-toggle-btn").Click();
+        Assert.Empty(cut.FindAll(".filter-tray"));
+        cut.Find(".filter-toggle-btn").Click();
+        Assert.Single(cut.FindAll(".filter-tray"));
+    }
+
     /// <summary>Container-height включает отдельный класс, а hidetitle скрывает только текст заголовка.</summary>
     [Fact]
     public async Task SectionGrid_FillHeightAndHiddenTitlePreserveToolbar()
@@ -76,6 +98,8 @@ public sealed class ClayGridSectionTests
         Assert.Contains("clay-grid--compact-layout", cut.Markup);
         Assert.DoesNotContain("<h5", cut.Markup);
         Assert.NotNull(cut.Find(".toolbar-columns-btn"));
+        Assert.NotNull(cut.Find(".toolbar-add-btn"));
+        Assert.Empty(cut.FindAll(".clay-grid-service-add"));
     }
 
     private static BunitContext CreateContext()
@@ -111,6 +135,7 @@ public sealed class ClayGridSectionTests
         builder.AddAttribute(1, nameof(ClayColumnDef.ColumnId), 1);
         builder.AddAttribute(2, nameof(ClayColumnDef.SqlName), "Number");
         builder.AddAttribute(3, nameof(ClayColumnDef.DisplayName), "Номер");
+        builder.AddAttribute(4, nameof(ClayColumnDef.Filterable), true);
         builder.CloseComponent();
     };
 

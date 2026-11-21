@@ -40,6 +40,7 @@ public class ClayGridOptionsTests
         Assert.True(d.AllowColumnReorder);
 
         // Фильтрация
+        Assert.False(d.FilterTrayExpandedByDefault);
         Assert.True(d.EnableValueFilter);
         Assert.NotNull(d.FilterColumnTypes);
         Assert.Empty(d.FilterColumnTypes);

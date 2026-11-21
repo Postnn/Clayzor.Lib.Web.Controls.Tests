@@ -51,6 +51,81 @@ public sealed class EquipmentSimDialogTests
         Assert.Equal(new DateTime(2026, 11, 18, 8, 30, 0), value.ActivatedLocal);
     }
 
+    /// <summary>Ошибка чтения SIM-кодов блокирует OK и не приводит к SQL UPDATE.</summary>
+    [Fact]
+    public async Task SecretsReadFailure_DisablesApplyAndDoesNotWrite()
+    {
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([
+            Script.Scalar(1), Script.Error(SqlExceptionFactory.Create(53, "connection error")),
+        ]));
+        await using var context = CreateContext(connection);
+        var provider = context.Render<MudDialogProvider>();
+        var reference = await ShowExistingAsync(context);
+
+        var dialog = provider.FindComponent<EquipmentSimDialog>();
+        dialog.WaitForAssertion(() => Assert.Contains("сохранение заблокировано", dialog.Markup));
+        Assert.True(dialog.FindAll("button").Single(button => button.TextContent.Trim() == "OK").HasAttribute("disabled"));
+        Assert.False(reference.Result.IsCompleted);
+        Assert.DoesNotContain(connection.CommandLog, sql => sql.Contains("UPDATE"));
+
+        dialog.FindAll("button").Single(button => button.TextContent.Trim() == "Отмена").Click();
+        Assert.True((await reference.Result.WaitAsync(TimeSpan.FromSeconds(2))).Canceled);
+    }
+
+    /// <summary>Изменение договора существующей SIM сохраняет ранее прочитанные коды.</summary>
+    [Fact]
+    public async Task ContractEdit_PreservesLoadedSecrets()
+    {
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([
+            Script.Scalar(1), Script.Rows(Script.Row(("PIN", "1234"), ("PIN2", "12345"),
+                ("PUK", "12345678"), ("PUK2", "87654321"))),
+        ]));
+        await using var context = CreateContext(connection);
+        var provider = context.Render<MudDialogProvider>();
+        var reference = await ShowExistingAsync(context);
+        var dialog = provider.FindComponent<EquipmentSimDialog>();
+        dialog.WaitForAssertion(() => Assert.Equal("1234", dialog.Instance.Secrets.Pin));
+
+        dialog.Instance.ContractId = 11;
+        dialog.FindAll("button").Single(button => button.TextContent.Trim() == "OK").Click();
+        var result = await reference.Result.WaitAsync(TimeSpan.FromSeconds(2));
+
+        var value = Assert.IsType<EquipmentSimDialogResult>(result.Data);
+        Assert.Equal(11, value.ContractId);
+        Assert.Equal("1234", value.Secrets.Pin);
+        Assert.Equal("87654321", value.Secrets.Puk2);
+        Assert.DoesNotContain(connection.CommandLog, sql => sql.Contains("UPDATE"));
+    }
+
+    private static BunitContext CreateContext(ScriptedConnection connection)
+    {
+        DapperColumnMapper.Initialize();
+        var context = new BunitContext();
+        context.JSInterop.Mode = JSRuntimeMode.Loose;
+        context.Services.AddMudServices();
+        context.Services.AddSingleton<IConfiguration>(new ConfigurationManager());
+        context.Services.AddSingleton(new EquipmentFormService(CreateDb(connection)));
+        context.Services.AddSingleton(new MobileContractSelectDataSource(CreateDb(
+            Script.Rows(Script.Row(("КодДокумента", 10), ("ДоговорНазвание", "CLAY_TEST"), ("ТипЛицаЗаказчика", 0))))));
+        context.Services.AddSingleton(new PersonalDataPersonSelectDataSource(CreateDb()));
+        return context;
+    }
+
+    private static async Task<IDialogReference> ShowExistingAsync(BunitContext context) =>
+        await context.Services.GetRequiredService<IDialogService>().ShowAsync<EquipmentSimDialog>(
+            "SIM", new DialogParameters<EquipmentSimDialog>
+            {
+                { dialog => dialog.EquipmentId, 7 },
+                { dialog => dialog.HasExisting, true },
+                { dialog => dialog.PhoneNumber, "79000000001" },
+                { dialog => dialog.ActivatedDate, new DateTime(2026, 11, 18) },
+                { dialog => dialog.ActivatedTime, new TimeSpan(8, 30, 0) },
+                { dialog => dialog.ContractId, 10 },
+            });
+
     private static DbManager CreateDb(params ScriptEntry[] entries) =>
         new("Server=test", new FakeSqlErrorHandler(), () => new ScriptedConnection(new Queue<ScriptEntry>(entries)));
+
+    private static DbManager CreateDb(ScriptedConnection connection) =>
+        new("Server=test", new FakeSqlErrorHandler(), () => connection);
 }

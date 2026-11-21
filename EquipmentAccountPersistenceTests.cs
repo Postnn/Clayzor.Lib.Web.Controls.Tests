@@ -69,15 +69,59 @@ public sealed class EquipmentAccountPersistenceTests
     [Fact]
     public async Task GetAccountPassword_ChecksRoleBeforeReadingSecret()
     {
-        var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Scalar(1), Script.Scalar(1)]));
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([
+            Script.Scalar(1), Script.Rows(Script.Row(("Пароль", "secret"))),
+        ]));
         var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
 
         var password = await service.GetAccountPasswordAsync(7, "test");
 
-        Assert.Equal("1", password);
+        Assert.Equal("secret", password);
         Assert.Equal(2, connection.CommandLog.Count);
         Assert.Contains("fn_ТекущиеРоли", connection.CommandLog[0]);
         Assert.Contains("SELECT Пароль", connection.CommandLog[1]);
+    }
+
+    /// <summary>После ошибки повторное чтение может вернуть легитимный пустой пароль без записи.</summary>
+    [Fact]
+    public async Task GetAccountPasswordAfterFailure_RetryCanReturnLegitimateEmpty()
+    {
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([
+            Script.Scalar(1), Script.Error(SqlExceptionFactory.Create(53, "connection error")),
+            Script.Scalar(1), Script.Rows(Script.Row(("Пароль", string.Empty))),
+        ]));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+
+        await Assert.ThrowsAsync<Microsoft.Data.SqlClient.SqlException>(() => service.GetAccountPasswordAsync(7, "test"));
+        Assert.Equal(string.Empty, await service.GetAccountPasswordAsync(7, "test"));
+        Assert.DoesNotContain(connection.CommandLog, sql => sql.Contains("UPDATE"));
+    }
+
+    /// <summary>Ошибка соединения при чтении пароля не превращается в пустой пароль.</summary>
+    [Theory]
+    [InlineData(53)]
+    [InlineData(-2)]
+    [InlineData(10054)]
+    public async Task GetAccountPasswordConnectivity_ThrowsInsteadOfReturningEmpty(int errorNumber)
+    {
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([
+            Script.Scalar(1), Script.Error(SqlExceptionFactory.Create(errorNumber, "connection error")),
+        ]));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+
+        await Assert.ThrowsAsync<Microsoft.Data.SqlClient.SqlException>(() => service.GetAccountPasswordAsync(7, "test"));
+        Assert.DoesNotContain(connection.CommandLog, sql => sql.Contains("UPDATE"));
+    }
+
+    /// <summary>Отсутствие строки учётной записи отличается от легитимного пустого пароля.</summary>
+    [Fact]
+    public async Task GetAccountPasswordNoRow_ThrowsInsteadOfReturningEmpty()
+    {
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Scalar(1), new ScriptEntry()]));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.GetAccountPasswordAsync(7, "test"));
+        Assert.DoesNotContain(connection.CommandLog, sql => sql.Contains("UPDATE"));
     }
 
     /// <summary>Без роли запрос секрета не выполняется.</summary>

@@ -387,7 +387,7 @@ public sealed class EquipmentInsTests
             Assert.NotNull(tenantInput);
             Assert.True(tenantInput.HasAttribute("disabled"));
             Assert.Null(tenantInput.GetAttribute("placeholder"));
-            Assert.Single(page.FindAll("input[placeholder='Введите документ поступления']"));
+            Assert.Single(page.FindAll("input[placeholder='Выберите документ поступления']"));
         }, TimeSpan.FromSeconds(3));
     }
 

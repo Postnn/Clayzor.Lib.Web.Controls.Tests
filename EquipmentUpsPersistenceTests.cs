@@ -76,6 +76,48 @@ public sealed class EquipmentUpsPersistenceTests
         Assert.True(command.Parameters.ParameterNames.Count() >= 15);
     }
 
+    /// <summary>Два неизменных сервера и два неизменных теста не создают SQL UPDATE.</summary>
+    [Fact]
+    public void DetailsDiff_UnchangedRows_DoNotUpdate()
+    {
+        var command = UpsSaveBuilder.Build(10,
+            [new UpsServerLink { ServerEquipmentId = 1 }, new UpsServerLink { ServerEquipmentId = 2, TurnOffConfigured = 1 }],
+            [new UpsServerLink { ServerEquipmentId = 1 }, new UpsServerLink { ServerEquipmentId = 2, TurnOffConfigured = 1 }],
+            [
+                new UpsTest { Id = 5, TestedAt = new DateTime(2026, 11, 1), BatteryTime = 10, Servers = "one", Issues = "old" },
+                new UpsTest { Id = 6, TestedAt = new DateTime(2026, 11, 2), BatteryTime = 20, Servers = "two", Issues = "same" },
+            ],
+            [
+                new UpsTest { Id = 5, TestedAt = new DateTime(2026, 11, 1), BatteryTime = 10, Servers = "one", Issues = "old" },
+                new UpsTest { Id = 6, TestedAt = new DateTime(2026, 11, 2), BatteryTime = 20, Servers = "two", Issues = "same" },
+            ]);
+
+        Assert.DoesNotContain("UPDATE vwПодключенияUPS ", command.Sql);
+        Assert.DoesNotContain("UPDATE vwПодключенияUPSтестирование", command.Sql);
+        Assert.DoesNotContain("INSERT vwПодключенияUPS", command.Sql);
+        Assert.DoesNotContain("DELETE vwПодключенияUPS", command.Sql);
+    }
+
+    /// <summary>Изменение только Issues одного теста создаёт ровно один UPDATE.</summary>
+    [Fact]
+    public void DetailsDiff_IssuesOnly_UpdatesOneTest()
+    {
+        var command = UpsSaveBuilder.Build(10,
+            [new UpsServerLink { ServerEquipmentId = 1 }], [new UpsServerLink { ServerEquipmentId = 1 }],
+            [new UpsTest { Id = 5, Issues = "old" }], [new UpsTest { Id = 5, Issues = "new" }]);
+
+        Assert.Equal(1, command.Sql.Split("UPDATE vwПодключенияUPSтестирование").Length - 1);
+        Assert.DoesNotContain("UPDATE vwПодключенияUPS ", command.Sql);
+    }
+
+    /// <summary>Дубликат текущего ключа отклоняется до генерации записи.</summary>
+    [Fact]
+    public void DetailsDiff_DuplicateCurrentKey_Throws()
+    {
+        Assert.Throws<InvalidOperationException>(() => UpsSaveBuilder.Build(10, [],
+            [new UpsServerLink { ServerEquipmentId = 1 }, new UpsServerLink { ServerEquipmentId = 1 }], [], []));
+    }
+
     /// <summary>Серверы и тесты восстанавливают отображаемые поля.</summary>
     [Fact]
     public async Task GetServersAndTests_MapsFields()
@@ -83,7 +125,7 @@ public sealed class EquipmentUpsPersistenceTests
         DapperColumnMapper.Initialize();
         var serverConnection = new ScriptedConnection(new Queue<ScriptEntry>([
             Script.Rows(Script.Row(("КодОборудованияUPS", 10), ("КодОборудованияСервера", 7),
-                ("НастроеноВыключение", (byte)1), ("НазваниеСервера", "server"))),
+                ("НастроеноВыключение", (byte)1), ("НазваниеСервера", "server"), ("КодТипаОборудования", 1))),
         ]));
         var testConnection = new ScriptedConnection(new Queue<ScriptEntry>([
             Script.Rows(Script.Row(("КодТестирования", 5), ("КодОборудованияUPS", 10),
@@ -98,6 +140,8 @@ public sealed class EquipmentUpsPersistenceTests
 
         Assert.Equal("server", server.ServerName);
         Assert.Equal(1, server.TurnOffConfigured);
+        Assert.Equal(1, server.EquipmentTypeId);
+        Assert.Contains("T.КодТипаОборудования", serverConnection.CommandLog[0]);
         Assert.Equal(20, test.BatteryTime);
         Assert.Equal("issue", test.Issues);
     }

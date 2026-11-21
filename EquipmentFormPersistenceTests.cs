@@ -38,13 +38,15 @@ public sealed class EquipmentFormPersistenceTests
     [Fact]
     public async Task Update_UsesConfirmedSql()
     {
-        var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Scalar(1), Script.NonQuery()]));
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([
+            Script.Scalar(1), Script.Rows(Script.Row(("КодТипаОборудования", 1), ("SNобязателен", (byte)0), ("ЕстьMACадрес", (byte)0))), Script.NonQuery(),
+        ]));
         var service = new EquipmentFormService(CreateDb(connection));
 
-        await service.UpdateAsync(new Equipment { Id = 7, ModelId = 5, OwnerId = 1 });
+        await service.UpdateAsync(new Equipment { Id = 7, ModelId = 5, OwnerId = 1, EquipmentTypeId = 1 });
 
-        Assert.Equal(2, connection.CommandLog.Count);
-        var sql = connection.CommandLog[1];
+        Assert.Equal(3, connection.CommandLog.Count);
+        var sql = connection.CommandLog[2];
         Assert.Contains("UPDATE vwОборудование", sql);
         Assert.Contains("WHERE КодОборудования = @КодОборудования", sql);
         Assert.DoesNotContain("INSERT", sql, StringComparison.OrdinalIgnoreCase);
@@ -54,11 +56,52 @@ public sealed class EquipmentFormPersistenceTests
     [Fact]
     public async Task UpdateWithoutAffectedRow_Throws()
     {
-        var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Scalar(1), Script.NonQuery(0)]));
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([
+            Script.Scalar(1), Script.Rows(Script.Row(("КодТипаОборудования", 1), ("SNобязателен", (byte)0), ("ЕстьMACадрес", (byte)0))), Script.NonQuery(0),
+        ]));
         var service = new EquipmentFormService(CreateDb(connection));
 
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            service.UpdateAsync(new Equipment { Id = 7, ModelId = 5, OwnerId = 1 }));
+            service.UpdateAsync(new Equipment { Id = 7, ModelId = 5, OwnerId = 1, EquipmentTypeId = 1 }));
+    }
+
+    /// <summary>Прямой backend-вызов без владельца отклоняется до UPDATE.</summary>
+    [Fact]
+    public async Task UpdateWithoutOwner_ThrowsBeforeSqlWrite()
+    {
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Scalar(1), Script.NonQuery()]));
+        var service = new EquipmentFormService(CreateDb(connection));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.UpdateAsync(new Equipment { Id = 7, ModelId = 5 }));
+        Assert.DoesNotContain(connection.CommandLog, sql => sql.Contains("UPDATE vwОборудование"));
+    }
+
+    /// <summary>Прямой backend-вызов с обязательным пустым SN отклоняется после чтения типа.</summary>
+    [Fact]
+    public async Task UpdateWithoutRequiredSn_ThrowsBeforeSqlWrite()
+    {
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([
+            Script.Scalar(1), Script.Rows(Script.Row(("КодТипаОборудования", 1), ("SNобязателен", (byte)1), ("ЕстьMACадрес", (byte)0))),
+        ]));
+        var service = new EquipmentFormService(CreateDb(connection));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.UpdateAsync(
+            new Equipment { Id = 7, ModelId = 5, OwnerId = 1, EquipmentTypeId = 1 }));
+        Assert.DoesNotContain(connection.CommandLog, sql => sql.Contains("UPDATE vwОборудование"));
+    }
+
+    /// <summary>Прямой backend-вызов с неверным MAC отклоняется после чтения типа.</summary>
+    [Fact]
+    public async Task UpdateWithInvalidMac_ThrowsBeforeSqlWrite()
+    {
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([
+            Script.Scalar(1), Script.Rows(Script.Row(("КодТипаОборудования", 1), ("SNобязателен", (byte)0), ("ЕстьMACадрес", (byte)1))),
+        ]));
+        var service = new EquipmentFormService(CreateDb(connection));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.UpdateAsync(
+            new Equipment { Id = 7, ModelId = 5, OwnerId = 1, EquipmentTypeId = 1, MacAddress = "invalid" }));
+        Assert.DoesNotContain(connection.CommandLog, sql => sql.Contains("UPDATE vwОборудование"));
     }
 
     /// <summary>Полная выборка восстанавливает основные поля, модель и текущие связи.</summary>

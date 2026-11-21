@@ -158,6 +158,37 @@ public sealed class InventoryMenuTests
         Assert.Equal("@URI_sim_noservices", item.ReportForm);
     }
 
+    /// <summary>Devadmin допускается к настройкам по имени с доменом и без него.</summary>
+    [Theory]
+    [InlineData("devadmin", true)]
+    [InlineData(@"OTR-AGENT-W-DEV\devadmin", true)]
+    [InlineData(@"DOMAIN\DEVADMIN", true)]
+    [InlineData(@"DOMAIN\other", false)]
+    public void SettingsPermission_DevadminNameIsAllowed(string name, bool expected)
+    {
+        var identity = new System.Security.Claims.ClaimsIdentity(
+            [new System.Security.Claims.Claim(System.Security.Claims.ClaimTypes.Name, name)], "Negotiate");
+        var user = new System.Security.Claims.ClaimsPrincipal(identity);
+
+        Assert.Equal(expected, Kesco.App.Web.Inventory.Components.InventoryMainMenu.CanOpenSettings(user));
+    }
+
+    /// <summary>Четыре legacy-группы сохраняют доступ к настройкам через ClaimsPrincipal.</summary>
+    [Theory]
+    [InlineData(@"BUILTIN\Administrators")]
+    [InlineData(@"TEST\Programists")]
+    [InlineData(@"EURO\Programists")]
+    [InlineData(@"TEST\SupportTeam")]
+    public void SettingsPermission_LegacyRolesAreAllowed(string role)
+    {
+        var identity = new System.Security.Claims.ClaimsIdentity(
+            [new System.Security.Claims.Claim(System.Security.Claims.ClaimTypes.Role, role)],
+            "Negotiate", System.Security.Claims.ClaimTypes.Name, System.Security.Claims.ClaimTypes.Role);
+        var user = new System.Security.Claims.ClaimsPrincipal(identity);
+
+        Assert.True(Kesco.App.Web.Inventory.Components.InventoryMainMenu.CanOpenSettings(user));
+    }
+
     private static InventoryMenuQuery Query(
         int id, string listForm = "", int queryType = 1, string reportMenu = "", string reportForm = "") => new()
     {

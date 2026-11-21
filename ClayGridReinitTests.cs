@@ -75,20 +75,33 @@ public class ClayGridReinitTests : IDisposable
     // ═══ DB scripting ═══════════════════════════════════════════════════════════
 
     private static List<ScriptEntry> BuildInitScript(int gridId, string title, string selectSql,
-        string columnName, string columnHeader, int columnId, int totalCount = 0)
+        string columnName, string columnHeader, int columnId, int totalCount = 0,
+        string? urlKey = null, string? savedFilter = null, bool secondColumn = false, bool rowForms = false)
     {
         var s = Schema.Settings;
         var c = Schema.Columns;
+        var columnRows = new List<Dictionary<string, object?>>
+        {
+            Script.Row((c.ColumnId, columnId), (c.GridId, gridId), (c.Column, columnName),
+                (c.Header, columnHeader), (c.UrlKey, urlKey is null ? DBNull.Value : urlKey), (c.Order, 1),
+                (c.Format, DBNull.Value), (c.Type, 2)),
+        };
+        if (secondColumn)
+            columnRows.Add(Script.Row((c.ColumnId, columnId + 1), (c.GridId, gridId),
+                (c.Column, "ColB"), (c.Header, "Колонка B"), (c.UrlKey, DBNull.Value), (c.Order, 2),
+                (c.Format, DBNull.Value), (c.Type, 2)));
         return new List<ScriptEntry>
         {
             Script.Rows(Script.Row((s.GridId, gridId), (s.Title, title), (s.Icon, DBNull.Value),
                 (s.Sql, selectSql), (s.Id, "ID"), (s.IdName, DBNull.Value),
-                (s.EditForm, DBNull.Value), (s.NewForm, DBNull.Value), (s.SqlDelete, DBNull.Value))),
+                (s.EditForm, rowForms ? "/Equipment/Edit" : DBNull.Value),
+                (s.NewForm, rowForms ? "/Equipment/New" : DBNull.Value), (s.SqlDelete, DBNull.Value))),
             Script.Rows(Script.Row(("Column1", 0))),
-            Script.Rows(Script.Row((c.ColumnId, columnId), (c.GridId, gridId), (c.Column, columnName),
-                (c.Header, columnHeader), (c.UrlKey, DBNull.Value), (c.Order, 1),
-                (c.Format, DBNull.Value), (c.Type, 2))),
-            Script.Rows(), // user params
+            Script.Rows(columnRows.ToArray()),
+            savedFilter is null
+                ? Script.Rows()
+                : Script.Rows(Script.Row((Schema.UserParams.Name, $"flt{gridId}"),
+                    (Schema.UserParams.Value, savedFilter))),
             Script.Rows(), // shared check
             Script.Rows(Script.Row(("cnt", totalCount))),
             Script.Rows(),
@@ -381,12 +394,72 @@ public class ClayGridReinitTests : IDisposable
         Assert.Null(GetFld<ClayGridDynamicKey?>(cut.Instance, "_currentDynamicKey"));
     }
 
-    /// <summary>Очистка через toolbar сохраняет дефолты и не возвращает старое состояние из кеша.</summary>
-    [Fact]
-    public async Task ClearDynamicState_WritesDefaultsWithoutStaleCacheRestore()
+    /// <summary>Default URL-фильтр уступает только сохранённому условию той же колонки.</summary>
+    [Theory]
+    [InlineData(null, true)]
+    [InlineData("", true)]
+    [InlineData("ColA", false)]
+    [InlineData("ColB", true)]
+    public void DefaultUrlFilter_ComparesAgainstSerializedColumnFilter(string? savedColumn, bool expectDefault)
     {
-        var connection = AppendScript(BuildInitScript(101, "Grid", "SELECT * FROM T", "ColA", "Колонка A", 1));
+        string? savedFilter = savedColumn switch
+        {
+            null => null,
+            "" => "",
+            _ => GridStateSerializer.SerializeFilter(new ClayFilterGroupNode
+            {
+                Nodes =
+                {
+                    new ColumnFilter { Column = savedColumn, Operator = ColumnFilterOperator.Equals, Value = "saved" },
+                },
+            }),
+        };
+        var connection = AppendScript(BuildInitScript(101, "Grid", "SELECT * FROM T", "ColA", "Колонка A", 1,
+            urlKey: "ColA", savedFilter: savedFilter, secondColumn: true));
+        _nav.NavigateTo("http://localhost/?id=101&CLID=1&_ColA=eq~default");
+
+        var cut = _ctx.Render<ClayGrid<ClayDynamicRow>>(parameters =>
+            parameters.Add(component => component.Options, new ClayGridOptions { Dynamic = true }));
+        var expectedValue = expectDefault ? "default" : "saved";
+        cut.WaitForState(() => connection.ParameterLog.Any(parameters =>
+            parameters.Values.Any(value => value?.ToString() == expectedValue)), TimeSpan.FromSeconds(10));
+
+        var filters = GetFld<ClayFilterGroupNode>(cut.Instance, "_filterRoot")!.Nodes.OfType<ColumnFilter>().ToList();
+        Assert.Equal(expectDefault, filters.Any(filter => filter.Column == "ColA" && filter.Value?.ToString() == "default"));
+        Assert.Equal(!string.IsNullOrEmpty(savedColumn),
+            filters.Any(filter => filter.Column == savedColumn && filter.Value?.ToString() == "saved"));
+        Assert.Equal(expectDefault, connection.ParameterLog.Any(parameters =>
+            parameters.Values.Any(value => value?.ToString() == "default")));
+    }
+
+    /// <summary>При наличии сервисной колонки Add переносится в её заголовок, а drag имеет отдельный handle.</summary>
+    [Fact]
+    public void DynamicGrid_AddUsesServiceHeaderAndDedicatedDragHandle()
+    {
+        AppendScript(BuildInitScript(101, "Grid", "SELECT * FROM T", "ColA", "Колонка A", 1, rowForms: true));
         _nav.NavigateTo("http://localhost/?id=101&CLID=1");
+
+        var cut = _ctx.Render<ClayGrid<ClayDynamicRow>>(parameters =>
+            parameters.Add(component => component.Options, new ClayGridOptions { Dynamic = true }));
+        cut.WaitForState(() => _globalQueue.Count == 0, TimeSpan.FromSeconds(10));
+
+        Assert.Empty(cut.FindAll(".toolbar-add-btn"));
+        Assert.NotNull(cut.Find(".clay-grid-service-header button.clay-grid-service-add"));
+        var dragHandle = cut.Find("[data-col-sql='ColA']");
+        Assert.Contains("clay-grid-column-drag-handle", dragHandle.ClassList);
+        Assert.Equal("true", dragHandle.GetAttribute("draggable"));
+    }
+
+    /// <summary>Очистка сохраняет дефолты и повторно применяет forced/default URL-фильтр.</summary>
+    [Theory]
+    [InlineData("ColA", "forced", true)]
+    [InlineData("_ColA", "default", false)]
+    public async Task ClearDynamicState_WritesDefaultsAndRestoresUrlFilter(
+        string urlParameter, string expectedValue, bool isForced)
+    {
+        var connection = AppendScript(BuildInitScript(101, "Grid", "SELECT * FROM T", "ColA", "Колонка A", 1,
+            urlKey: "ColA"));
+        _nav.NavigateTo($"http://localhost/?id=101&CLID=1&{urlParameter}=eq~{expectedValue}");
         var provider = _ctx.Render<MudBlazor.MudDialogProvider>();
         var popovers = _ctx.Render<MudBlazor.MudPopoverProvider>();
         var cut = _ctx.Render<ClayGrid<ClayDynamicRow>>(parameters =>
@@ -421,7 +494,16 @@ public class ClayGridReinitTests : IDisposable
         Assert.Equal(50, GetFld<int>(cut.Instance, "_pageSize"));
         Assert.Null(GetFld<string?>(cut.Instance, "_searchText"));
         Assert.Empty(GetFld<List<string>>(cut.Instance, "_groupColumns")!);
-        Assert.Equal("50", GetFld<Dictionary<string, string>>(cut.Instance, "_dynamicSavedParams")!["pgs101"]);
+        var savedParams = GetFld<Dictionary<string, string>>(cut.Instance, "_dynamicSavedParams")!;
+        Assert.Equal("50", savedParams["pgs101"]);
+        var forcedNames = GetFld<HashSet<string>>(cut.Instance, "_dynamicForcedParamNames")!;
+        Assert.Equal(isForced, forcedNames.Contains("flt101"));
+        Assert.Equal(!isForced, savedParams.ContainsKey("flt101"));
+        var filterRoot = GetFld<ClayFilterGroupNode>(cut.Instance, "_filterRoot")!;
+        Assert.Contains(filterRoot.Nodes.OfType<ColumnFilter>(),
+            filter => filter.Column == "ColA" && filter.Value?.ToString() == expectedValue);
+        Assert.Contains(connection.ParameterLog, parameters =>
+            parameters.Values.Any(value => value?.ToString() == expectedValue));
         Assert.DoesNotContain(connection.ParameterLog, parameters =>
             parameters.Values.Any(value => string.Equals(value?.ToString(), "99", StringComparison.Ordinal)));
     }
