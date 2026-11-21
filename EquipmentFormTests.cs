@@ -1181,6 +1181,53 @@ public sealed class EquipmentFormTests
         Assert.Equal("Office 2026", link.TextContent);
     }
 
+    /// <summary>Ошибка любого запроса UPS не открывает пустой диалог и сохраняет черновик формы.</summary>
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    public async Task UpsLoadSqlFailure_KeepsDraftAndDoesNotOpenDialog(int failedRequest)
+    {
+        var fixture = CreateFixture();
+        fixture.Service.UpsReadException = SqlExceptionFactory.Create(53, "connection error");
+        fixture.Service.UpsReadFailureAt = failedRequest;
+        await using var context = fixture.Context;
+        var provider = context.Render<MudDialogProvider>();
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        SetPrivate(page.Instance, "_canManageUps", true);
+        FindSn(page).Input("CLAY_TEST_UPS_DRAFT");
+
+        await InvokeHandler(page, "OpenUpsDialogAsync", new UpsServerLink { UpsEquipmentId = 10, ServerEquipmentId = 7 });
+
+        page.WaitForAssertion(() => Assert.Contains("Не удалось загрузить подключение UPS", page.Markup));
+        Assert.Empty(provider.FindComponents<EquipmentUpsDialog>());
+        Assert.Equal("CLAY_TEST_UPS_DRAFT", FindSn(page).GetAttribute("value"));
+        Assert.Null(GetPrivate(page.Instance, "_pendingPhoneSync"));
+    }
+
+    /// <summary>Поздний ответ загрузки UPS прежнего ID не открывает диалог для новой записи.</summary>
+    [Fact]
+    public async Task LateUpsLoadAfterIdChange_DoesNotOpenDialog()
+    {
+        var fixture = CreateFixture();
+        fixture.Service.DeferUpsServers = true;
+        await using var context = fixture.Context;
+        var provider = context.Render<MudDialogProvider>();
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        SetPrivate(page.Instance, "_canManageUps", true);
+
+        var pending = InvokeHandler(page, "OpenUpsDialogAsync", new UpsServerLink { UpsEquipmentId = 10, ServerEquipmentId = 7 });
+        await fixture.Service.UpsServersRequested.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await page.InvokeAsync(() => fixture.Navigation.NavigateTo("http://localhost/Equipment/EquipmentForm?id=8"));
+        WaitForSn(page, "CLAY_TEST_8");
+        fixture.Service.UpsServersCompletion.SetResult();
+        await pending;
+
+        Assert.Empty(provider.FindComponents<EquipmentUpsDialog>());
+        Assert.Equal(8, CurrentModel(page.Instance).Id);
+    }
+
     private static Fixture CreateFixture(
         bool phones = false,
         bool network = false,
@@ -1502,6 +1549,31 @@ public sealed class EquipmentFormTests
 
         public override Task<IReadOnlyList<EquipmentRouterInventoryItem>> GetRouterInventoryAsync(int equipmentId) =>
             Task.FromResult<IReadOnlyList<EquipmentRouterInventoryItem>>([]);
+
+        public Exception? UpsReadException { get; set; }
+        public int UpsReadFailureAt { get; set; }
+        public bool DeferUpsServers { get; set; }
+        public TaskCompletionSource UpsServersRequested { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource UpsServersCompletion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public override async Task<IReadOnlyList<UpsServerLink>> GetUpsServersAsync(int upsEquipmentId)
+        {
+            if (UpsReadFailureAt == 1 && UpsReadException is not null)
+                throw UpsReadException;
+            if (DeferUpsServers)
+            {
+                UpsServersRequested.TrySetResult();
+                await UpsServersCompletion.Task;
+            }
+            return [];
+        }
+
+        public override Task<IReadOnlyList<UpsTest>> GetUpsTestsAsync(int upsEquipmentId)
+        {
+            if (UpsReadFailureAt == 2 && UpsReadException is not null)
+                throw UpsReadException;
+            return Task.FromResult<IReadOnlyList<UpsTest>>([]);
+        }
 
         public override Task<IReadOnlyList<UpsServerLink>> GetUpsLinksAsync(int serverEquipmentId) =>
             Task.FromResult<IReadOnlyList<UpsServerLink>>([]);

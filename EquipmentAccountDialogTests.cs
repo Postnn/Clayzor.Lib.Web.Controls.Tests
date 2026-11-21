@@ -55,6 +55,59 @@ public sealed class EquipmentAccountDialogTests
         Assert.DoesNotContain(connection.CommandLog, sql => sql.Contains("UPDATE"));
     }
 
+    /// <summary>Ошибка валидации логина не блокирует повторное подтверждение после ввода.</summary>
+    [Fact]
+    public async Task EmptyLoginThenCorrection_AllowsApply()
+    {
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>());
+        await using var context = CreateContext(connection);
+        var provider = context.Render<MudDialogProvider>();
+        var reference = await context.Services.GetRequiredService<IDialogService>().ShowAsync<EquipmentAccountDialog>(
+            "Account", new DialogParameters<EquipmentAccountDialog>
+            {
+                { dialog => dialog.EquipmentId, 7 },
+                { dialog => dialog.OriginalLogin, null },
+                { dialog => dialog.Login, string.Empty },
+            });
+        var dialog = provider.FindComponent<EquipmentAccountDialog>();
+
+        await dialog.FindAll("button").Single(button => button.TextContent.Trim() == "OK").ClickAsync();
+        dialog.WaitForAssertion(() => Assert.Contains("Укажите логин", dialog.Markup));
+        await dialog.Find("input").InputAsync("svc-admin");
+        await dialog.FindAll("button").Single(button => button.TextContent.Trim() == "OK").ClickAsync();
+        var result = await reference.Result.WaitAsync(TimeSpan.FromSeconds(2));
+
+        var value = Assert.IsType<EquipmentAccountDialogResult>(result.Data);
+        Assert.Equal("svc-admin", value.Login);
+    }
+
+    /// <summary>Отсутствие записи и отсутствие права остаются fail-closed после редактирования полей.</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PasswordReadMissingOrUnauthorized_StaysDisabledAfterEdits(bool missingRow)
+    {
+        var entries = missingRow
+            ? new[] { Script.Scalar(1), Script.Rows() }
+            : new[] { Script.Scalar(0) };
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>(entries));
+        await using var context = CreateContext(connection);
+        var provider = context.Render<MudDialogProvider>();
+        var reference = await ShowAsync(context, provider);
+        var dialog = provider.FindComponent<EquipmentAccountDialog>();
+
+        dialog.WaitForAssertion(() => Assert.True(dialog.FindAll("button")
+            .Single(button => button.TextContent.Trim() == "OK").HasAttribute("disabled")));
+        await dialog.FindAll("input")[1].InputAsync("replacement-secret");
+        await dialog.FindAll("input")[2].InputAsync("changed notes");
+
+        Assert.True(dialog.FindAll("button").Single(button => button.TextContent.Trim() == "OK").HasAttribute("disabled"));
+        Assert.False(reference.Result.IsCompleted);
+        Assert.DoesNotContain(connection.CommandLog, sql => sql.Contains("UPDATE"));
+        await dialog.FindAll("button").Single(button => button.TextContent.Trim() == "Отмена").ClickAsync();
+        Assert.True((await reference.Result.WaitAsync(TimeSpan.FromSeconds(2))).Canceled);
+    }
+
     private static BunitContext CreateContext(ScriptedConnection connection)
     {
         var context = new BunitContext();

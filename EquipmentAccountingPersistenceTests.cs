@@ -68,19 +68,40 @@ public sealed class EquipmentAccountingPersistenceTests
         Assert.Contains("INSERT ОборудованиеБухУчета", connection.CommandLog[2]);
     }
 
-    /// <summary>Удаление ограничено последней записью оборудования.</summary>
+    /// <summary>Удаление атомарно сверяет конкретный ID с последней записью и актуальными правами.</summary>
     [Fact]
-    public async Task DeleteAccounting_UsesOnlyLatestRecord()
+    public async Task DeleteAccounting_UsesConfirmedIdAndAtomicLatestGuard()
     {
-        var connection = new ScriptedConnection(new Queue<ScriptEntry>([
-            Script.Scalar(1), Script.Scalar(1), Script.NonQuery(),
-        ]));
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Scalar(0)]));
         var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
 
-        await service.DeleteAccountingAsync(7, 1);
+        await service.DeleteAccountingAsync(7, 41);
 
-        Assert.Contains("SELECT TOP 1", connection.CommandLog[2]);
-        Assert.Contains("ORDER BY От DESC", connection.CommandLog[2]);
+        var sql = Assert.Single(connection.CommandLog);
+        Assert.Contains("SERIALIZABLE", sql);
+        Assert.Contains("UPDLOCK, HOLDLOCK", sql);
+        Assert.Contains("ORDER BY От DESC, КодОборудованияБухУчета DESC", sql);
+        Assert.Contains("@LatestId <> @КодОборудованияБухУчета", sql);
+        Assert.Contains("@ActualOwnerId", sql);
+        Assert.Contains("fn_ТекущиеРоли", sql);
+    }
+
+    /// <summary>Пустая история, более новая запись и отзыв роли отклоняются без success-path.</summary>
+    [Theory]
+    [InlineData(1, "уже удалена")]
+    [InlineData(2, "изменилась")]
+    [InlineData(3, "Недостаточно прав")]
+    public async Task DeleteAccountingConflict_ReturnsWithoutDeleteSuccess(int status, string message)
+    {
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Scalar(status)]));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+
+        var exception = await Assert.ThrowsAnyAsync<Exception>(() => service.DeleteAccountingAsync(7, 41));
+        Assert.Contains(message, exception.Message);
+        if (status == 3)
+            Assert.IsType<UnauthorizedAccessException>(exception);
+        else
+            Assert.IsType<InvalidOperationException>(exception);
     }
 
     /// <summary>История восстанавливает владельца, арендатора, номер и даты.</summary>

@@ -51,7 +51,7 @@ public sealed class EquipmentUpsPersistenceTests
     [Fact]
     public void DetailsDiff_ComposesTransactionWithoutTestDelete()
     {
-        var command = UpsSaveBuilder.Build(10,
+        var command = UpsSaveBuilder.Build(10, 1,
             [
                 new UpsServerLink { ServerEquipmentId = 1 },
                 new UpsServerLink { ServerEquipmentId = 3 },
@@ -80,7 +80,7 @@ public sealed class EquipmentUpsPersistenceTests
     [Fact]
     public void DetailsDiff_UnchangedRows_DoNotUpdate()
     {
-        var command = UpsSaveBuilder.Build(10,
+        var command = UpsSaveBuilder.Build(10, 1,
             [new UpsServerLink { ServerEquipmentId = 1 }, new UpsServerLink { ServerEquipmentId = 2, TurnOffConfigured = 1 }],
             [new UpsServerLink { ServerEquipmentId = 1 }, new UpsServerLink { ServerEquipmentId = 2, TurnOffConfigured = 1 }],
             [
@@ -102,7 +102,7 @@ public sealed class EquipmentUpsPersistenceTests
     [Fact]
     public void DetailsDiff_IssuesOnly_UpdatesOneTest()
     {
-        var command = UpsSaveBuilder.Build(10,
+        var command = UpsSaveBuilder.Build(10, 1,
             [new UpsServerLink { ServerEquipmentId = 1 }], [new UpsServerLink { ServerEquipmentId = 1 }],
             [new UpsTest { Id = 5, Issues = "old" }], [new UpsTest { Id = 5, Issues = "new" }]);
 
@@ -114,8 +114,99 @@ public sealed class EquipmentUpsPersistenceTests
     [Fact]
     public void DetailsDiff_DuplicateCurrentKey_Throws()
     {
-        Assert.Throws<InvalidOperationException>(() => UpsSaveBuilder.Build(10, [],
+        Assert.Throws<InvalidOperationException>(() => UpsSaveBuilder.Build(10, 1, [],
             [new UpsServerLink { ServerEquipmentId = 1 }, new UpsServerLink { ServerEquipmentId = 1 }], [], []));
+    }
+
+    /// <summary>Два новых теста с нулевыми ключами создают независимые INSERT.</summary>
+    [Fact]
+    public void DetailsDiff_TwoNewTests_InsertBothWithIndependentParameters()
+    {
+        var command = UpsSaveBuilder.Build(10, 1, [], [],
+            [],
+            [
+                new UpsTest { TestedAt = new DateTime(2026, 11, 1), BatteryTime = 10, Servers = "srv-a", Issues = "first" },
+                new UpsTest { TestedAt = new DateTime(2026, 11, 2), BatteryTime = 20, Servers = "srv-b", Issues = "second" },
+            ]);
+
+        Assert.Equal(2, command.Sql.Split("INSERT vwПодключенияUPSтестирование").Length - 1);
+        Assert.Equal(10, command.Parameters.Get<int>("@testIns0Battery"));
+        Assert.Equal(20, command.Parameters.Get<int>("@testIns1Battery"));
+        Assert.Equal("srv-a", command.Parameters.Get<string>("@testIns0Servers"));
+        Assert.Equal("srv-b", command.Parameters.Get<string>("@testIns1Servers"));
+        Assert.Equal("first", command.Parameters.Get<string>("@testIns0Issues"));
+        Assert.Equal("second", command.Parameters.Get<string>("@testIns1Issues"));
+    }
+
+    /// <summary>Дубликат сохранённого положительного ключа теста отклоняется.</summary>
+    [Fact]
+    public void DetailsDiff_DuplicatePersistedTestKey_Throws()
+    {
+        Assert.Throws<InvalidOperationException>(() => UpsSaveBuilder.Build(10, 1, [], [], [],
+            [new UpsTest { Id = 5 }, new UpsTest { Id = 5 }]));
+    }
+
+    /// <summary>Изменение сохранённого теста и два новых создают UPDATE и два INSERT без DELETE.</summary>
+    [Fact]
+    public void DetailsDiff_UpdateAndTwoNewTests_ComposesCompleteDiff()
+    {
+        var command = UpsSaveBuilder.Build(10, 1, [], [],
+            [new UpsTest { Id = 5, Issues = "old" }],
+            [new UpsTest { Id = 5, Issues = "new" }, new UpsTest { Issues = "first" }, new UpsTest { Issues = "second" }]);
+
+        Assert.Equal(1, command.Sql.Split("UPDATE vwПодключенияUPSтестирование").Length - 1);
+        Assert.Equal(2, command.Sql.Split("INSERT vwПодключенияUPSтестирование").Length - 1);
+        Assert.DoesNotContain("DELETE vwПодключенияUPSтестирование", command.Sql);
+    }
+
+    /// <summary>Проверяются права только на изменяемые серверы, неизменный чужой сервер не блокирует тест UPS.</summary>
+    [Fact]
+    public void AccessGuard_TestsOnlyAndSingleFlagChange_DoNotIncludeUntouchedServers()
+    {
+        var original = new[]
+        {
+            new UpsServerLink { ServerEquipmentId = 2 },
+            new UpsServerLink { ServerEquipmentId = 1 },
+        };
+        var testsOnly = UpsSaveBuilder.Build(10, 1, original, original,
+            [new UpsTest { Id = 5, Issues = "old" }], [new UpsTest { Id = 5, Issues = "new" }]);
+        Assert.DoesNotContain("@accessAffected", testsOnly.Parameters.ParameterNames);
+
+        var flagChange = UpsSaveBuilder.Build(10, 1, original,
+            [original[0], new UpsServerLink { ServerEquipmentId = 1, TurnOffConfigured = 1 }], [], []);
+        Assert.Equal(1, flagChange.Parameters.Get<int>("@accessAffected0"));
+        Assert.DoesNotContain("@accessAffected1", flagChange.Parameters.ParameterNames);
+        Assert.Contains("fn_ТекущиеРоли", flagChange.Sql);
+    }
+
+    /// <summary>Удаление и добавление серверов включают оба фактически затронутых владельца.</summary>
+    [Fact]
+    public void AccessGuard_DeleteAndAdd_IncludeBothAffectedServers()
+    {
+        var command = UpsSaveBuilder.Build(10, 1,
+            [new UpsServerLink { ServerEquipmentId = 1 }, new UpsServerLink { ServerEquipmentId = 2 }],
+            [new UpsServerLink { ServerEquipmentId = 1 }, new UpsServerLink { ServerEquipmentId = 3 }], [], []);
+
+        Assert.Equal(2, command.Parameters.Get<int>("@accessAffected0"));
+        Assert.Equal(3, command.Parameters.Get<int>("@accessAffected1"));
+        Assert.True(command.Sql.IndexOf("SELECT 3", StringComparison.Ordinal) < command.Sql.IndexOf("DELETE vwПодключенияUPS", StringComparison.Ordinal));
+    }
+
+    /// <summary>Отказ источника, изменяемого сервера и устаревшая связь не выполняют success-path.</summary>
+    [Theory]
+    [InlineData(1, typeof(UnauthorizedAccessException))]
+    [InlineData(2, typeof(InvalidOperationException))]
+    [InlineData(3, typeof(UnauthorizedAccessException))]
+    public async Task SaveDetails_AccessGuardStatus_Throws(int status, Type exceptionType)
+    {
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Scalar(status)]));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+
+        var exception = await Assert.ThrowsAnyAsync<Exception>(() => service.SaveUpsDetailsAsync(10, 1,
+            [new UpsServerLink { ServerEquipmentId = 1 }, new UpsServerLink { ServerEquipmentId = 2 }],
+            [new UpsServerLink { ServerEquipmentId = 1 }], [], []));
+        Assert.IsType(exceptionType, exception);
+        Assert.Single(connection.CommandLog);
     }
 
     /// <summary>Серверы и тесты восстанавливают отображаемые поля.</summary>
