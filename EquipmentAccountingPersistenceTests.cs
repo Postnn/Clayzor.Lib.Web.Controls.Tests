@@ -4,6 +4,7 @@ using Clayzor.Lib.Entities.MedicalTests;
 using Clayzor.Lib.Web.Controls.Components.Select;
 using Clayzor.Lib.Web.DBSelect.Equipment;
 using Kesco.App.Web.Inventory.Services;
+using Microsoft.Data.SqlClient;
 
 namespace Clayzor.Lib.Web.Controls.Tests;
 
@@ -68,7 +69,7 @@ public sealed class EquipmentAccountingPersistenceTests
         Assert.Contains("INSERT ОборудованиеБухУчета", connection.CommandLog[2]);
     }
 
-    /// <summary>Удаление атомарно сверяет конкретный ID с последней записью и актуальными правами.</summary>
+    /// <summary>Удаление атомарно сверяет конкретный ID с последней записью и актуальными правами без изменения настроек сессии.</summary>
     [Fact]
     public async Task DeleteAccounting_UsesConfirmedIdAndAtomicLatestGuard()
     {
@@ -78,12 +79,41 @@ public sealed class EquipmentAccountingPersistenceTests
         await service.DeleteAccountingAsync(7, 41);
 
         var sql = Assert.Single(connection.CommandLog);
-        Assert.Contains("SERIALIZABLE", sql);
+        Assert.DoesNotContain("SET TRANSACTION ISOLATION LEVEL", sql);
+        Assert.DoesNotContain("SET XACT_ABORT", sql);
         Assert.Contains("UPDLOCK, HOLDLOCK", sql);
         Assert.Contains("ORDER BY От DESC, КодОборудованияБухУчета DESC", sql);
         Assert.Contains("@LatestId <> @КодОборудованияБухУчета", sql);
         Assert.Contains("@ActualOwnerId", sql);
         Assert.Contains("fn_ТекущиеРоли", sql);
+    }
+
+    /// <summary>Ошибка соединения при удалении не превращается в статус успешного удаления.</summary>
+    [Fact]
+    public async Task DeleteAccountingConnectivity_ThrowsInsteadOfSuccess()
+    {
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([
+            new ScriptEntry { Exception = SqlExceptionFactory.Create(53, "connection error") },
+        ]));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+
+        await Assert.ThrowsAsync<SqlException>(() => service.DeleteAccountingAsync(7, 41));
+        Assert.Single(connection.CommandLog);
+    }
+
+    /// <summary>Отсутствие результата и неизвестный статус удаления отклоняются.</summary>
+    [Theory]
+    [InlineData(null)]
+    [InlineData(-1)]
+    [InlineData(4)]
+    public async Task DeleteAccountingMissingOrUnknownStatus_FailsClosed(int? status)
+    {
+        var entry = status is int value ? Script.Scalar(value) : new ScriptEntry();
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([entry]));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.DeleteAccountingAsync(7, 41));
+        Assert.Single(connection.CommandLog);
     }
 
     /// <summary>Пустая история, более новая запись и отзыв роли отклоняются без success-path.</summary>

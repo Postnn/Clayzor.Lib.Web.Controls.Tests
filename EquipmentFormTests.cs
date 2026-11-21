@@ -863,6 +863,29 @@ public sealed class EquipmentFormTests
         Assert.Contains("Ответственный не сохранён", page.Markup);
     }
 
+    /// <summary>Ошибка соединения при удалении бухучёта не удаляет строку из UI и не запускает success-refresh.</summary>
+    [Fact]
+    public async Task DeleteAccountingConnectivity_DoesNotRefreshOrRemoveRow()
+    {
+        var fixture = CreateFixture();
+        fixture.Service.StoredAccounting.Add(new EquipmentAccounting { Id = 41, EquipmentId = 7, OwnerId = 1 });
+        fixture.Service.DeleteAccountingException = SqlExceptionFactory.Create(53, "connection error");
+        await using var context = fixture.Context;
+        var provider = context.Render<MudDialogProvider>();
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        var dialogAdded = TrackNextDialog(context);
+        var pending = InvokeHandler(page, "DeleteAccountingAsync", fixture.Service.StoredAccounting[0]);
+        var dialog = await dialogAdded.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        await page.InvokeAsync(() => dialog.Close(DialogResult.Ok(true)));
+        await pending;
+
+        page.WaitForAssertion(() => Assert.Contains("Результат удаления бухгалтерского учёта неизвестен", page.Markup));
+        Assert.Single(fixture.Service.StoredAccounting);
+        Assert.Equal(0, fixture.Service.AccountingRefreshCalls);
+    }
+
     /// <summary>Обновление бухучёта сохраняет изменённые владельца, арендатора и документы основной формы.</summary>
     [Fact]
     public async Task RefreshAccounting_PreservesModifiedMainFields()
@@ -1228,6 +1251,28 @@ public sealed class EquipmentFormTests
         Assert.Equal(8, CurrentModel(page.Instance).Id);
     }
 
+    /// <summary>Ошибка соединения при сохранении UPS показывает неизвестный результат и не обновляет родительский список.</summary>
+    [Fact]
+    public async Task SaveUpsConnectivity_DoesNotRunSuccessRefresh()
+    {
+        var fixture = CreateFixture();
+        fixture.Service.UpsSaveException = SqlExceptionFactory.Create(10054, "connection lost");
+        await using var context = fixture.Context;
+        var provider = context.Render<MudDialogProvider>();
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        SetPrivate(page.Instance, "_canManageUps", true);
+        var dialogAdded = TrackNextDialog(context);
+        var pending = InvokeHandler(page, "OpenUpsDialogAsync", new UpsServerLink { UpsEquipmentId = 10, ServerEquipmentId = 7 });
+        var dialog = await dialogAdded.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        await page.InvokeAsync(() => dialog.Close(DialogResult.Ok(new EquipmentUpsDialogResult([], []))));
+        await pending;
+
+        page.WaitForAssertion(() => Assert.Contains("Результат сохранения подключения UPS неизвестен", page.Markup));
+        Assert.Equal(0, fixture.Service.UpsRefreshCalls);
+    }
+
     private static Fixture CreateFixture(
         bool phones = false,
         bool network = false,
@@ -1541,8 +1586,11 @@ public sealed class EquipmentFormTests
         public override Task<IReadOnlyList<EquipmentSoftwareInstallation>> GetSoftwareInstallationsAsync(int equipmentId) =>
             Task.FromResult<IReadOnlyList<EquipmentSoftwareInstallation>>(StoredSoftware.ToList());
 
-        public override Task<IReadOnlyList<EquipmentAccounting>> GetAccountingAsync(int equipmentId) =>
-            Task.FromResult<IReadOnlyList<EquipmentAccounting>>(StoredAccounting.ToList());
+        public override Task<IReadOnlyList<EquipmentAccounting>> GetAccountingAsync(int equipmentId)
+        {
+            AccountingRefreshCalls++;
+            return Task.FromResult<IReadOnlyList<EquipmentAccounting>>(StoredAccounting.ToList());
+        }
 
         public override Task<EquipmentRouterInfo?> GetRouterInfoAsync(int equipmentId) =>
             Task.FromResult<EquipmentRouterInfo?>(null);
@@ -1551,7 +1599,11 @@ public sealed class EquipmentFormTests
             Task.FromResult<IReadOnlyList<EquipmentRouterInventoryItem>>([]);
 
         public Exception? UpsReadException { get; set; }
+        public Exception? UpsSaveException { get; set; }
+        public Exception? DeleteAccountingException { get; set; }
         public int UpsReadFailureAt { get; set; }
+        public int UpsRefreshCalls { get; private set; }
+        public int AccountingRefreshCalls { get; private set; }
         public bool DeferUpsServers { get; set; }
         public TaskCompletionSource UpsServersRequested { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource UpsServersCompletion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1575,8 +1627,23 @@ public sealed class EquipmentFormTests
             return Task.FromResult<IReadOnlyList<UpsTest>>([]);
         }
 
-        public override Task<IReadOnlyList<UpsServerLink>> GetUpsLinksAsync(int serverEquipmentId) =>
-            Task.FromResult<IReadOnlyList<UpsServerLink>>([]);
+        public override Task SaveUpsDetailsAsync(
+            int upsEquipmentId,
+            int sourceServerEquipmentId,
+            IReadOnlyCollection<UpsServerLink> originalServers,
+            IReadOnlyCollection<UpsServerLink> currentServers,
+            IReadOnlyCollection<UpsTest> originalTests,
+            IReadOnlyCollection<UpsTest> currentTests) =>
+            UpsSaveException is not null ? Task.FromException(UpsSaveException) : Task.CompletedTask;
+
+        public override Task DeleteAccountingAsync(int equipmentId, int accountingId) =>
+            DeleteAccountingException is not null ? Task.FromException(DeleteAccountingException) : Task.CompletedTask;
+
+        public override Task<IReadOnlyList<UpsServerLink>> GetUpsLinksAsync(int serverEquipmentId)
+        {
+            UpsRefreshCalls++;
+            return Task.FromResult<IReadOnlyList<UpsServerLink>>([]);
+        }
 
         public override Task<EquipmentActualInventory?> GetLastInventoryAsync(int equipmentId) =>
             Task.FromResult<EquipmentActualInventory?>(null);

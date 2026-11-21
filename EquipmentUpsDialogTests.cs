@@ -63,6 +63,34 @@ public sealed class EquipmentUpsDialogTests
         await pending!;
     }
 
+    /// <summary>Сервер без сетевого имени показывает название оборудования, но не получает фиктивный hostname.</summary>
+    [Fact]
+    public async Task NewServerWithoutNetworkName_UsesEquipmentNameOnlyForDisplay()
+    {
+        DapperColumnMapper.Initialize();
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([
+            Script.Rows(Script.Row(("КодОборудования", 9), ("НазваниеОборудования", "Компьютер без имени"),
+                ("КодТипаОборудования", 1), ("НазваниеСервера", ""))),
+        ]));
+        await using var context = CreateContext(connection);
+        var provider = context.Render<MudDialogProvider>();
+        _ = await context.Services.GetRequiredService<IDialogService>().ShowAsync<EquipmentUpsDialog>(
+            "UPS", new DialogParameters<EquipmentUpsDialog>
+            {
+                { dialog => dialog.UpsEquipmentId, 10 },
+                { dialog => dialog.Servers, new List<UpsServerLink>() },
+                { dialog => dialog.Tests, new List<UpsTest>() },
+            });
+        var dialog = provider.FindComponent<EquipmentUpsDialog>();
+        SetPrivate(dialog.Instance, "_serverToAdd", (int?)9);
+
+        await dialog.FindAll("button").Single(button => button.TextContent.Trim() == "Добавить").ClickAsync();
+
+        dialog.WaitForAssertion(() => Assert.Contains("Компьютер без имени", dialog.Markup));
+        Assert.Equal(string.Empty, dialog.Instance.Servers[0].ServerName);
+        Assert.Equal("Компьютер без имени", dialog.Instance.Servers[0].EquipmentName);
+    }
+
     private static BunitContext CreateContext(ScriptedConnection connection)
     {
         var context = new BunitContext();

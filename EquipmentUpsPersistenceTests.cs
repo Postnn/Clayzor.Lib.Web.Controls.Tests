@@ -2,6 +2,7 @@ using Clayzor.Lib.DALC;
 using Clayzor.Lib.Entities.Inventory;
 using Clayzor.Lib.Entities.MedicalTests;
 using Kesco.App.Web.Inventory.Services;
+using Microsoft.Data.SqlClient;
 
 namespace Clayzor.Lib.Web.Controls.Tests;
 
@@ -206,6 +207,38 @@ public sealed class EquipmentUpsPersistenceTests
             [new UpsServerLink { ServerEquipmentId = 1 }, new UpsServerLink { ServerEquipmentId = 2 }],
             [new UpsServerLink { ServerEquipmentId = 1 }], [], []));
         Assert.IsType(exceptionType, exception);
+        Assert.Single(connection.CommandLog);
+    }
+
+    /// <summary>Ошибка соединения при сохранении UPS не превращается в успешный статус.</summary>
+    [Theory]
+    [InlineData(53)]
+    [InlineData(10054)]
+    public async Task SaveDetailsConnectivity_ThrowsInsteadOfSuccess(int number)
+    {
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([
+            new ScriptEntry { Exception = SqlExceptionFactory.Create(number, "connection lost") },
+        ]));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+
+        await Assert.ThrowsAsync<SqlException>(() => service.SaveUpsDetailsAsync(10, 1,
+            [new UpsServerLink { ServerEquipmentId = 1 }], [new UpsServerLink { ServerEquipmentId = 1 }], [], []));
+        Assert.Single(connection.CommandLog);
+    }
+
+    /// <summary>Отсутствие результата и неизвестный статус сохранения UPS отклоняются.</summary>
+    [Theory]
+    [InlineData(null)]
+    [InlineData(-1)]
+    [InlineData(4)]
+    public async Task SaveDetailsMissingOrUnknownStatus_FailsClosed(int? status)
+    {
+        var entry = status is int value ? Script.Scalar(value) : new ScriptEntry();
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([entry]));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.SaveUpsDetailsAsync(10, 1,
+            [new UpsServerLink { ServerEquipmentId = 1 }], [new UpsServerLink { ServerEquipmentId = 1 }], [], []));
         Assert.Single(connection.CommandLog);
     }
 
