@@ -48,6 +48,35 @@ public sealed class NetEquipmentLinkResolverTests
         Assert.Equal("server01", connection.ParameterLog[0]["Token0"]);
     }
 
+    /// <summary>SQL-параметр 51-символьного токена сохраняет значение и фактический размер.</summary>
+    [Fact]
+    public async Task Resolve_LongToken_DoesNotTruncateParameter()
+    {
+        var token = new string('a', 51);
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Rows()]));
+
+        await NetEquipmentLinkResolver.ResolveAsync(CreateDb(connection), token, null);
+
+        Assert.Equal(token, connection.ParameterLog[0]["Token0"]);
+        Assert.Equal(token.Length, connection.ParameterSizeLog[0]["Token0"]);
+    }
+
+    /// <summary>Длинный токен без совпадения не мешает короткой ссылке в другом поле.</summary>
+    [Fact]
+    public async Task Resolve_LongAndShortTokens_KeepFieldsIndependent()
+    {
+        var token = new string('a', 100);
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([
+            Script.Rows(Script.Row(("Token", "server01"), ("КодОборудования", 8))),
+        ]));
+
+        var result = await NetEquipmentLinkResolver.ResolveAsync(CreateDb(connection), token, "server01");
+
+        Assert.Empty(result.Connected);
+        Assert.Equal(8, Assert.Single(result.Description).EquipmentId);
+        Assert.Equal(token.Length, connection.ParameterSizeLog[0]["Token0"]);
+    }
+
     /// <summary>R17: больше 500 токенов разбиваются на ограниченные пачки.</summary>
     [Fact]
     public async Task Resolve_LongText_UsesBoundedBatches()

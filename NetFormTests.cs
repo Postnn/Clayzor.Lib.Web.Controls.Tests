@@ -333,6 +333,204 @@ public sealed class NetFormTests
         Assert.Empty(page.FindAll("[data-testid='net-connected-links']"));
     }
 
+    /// <summary>Первичная SQL-ошибка видна, а Retry на том же экземпляре загружает порт после восстановления.</summary>
+    [Fact]
+    public async Task InitialSqlError_ShowsRetryAndLoadsAfterRecovery()
+    {
+        using var fixture = new NetFixture(loadException: SqlExceptionFactory.Create(53, "connection error"));
+        var page = fixture.Context.Render<NetPage>();
+        page.WaitForAssertion(() => Assert.Contains("Не удалось загрузить порт локальной сети", page.Markup));
+        Assert.Empty(page.FindAll("[data-testid='net-port-caption']"));
+        Assert.Empty(page.FindAll(".clay-changed-user"));
+
+        fixture.AddLoad();
+        await Invoke(page, "RetryLoadAsync");
+
+        WaitForLoad(page);
+        Assert.Equal(10, Model(page.Instance).Id);
+    }
+
+    /// <summary>При ошибке B после успешного A старая запись не отображается под новым ID.</summary>
+    [Fact]
+    public async Task LoadErrorAfterIdChange_DoesNotShowPreviousModel()
+    {
+        using var fixture = new NetFixture();
+        var page = fixture.Context.Render<NetPage>();
+        WaitForLoad(page);
+        fixture.Enqueue(Script.Error(SqlExceptionFactory.Create(10054, "connection lost")));
+
+        ChangeId(page.Instance, 11);
+        await Invoke(page, "LoadCurrentAsync", 11);
+
+        Assert.Empty(page.FindAll("[data-testid='net-port-caption']"));
+        Assert.Empty(page.FindAll(".clay-changed-user"));
+        Assert.Contains("Не удалось загрузить порт локальной сети", page.Markup);
+        Assert.Contains("Повторить", page.Markup);
+    }
+
+    /// <summary>No-row при смене ID остаётся отдельным состоянием «не найден».</summary>
+    [Fact]
+    public async Task MissingAfterIdChange_ShowsNotFoundWithoutPreviousModel()
+    {
+        using var fixture = new NetFixture();
+        var page = fixture.Context.Render<NetPage>();
+        WaitForLoad(page);
+        fixture.Enqueue(Script.Rows(Script.Row(("КодСотрудника", 4), ("Сотрудник", "Тестов А."),
+            ("Employee", "Test"), ("КодЛицаЗаказчика", 1))));
+        fixture.Enqueue(Script.Rows());
+
+        ChangeId(page.Instance, 11);
+        await Invoke(page, "LoadCurrentAsync", 11);
+
+        Assert.Contains("не найден", page.Markup);
+        Assert.Empty(page.FindAll("[data-testid='net-port-caption']"));
+    }
+
+    /// <summary>Подтверждение PoE для A после перехода на B не вызывает процедуру ни для одного порта.</summary>
+    [Fact]
+    public async Task PoeConfirmationAfterIdChange_DoesNotResetEitherPort()
+    {
+        using var fixture = new NetFixture(poe: 1);
+        fixture.AddLoad(poe: 1, id: 11, port: 12);
+        var provider = fixture.Context.Render<MudDialogProvider>();
+        var page = fixture.Context.Render<NetPage>();
+        WaitForLoad(page);
+        var pending = Invoke(page, "RestartPoeAsync");
+        provider.WaitForAssertion(() => Assert.Contains("Перезапустить PoE", provider.Markup));
+
+        ChangeId(page.Instance, 11);
+        await Invoke(page, "LoadCurrentAsync", 11);
+        fixture.Enqueue(Script.Rows(Script.Row(("КодСотрудника", 4), ("Сотрудник", "Тестов А."),
+            ("Employee", "Test"), ("КодЛицаЗаказчика", 1))));
+        fixture.Enqueue(Script.NonQuery());
+        await page.InvokeAsync(() => provider.FindAll("button").Single(button => button.TextContent.Trim() == "Да").Click());
+        await pending;
+
+        Assert.DoesNotContain(fixture.Connection.CommandLog, sql => sql.Contains("sp_ResetPoEport"));
+        Assert.Empty(fixture.Connection.TimeoutLog);
+    }
+
+    /// <summary>Поздний ручной выбор заказчика имеет приоритет над старым ответом организации сотрудника.</summary>
+    [Fact]
+    public async Task LateEmployeeOrganization_DoesNotOverwriteManualCustomer()
+    {
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var fixture = new NetFixture();
+        fixture.Enqueue(new ScriptEntry
+        {
+            Started = started,
+            Release = release,
+            Rows = [Script.Row(("КодСотрудника", 4), ("Сотрудник", "Тестов А."),
+                ("Employee", "Test"), ("КодЛицаЗаказчика", 1), ("Организация", "Организация 1"))],
+        });
+        var page = fixture.Context.Render<NetPage>();
+        WaitForLoad(page);
+        var pending = Invoke(page, "OnEmployeeChangedAsync", 4);
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(3));
+
+        await Invoke(page, "OnCustomerChanged", 2);
+        release.SetResult();
+        await pending;
+
+        Assert.Equal(2, Model(page.Instance).PersonCustomerId);
+    }
+
+    /// <summary>Ответ сотрудника, выбранного на A, не меняет заказчика после перехода на B.</summary>
+    [Fact]
+    public async Task EmployeeResponseAfterIdChange_DoesNotChangeNewModel()
+    {
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var fixture = new NetFixture();
+        fixture.Enqueue(new ScriptEntry
+        {
+            Started = started,
+            Release = release,
+            Rows = [Script.Row(("КодСотрудника", 4), ("Сотрудник", "Тестов А."),
+                ("Employee", "Test"), ("КодЛицаЗаказчика", 1))],
+        });
+        var page = fixture.Context.Render<NetPage>();
+        WaitForLoad(page);
+        var pending = Invoke(page, "OnEmployeeChangedAsync", 4);
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        fixture.AddLoad(id: 11, port: 12, customerId: 2);
+
+        ChangeId(page.Instance, 11);
+        var loading = Invoke(page, "LoadCurrentAsync", 11);
+        release.SetResult();
+        await pending;
+        await loading;
+
+        Assert.Equal(2, Model(page.Instance).PersonCustomerId);
+        Assert.Null(Model(page.Instance).EmployeeId);
+    }
+
+    /// <summary>Примечание розетки A не появляется после перехода на B.</summary>
+    [Fact]
+    public async Task SocketResponseAfterIdChange_DoesNotChangeNewModel()
+    {
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var fixture = new NetFixture();
+        fixture.Enqueue(new ScriptEntry
+        {
+            Started = started,
+            Release = release,
+            Rows = [Script.Row(("КодРозетки", 5), ("Розетка", "A-1"),
+                ("Примечание", "old socket"), ("КодРасположения", 55), ("Работает", true))],
+        });
+        var page = fixture.Context.Render<NetPage>();
+        WaitForLoad(page);
+        var pending = Invoke(page, "OnSocketChangedAsync", 5);
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        fixture.AddLoad(id: 11, port: 12);
+
+        ChangeId(page.Instance, 11);
+        var loading = Invoke(page, "LoadCurrentAsync", 11);
+        release.SetResult();
+        await pending;
+        await loading;
+
+        Assert.Null(GetPrivate<string>(page.Instance, "_socketNotes"));
+    }
+
+    /// <summary>Ошибка JS refresh после SQL не оставляет dirty-state и не вызывает повторный UPDATE.</summary>
+    [Fact]
+    public async Task RefreshDisconnectedAfterSuccessfulSave_CompletesSavedState()
+    {
+        using var fixture = new NetFixture();
+        fixture.Context.JSInterop.SetupVoid("clayModelEquipmentForm.refreshOpener")
+            .SetException(new Microsoft.JSInterop.JSDisconnectedException("disconnected"));
+        fixture.Enqueue(Script.Rows(Script.Row(("КодСотрудника", 4), ("Сотрудник", "Тестов А."),
+            ("Employee", "Test"), ("КодЛицаЗаказчика", 1))));
+        fixture.Enqueue(Script.Scalar(0));
+        fixture.AddLoad(connected: "srv-new");
+        var page = fixture.Context.Render<NetPage>();
+        WaitForLoad(page);
+        Model(page.Instance).Connected = "srv-new";
+
+        await Invoke(page, "SaveAsync", false);
+
+        Assert.Single(fixture.Connection.CommandLog.Where(sql => sql.Contains("UPDATE vwЛокальнаяСеть")));
+        Assert.False(IsModified(page.Instance));
+        Assert.Contains("Изменения сохранены", page.Markup);
+    }
+
+    /// <summary>Mismatch показывает название организации, а OrganizationId=0 не скрывает предупреждение.</summary>
+    [Theory]
+    [InlineData(1, "Организация 1")]
+    [InlineData(0, "Организация 0")]
+    public void CompanyMismatch_UsesOrganizationNameIncludingZero(int organizationId, string expected)
+    {
+        using var fixture = new NetFixture(employeeId: 4, customerId: 2, organizationId: organizationId);
+        var page = fixture.Context.Render<NetPage>();
+        WaitForLoad(page);
+
+        Assert.Contains("Компания сотрудника", page.Markup);
+        Assert.Contains(expected, page.Markup);
+    }
+
     private static void Render(IRenderedComponent<NetPage> page) => page.InvokeAsync(() =>
         typeof(NetPage).GetMethod("StateHasChanged",
             System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
@@ -343,6 +541,17 @@ public sealed class NetFormTests
             page.Find("[data-testid='net-port-caption']").TextContent), TimeSpan.FromSeconds(3));
 
     private static LocalNetworkPort Model(NetPage page) => GetPrivate<LocalNetworkPort>(page, "_model")!;
+
+    private static bool IsModified(NetPage page) => (bool)typeof(NetPage)
+        .GetProperty("IsModified", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+        .GetValue(page)!;
+
+    private static void ChangeId(NetPage page, int id)
+    {
+        page.Id = id;
+        typeof(NetPage).GetField("_loadedId", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .SetValue(page, id);
+    }
 
     private static T? GetPrivate<T>(NetPage page, string name) => (T?)typeof(NetPage)
         .GetField(name, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
@@ -367,11 +576,19 @@ public sealed class NetFormTests
             string description = "",
             byte poe = 0,
             bool currentUser = true,
-            ScriptEntry? linkEntry = null)
+            ScriptEntry? linkEntry = null,
+            int customerId = 1,
+            int? employeeId = null,
+            int organizationId = 1,
+            Exception? loadException = null)
         {
             DapperColumnMapper.Initialize();
             _entries = new Queue<ScriptEntry>();
-            AddLoad(connected, description, poe, currentUser, linkEntry);
+            if (loadException is not null)
+                _entries.Enqueue(new ScriptEntry { Exception = loadException });
+            else
+                AddLoad(connected, description, poe, currentUser, linkEntry,
+                    id: id, customerId: customerId, employeeId: employeeId, organizationId: organizationId);
             Connection = new ScriptedConnection(_entries);
             Context = new BunitContext();
             Context.JSInterop.Mode = JSRuntimeMode.Loose;
@@ -404,15 +621,20 @@ public sealed class NetFormTests
             string description = "",
             byte poe = 0,
             bool currentUser = true,
-            ScriptEntry? linkEntry = null)
+            ScriptEntry? linkEntry = null,
+            int id = 10,
+            byte port = 2,
+            int customerId = 1,
+            int? employeeId = null,
+            int organizationId = 1)
         {
             _entries.Enqueue(currentUser
                 ? Script.Rows(Script.Row(("КодСотрудника", 4), ("Сотрудник", "Тестов А."),
                     ("Employee", "Test"), ("КодЛицаЗаказчика", 1)))
                 : Script.Rows());
             _entries.Enqueue(Script.Rows(Script.Row(
-                ("КодЛокальнойСети", 10), ("КодОборудования", 8), ("Порт", (byte)2), ("PoE", poe),
-                ("КодРозетки", null), ("КодЛицаЗаказчика", 1), ("КодСотрудника", null),
+                ("КодЛокальнойСети", id), ("КодОборудования", 8), ("Порт", port), ("PoE", poe),
+                ("КодРозетки", null), ("КодЛицаЗаказчика", customerId), ("КодСотрудника", employeeId),
                 ("Подключено", connected), ("Примечания", description), ("СрокВозврата", null),
                 ("Изменил", 4), ("Сотрудник", "Тестов А."), ("Изменено", new DateTime(2026, 11, 21, 10, 0, 0)))));
             _entries.Enqueue(Script.Rows(Script.Row(("СетевоеИмя", "clay-test-net"))));
@@ -422,9 +644,13 @@ public sealed class NetFormTests
             _entries.Enqueue(Script.Rows(
                 Script.Row(("КодЛокальнойСети", 11), ("Строка", "sw-a, порт:1")),
                 Script.Row(("КодЛокальнойСети", 12), ("Строка", "sw-a, порт:2"))));
+            if (employeeId is > 0)
+                _entries.Enqueue(Script.Rows(Script.Row(("КодСотрудника", employeeId.Value),
+                    ("Сотрудник", "Тестов А."), ("Employee", "Test"),
+                    ("КодЛицаЗаказчика", organizationId), ("Организация", $"Организация {organizationId}"))));
             if (NetEquipmentLinkExtractor.Extract(connected).Count > 0 || NetEquipmentLinkExtractor.Extract(description).Count > 0)
                 _entries.Enqueue(linkEntry ?? Script.Rows());
-            _entries.Enqueue(Script.Rows(Script.Row(("КодЛица", 1), ("Кличка", "Тестовая организация"))));
+            _entries.Enqueue(Script.Rows(Script.Row(("КодЛица", customerId), ("Кличка", "Тестовая организация"))));
         }
 
         public void Enqueue(ScriptEntry entry) => _entries.Enqueue(entry);

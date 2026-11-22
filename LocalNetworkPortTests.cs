@@ -1,4 +1,5 @@
 using Clayzor.Lib.DALC;
+using Clayzor.Lib.Entities;
 using Clayzor.Lib.Entities.Inventory;
 using Clayzor.Lib.Entities.MedicalTests;
 using Microsoft.Data.SqlClient;
@@ -80,6 +81,33 @@ public sealed class LocalNetworkPortTests
         Assert.Contains("UPDLOCK, HOLDLOCK", sql);
     }
 
+    /// <summary>NULL из прямого вызова преобразуется в допустимые для NOT NULL колонок пустые строки.</summary>
+    [Fact]
+    public async Task Save_NullTexts_WritesEmptyStrings()
+    {
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Scalar(0)]));
+        var draft = Draft();
+        draft.Connected = null!;
+        draft.Description = null!;
+
+        await LocalNetworkPort.SaveAsync(CreateDb(connection), draft, draft.ChangedAtUtc);
+
+        var parameters = Assert.Single(connection.ParameterLog);
+        Assert.Equal(string.Empty, parameters["Connected"]);
+        Assert.Equal(string.Empty, parameters["Description"]);
+    }
+
+    /// <summary>Офис ищется только для последнего расположения, а не для более старой записи.</summary>
+    [Fact]
+    public void OfficeQuery_SelectsLatestLocationBeforeOfficeAncestor()
+    {
+        var sql = SQLQueries.SELECT_ОфисПоКодуОборудования;
+
+        Assert.Contains("@LatestLocationId", sql);
+        Assert.Contains("ORDER BY От DESC", sql);
+        Assert.Contains("L.КодРасположения = @LatestLocationId", sql);
+    }
+
     /// <summary>Переключение очищает источник, переносит черновик в цель и не меняет сроки возврата.</summary>
     [Fact]
     public async Task Save_Switch_UsesLegacyFieldMapWithoutReturnDate()
@@ -94,6 +122,8 @@ public sealed class LocalNetworkPortTests
         Assert.Contains("КодСотрудника = NULL", sql);
         Assert.Contains("КодРозетки = NULL", sql);
         Assert.DoesNotContain("СрокВозврата", sql);
+        Assert.Contains("КодРозетки IS NULL AND КодСотрудника IS NULL AND Подключено = ''", sql);
+        Assert.Contains("fn_ЛокальнаяСеть_СоседниеПорты(@Id)", sql);
         Assert.Equal(11, Assert.Single(connection.ParameterLog)["TargetId"]);
     }
 

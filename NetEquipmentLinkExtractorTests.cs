@@ -66,6 +66,19 @@ public sealed class NetEquipmentLinkExtractorTests
         Assert.Equal(["srv-a", "AA", "BB", "CC", "DD", "EE", "FF", "srv-b", "AA:BB:CC:DD:EE:FF"],
             NetEquipmentLinkExtractor.Extract("srv-a AA:BB:CC:DD:EE:FF\r\nsrv-b"));
 
+    /// <summary>Legacy regex не ограничивает общий токен 50 символами.</summary>
+    [Theory]
+    [InlineData(50)]
+    [InlineData(51)]
+    [InlineData(100)]
+    [InlineData(200)]
+    public void LongSingleToken_IsNotTruncated(int length)
+    {
+        var text = new string('a', length);
+
+        Assert.Equal(text, Assert.Single(NetEquipmentLinkExtractor.Extract(text)));
+    }
+
     /// <summary>R17: длинный текст обрабатывается без разбиения на символы.</summary>
     [Fact]
     public void LongText_ReturnsUniqueTokens()

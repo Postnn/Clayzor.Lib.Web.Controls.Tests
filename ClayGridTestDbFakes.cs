@@ -176,6 +176,8 @@ internal sealed class ScriptedCommand : DbCommand
         CommandLog.Add(CommandText);
         _owner.ParameterLog.Add(DbParameterCollection.Cast<DbParameter>()
             .ToDictionary(parameter => parameter.ParameterName, parameter => parameter.Value));
+        _owner.ParameterSizeLog.Add(DbParameterCollection.Cast<DbParameter>()
+            .ToDictionary(parameter => parameter.ParameterName, parameter => parameter.Size));
         e.Started?.TrySetResult();
         if (e.Release is not null)
             await e.Release.Task.WaitAsync(ct);
@@ -193,6 +195,7 @@ internal sealed class ScriptedConnection : DbConnection
     private ConnectionState _state;
     public List<string> CommandLog { get; } = [];
     public List<Dictionary<string, object?>> ParameterLog { get; } = [];
+    public List<Dictionary<string, int>> ParameterSizeLog { get; } = [];
     public List<int> TimeoutLog { get; } = [];
 
     public ScriptedConnection(Queue<ScriptEntry> entries) => _entries = entries;
