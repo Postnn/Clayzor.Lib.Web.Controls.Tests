@@ -1,4 +1,5 @@
 using Clayzor.Lib.DALC;
+using Clayzor.Lib.Entities.Inventory;
 using Clayzor.Lib.Entities.MedicalTests;
 using Kesco.App.Web.Inventory.Services;
 
@@ -41,6 +42,25 @@ public sealed class EquipmentNetworkPersistenceTests
         Assert.Contains("UPDATE vwЛокальнаяСетьПрисоединениеРабочейСети", connection.CommandLog[7]);
         Assert.Contains("Открыто > 0", connection.CommandLog[7]);
         Assert.Equal(0, count);
+    }
+
+    /// <summary>Read-модель обратной ссылки заполняет ID, сетевое имя и порт из русских колонок.</summary>
+    [Fact]
+    public async Task NetworkPortLink_MapsLegacyColumns()
+    {
+        DapperColumnMapper.Initialize();
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([
+            Script.Rows(Script.Row(("КодЛокальнойСети", 11), ("СетевоеИмя", "clay-test-net"), ("Порт", (byte)12)))
+        ]));
+        var db = new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection);
+
+        var rows = await db.QueryRequiredAsync<EquipmentNetworkPortLink>("SELECT КодЛокальнойСети, СетевоеИмя, Порт");
+
+        var link = Assert.Single(rows);
+        Assert.Equal(11, link.Id);
+        Assert.Equal("clay-test-net", link.NetworkName);
+        Assert.Equal((byte)12, link.Port);
+        Assert.Equal("clay-test-net_12", link.DisplayName);
     }
 
     /// <summary>Без роли 103 сетевое подключение не выполняется.</summary>

@@ -491,6 +491,25 @@ public sealed class EquipmentFormTests
         Assert.Equal("old-host", Assert.Single(history).NetworkName);
     }
 
+    /// <summary>Обратный поиск показывает порт локальной сети и открывает его через clayOpen.</summary>
+    [Fact]
+    public async Task NetworkPortLink_OpensLegacyNetForm()
+    {
+        var fixture = CreateFixture(network: true);
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+
+        var link = page.Find("[data-testid='equipment-network-ports'] a");
+        Assert.Equal("clay-test-net_12", link.TextContent.Trim());
+        Assert.Equal("http://localhost/Net/Net?id=11", link.GetAttribute("href"));
+        await link.ClickAsync();
+
+        var open = Assert.Single(context.JSInterop.Invocations, call => call.Identifier == "clayOpen");
+        Assert.Equal("http://localhost/Net/Net?id=11", open.Arguments[0]);
+        Assert.Equal("net-form", open.Arguments[1]);
+    }
+
     /// <summary>Все характеристики выбранной модели выводятся в разметке формы.</summary>
     [Fact]
     public async Task ModelCharacteristics_RenderCompleteLegacyMetadata()
@@ -1301,6 +1320,7 @@ public sealed class EquipmentFormTests
             ["URI_user_form"] = "http://localhost/user",
             ["URI_model_form"] = "http://localhost/Equipment/ModelEquipmentForm",
             ["URI_equipment_form"] = "http://localhost/Equipment/EquipmentForm",
+            ["URI_net_form"] = "http://localhost/Net/Net",
             ["URI_tel_form"] = "http://localhost/Telefon/Tel",
         };
         var service = new FakeEquipmentFormService(CreateDb())
@@ -1549,6 +1569,9 @@ public sealed class EquipmentFormTests
                 UpsLinks = [],
                 LastInventory = null,
                 NetworkAttachmentCount = 0,
+                NetworkPorts = request.IncludeNetworkName
+                    ? [new EquipmentNetworkPortLink { Id = 11, NetworkName = "clay-test-net", Port = 12 }]
+                    : [],
                 NetworkNameHistory = request.IncludeNetworkName
                     ? await GetNetworkNameHistoryAsync(request.EquipmentId)
                     : []

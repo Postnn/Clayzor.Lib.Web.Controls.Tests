@@ -46,6 +46,22 @@ public sealed class ClayGridDynamicFormNavigationTests
         Assert.Equal(900, options.Width);
     }
 
+    /// <summary>Стандартная ширина popup соответствует значению 1100 в clayOpen.</summary>
+    [Fact]
+    public async Task WindowService_DefaultWidthMatchesClayOpenDefault()
+    {
+        using var ctx = new BunitContext();
+        var open = ctx.JSInterop.Setup<bool>("clayFormWindow.open", _ => true);
+        open.SetResult(true);
+        var service = new ClayFormWindowService(ctx.JSInterop.JSRuntime);
+
+        await service.OpenAsync("/Net/Net?id=15", "Net");
+
+        var invocation = ctx.JSInterop.Invocations.Single(call => call.Identifier == "clayFormWindow.open");
+        var options = Assert.IsType<ClayFormWindowOptions>(invocation.Arguments[2]);
+        Assert.Equal(1100, options.Width);
+    }
+
     private sealed class FakeWindowService : ClayFormWindowService
     {
         public FakeWindowService(Microsoft.JSInterop.IJSRuntime js) : base(js) { }

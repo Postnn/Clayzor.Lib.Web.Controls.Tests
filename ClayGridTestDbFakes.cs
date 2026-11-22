@@ -83,6 +83,8 @@ internal sealed class ScriptEntry
     public int? Scalar { get; init; }
     public int? AffectedRows { get; init; }
     public Exception? Exception { get; init; }
+    public TaskCompletionSource? Started { get; init; }
+    public TaskCompletionSource? Release { get; init; }
 }
 
 /// <summary>
@@ -138,6 +140,8 @@ internal sealed class ScriptedCommand : DbCommand
     {
         var e = GetEntry();
         CommandLog.Add(CommandText);
+        _owner.ParameterLog.Add(DbParameterCollection.Cast<DbParameter>()
+            .ToDictionary(parameter => parameter.ParameterName, parameter => parameter.Value));
         if (e.Exception is not null) throw e.Exception;
         return new ScriptedDataReader(e.Rows ?? []);
     }
@@ -148,6 +152,7 @@ internal sealed class ScriptedCommand : DbCommand
         CommandLog.Add(CommandText);
         _owner.ParameterLog.Add(DbParameterCollection.Cast<DbParameter>()
             .ToDictionary(parameter => parameter.ParameterName, parameter => parameter.Value));
+        _owner.TimeoutLog.Add(CommandTimeout);
         foreach (var parameter in DbParameterCollection.Cast<DbParameter>()
                      .Where(parameter => parameter.Direction == ParameterDirection.ReturnValue && parameter.Value is null or DBNull))
             parameter.Value = 0;
@@ -159,18 +164,23 @@ internal sealed class ScriptedCommand : DbCommand
     {
         var e = GetEntry();
         CommandLog.Add(CommandText);
+        _owner.ParameterLog.Add(DbParameterCollection.Cast<DbParameter>()
+            .ToDictionary(parameter => parameter.ParameterName, parameter => parameter.Value));
         if (e.Exception is not null) throw e.Exception;
         return Task.FromResult((object?)e.Scalar);
     }
 
-    protected override Task<DbDataReader> ExecuteDbDataReaderAsync(CommandBehavior behavior, CancellationToken ct)
+    protected override async Task<DbDataReader> ExecuteDbDataReaderAsync(CommandBehavior behavior, CancellationToken ct)
     {
         var e = GetEntry();
         CommandLog.Add(CommandText);
         _owner.ParameterLog.Add(DbParameterCollection.Cast<DbParameter>()
             .ToDictionary(parameter => parameter.ParameterName, parameter => parameter.Value));
+        e.Started?.TrySetResult();
+        if (e.Release is not null)
+            await e.Release.Task.WaitAsync(ct);
         if (e.Exception is not null) throw e.Exception;
-        return Task.FromResult<DbDataReader>(new ScriptedDataReader(e.Rows ?? []));
+        return new ScriptedDataReader(e.Rows ?? []);
     }
 }
 
@@ -183,6 +193,7 @@ internal sealed class ScriptedConnection : DbConnection
     private ConnectionState _state;
     public List<string> CommandLog { get; } = [];
     public List<Dictionary<string, object?>> ParameterLog { get; } = [];
+    public List<int> TimeoutLog { get; } = [];
 
     public ScriptedConnection(Queue<ScriptEntry> entries) => _entries = entries;
 

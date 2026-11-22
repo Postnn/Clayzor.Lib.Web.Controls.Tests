@@ -108,6 +108,18 @@ public class SpecialColumnTypesTests
         Assert.Equal("09:00", result);
     }
 
+    /// <summary>Legacy-формат даты гридов не выводит минуты вместо месяца и литерал i.</summary>
+    [Fact]
+    public void Format_LegacyDateTimeFormat_UsesMonthAndMinutes()
+    {
+        var value = new DateTime(2026, 11, 22, 7, 43, 34, DateTimeKind.Utc);
+
+        var result = ClayDateTimeConverter.Format(value, "dd.mm.yy hh:mi");
+
+        Assert.Equal("22.11.26 07:43", result);
+        Assert.DoesNotContain('i', result);
+    }
+
     /// <summary>Resolve(10) возвращает ClayDateTimeLocalColumnType.</summary>
     [Fact]
     public void Resolve_Type10_ReturnsDateTimeLocalDescriptor()
