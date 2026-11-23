@@ -510,6 +510,34 @@ public sealed class EquipmentFormTests
         Assert.Equal("net-form", open.Arguments[1]);
     }
 
+    /// <summary>Изменил в секциях — активная ссылка на сотрудника через clayOpen; неактивные заголовки не имеют sort/drag состояния.</summary>
+    [Fact]
+    public async Task DetailGridEmployeeLink_OpensUserFormAndHeadersArePassive()
+    {
+        var fixture = CreateFixture();
+        fixture.Service.StoredLocations.Add(new EquipmentLocationPeriod
+        {
+            EquipmentId = 7, LocationId = 55, LocationName = "На руках",
+            ChangedById = 4, ChangedByName = "Тестов А.", FromUtc = DateTime.Today.AddDays(-1),
+        });
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        var link = page.Find("#equipment-locations tbody a");
+        Assert.Equal("http://localhost/user?id=4", link.GetAttribute("href"));
+
+        await page.Find("#equipment-locations tbody a").ClickAsync();
+
+        var invocation = context.JSInterop.Invocations.Single(call => call.Identifier == "clayOpen");
+        Assert.Equal("http://localhost/user?id=4", invocation.Arguments[0]);
+        Assert.Equal("user-form", invocation.Arguments[1]);
+        Assert.All(page.FindAll("#equipment-locations .clay-grid-column-drag-handle"), handle =>
+        {
+            Assert.Equal("false", handle.GetAttribute("draggable"));
+            Assert.DoesNotContain("clay-grid-column-sortable", handle.ClassList);
+        });
+    }
+
     /// <summary>Все характеристики выбранной модели выводятся в разметке формы.</summary>
     [Fact]
     public async Task ModelCharacteristics_RenderCompleteLegacyMetadata()
@@ -749,6 +777,58 @@ public sealed class EquipmentFormTests
         var save = Assert.Single(fixture.Service.LocationSaves);
         Assert.Equal(55, save.Location.LocationId);
         Assert.Equal(4, save.Responsible?.EmployeeId);
+    }
+
+    /// <summary>Refresh компьютера переводит новый UTC ChangedAt в клиентское время.</summary>
+    [Fact]
+    public async Task ComputerRefresh_LocalizesNewChangedAt()
+    {
+        var fixture = CreateFixture(computer: true);
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        var changedAt = new DateTime(2026, 11, 22, 18, 47, 6, DateTimeKind.Unspecified);
+        fixture.Service.StoredComputers.Add(new EquipmentComputerSnapshot
+        {
+            EquipmentId = 7, Date = DateTime.Today, ChangedAt = changedAt,
+        });
+
+        await InvokeHandler(page, "RefreshComputerAsync");
+
+        Assert.Equal(changedAt.AddMinutes(180),
+            ((Dictionary<DateTime, DateTime>)GetPrivate(page.Instance, "_localDates")!)[changedAt]);
+    }
+
+    /// <summary>При редактировании неизменяемые расположение, дата и время визуально и функционально отключены.</summary>
+    [Fact]
+    public async Task LocationEdit_DisablesFixedPeriodFields()
+    {
+        var fixture = CreateFixture();
+        var existing = new EquipmentLocationPeriod
+        {
+            EquipmentId = 7, LocationId = 55, FromUtc = DateTime.Today.AddDays(-1), Notes = "note",
+        };
+        fixture.Service.StoredLocations.Add(existing);
+        await using var context = fixture.Context;
+        var provider = context.Render<MudDialogProvider>();
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        var dialogAdded = TrackNextDialog(context);
+        var pending = InvokeHandler(page, "OpenLocationDialogAsync", existing);
+        var reference = await dialogAdded.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var dialog = provider.FindComponent<EquipmentLocationDialog>();
+
+        Assert.True(dialog.FindComponents<MudDatePicker>()[0].Instance.Disabled);
+        Assert.True(Assert.Single(dialog.FindComponents<MudTimePicker>()).Instance.Disabled);
+        Assert.False(dialog.FindComponents<MudDatePicker>()[1].Instance.Disabled);
+        var expectedLocal = existing.FromUtc.AddMinutes(180);
+        Assert.Equal(expectedLocal.Date, dialog.Instance.FromDate);
+        Assert.Equal(expectedLocal.TimeOfDay, dialog.Instance.FromTime);
+        var select = dialog.FindComponent<ClaySelect<LocationLookup, int?>>();
+        Assert.True(select.Instance.Options.ReadOnly);
+
+        await page.InvokeAsync(() => reference.Close(DialogResult.Cancel()));
+        await pending;
     }
 
     /// <summary>Диалог прежней записи после смены id не выполняет SQL для новой записи.</summary>

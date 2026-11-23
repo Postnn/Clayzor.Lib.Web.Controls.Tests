@@ -61,6 +61,20 @@ public sealed class ClayFormControlsTests
         Assert.Equal("00:00:00", cut.Find("input").GetAttribute("value"));
     }
 
+    /// <summary>DatePicker использует общий класс фиксированной ширины и полный формат даты.</summary>
+    [Fact]
+    public async Task DatePicker_UsesSharedFixedWidthClassAndFullDate()
+    {
+        await using var ctx = new BunitContext();
+        ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+        ctx.Services.AddMudServices();
+        var cut = ctx.Render<ClayDatePicker>(parameters => parameters
+            .Add(component => component.Value, new DateTime(2026, 11, 22)));
+
+        Assert.NotNull(cut.Find(".clay-date.mud-picker"));
+        Assert.Equal("22.11.2026", cut.Find("input").GetAttribute("value"));
+    }
+
     /// <summary>Changed запрашивает смещение на дату записи, учитывая сезонные переходы.</summary>
     [Fact]
     public void Changed_UsesOffsetAtRecordedUtcDate()
@@ -107,6 +121,20 @@ public sealed class ClayFormControlsTests
         cut.Render(parameters => parameters.Add(component => component.Value, winter));
 
         cut.WaitForAssertion(() => Assert.Equal("15.01.2026 13:00:00", cut.Find("time").TextContent));
+    }
+
+    /// <summary>LocalTime трактует SQL datetime с Kind=Unspecified как UTC.</summary>
+    [Fact]
+    public void LocalTime_UnspecifiedDatabaseValue_UsesClientOffset()
+    {
+        using var ctx = new BunitContext();
+        var databaseValue = new DateTime(2026, 1, 15, 9, 0, 0, DateTimeKind.Unspecified);
+        var utc = DateTime.SpecifyKind(databaseValue, DateTimeKind.Utc);
+        ctx.JSInterop.Setup<int>("clayGridTimeZone.getOffsetMinutes", invocation =>
+            Equals(invocation.Arguments.Single(), utc.ToString("O"))).SetResult(180);
+        var cut = ctx.Render<ClayLocalTime>(parameters => parameters.Add(component => component.Value, databaseValue));
+
+        cut.WaitForAssertion(() => Assert.Equal("15.01.2026 12:00:00", cut.Find("time").TextContent));
     }
 
     /// <summary>Каркас оставляет toolbar и footer вне прокручиваемого содержимого.</summary>

@@ -358,6 +358,7 @@ public sealed class NetFormTests
         var page = fixture.Context.Render<NetPage>();
         WaitForLoad(page);
         fixture.Enqueue(Script.Error(SqlExceptionFactory.Create(10054, "connection lost")));
+        fixture.Enqueue(Script.Error(SqlExceptionFactory.Create(10054, "connection lost")));
 
         ChangeId(page.Instance, 11);
         await Invoke(page, "LoadCurrentAsync", 11);
@@ -589,7 +590,7 @@ public sealed class NetFormTests
             else
                 AddLoad(connected, description, poe, currentUser, linkEntry,
                     id: id, customerId: customerId, employeeId: employeeId, organizationId: organizationId);
-            Connection = new ScriptedConnection(_entries);
+            Connection = new ScriptedConnection(_entries, emulateEquipmentIdentity: false);
             Context = new BunitContext();
             Context.JSInterop.Mode = JSRuntimeMode.Loose;
             Context.Services.AddMudServices();

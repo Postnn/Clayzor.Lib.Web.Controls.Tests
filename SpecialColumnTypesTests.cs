@@ -120,6 +120,30 @@ public class SpecialColumnTypesTests
         Assert.DoesNotContain('i', result);
     }
 
+    /// <summary>SQL datetime с Kind=Unspecified остаётся UTC и переводится в локальный пояс.</summary>
+    [Fact]
+    public void ConvertFromUtc_UnspecifiedKind_StillConverts()
+    {
+        var databaseValue = new DateTime(2026, 1, 1, 9, 0, 0, DateTimeKind.Unspecified);
+        var local = ClayDateTimeConverter.ConvertFromUtc(databaseValue, TimeSpan.FromHours(3));
+        Assert.Equal(new DateTime(2026, 1, 1, 12, 0, 0), local);
+    }
+
+    /// <summary>DateTimeOffset приводится к UTC до применения клиентского смещения.</summary>
+    [Fact]
+    public void Format_DateTimeOffset_UsesUtcInstant()
+    {
+        var value = new DateTimeOffset(2026, 1, 1, 12, 0, 0, TimeSpan.FromHours(3));
+        Assert.Equal("12:00", ClayDateTimeConverter.Format(value, "HH:mm", TimeSpan.FromHours(3)));
+    }
+
+    /// <summary>SQL time для типа 13 также сдвигается из UTC в клиентское время.</summary>
+    [Fact]
+    public void Format_TimeSpan_AppliesClientOffset()
+    {
+        Assert.Equal("12:00", ClayDateTimeConverter.Format(TimeSpan.FromHours(9), "HH:mm", TimeSpan.FromHours(3)));
+    }
+
     /// <summary>Resolve(10) возвращает ClayDateTimeLocalColumnType.</summary>
     [Fact]
     public void Resolve_Type10_ReturnsDateTimeLocalDescriptor()
