@@ -17,7 +17,7 @@ public sealed class EquipmentNetworkNameHistoryPersistenceTests
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Rows(Script.Row(
             ("КодОборудования", 8), ("СетевоеИмя", "clay-test-net"), ("Изменено", changedAt),
             ("Изменил", 4), ("ИзменилФИО", "Тестовый сотрудник")))]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         var history = await service.GetNetworkNameHistoryAsync(8);
 

@@ -114,7 +114,7 @@ public sealed class EquipmentAccountDialogTests
         context.JSInterop.Mode = JSRuntimeMode.Loose;
         context.Services.AddMudServices();
         context.Services.AddSingleton(new EquipmentFormService(
-            new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection)));
+            new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider()));
         return context;
     }
 

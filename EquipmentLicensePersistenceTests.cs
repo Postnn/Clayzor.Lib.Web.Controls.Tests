@@ -65,7 +65,7 @@ public sealed class EquipmentLicensePersistenceTests
             Script.Rows(Script.Row(("КодТипаОборудования", 200), ("ЕстьХарактеристикиSoft", (byte)1))),
             Script.Scalar(1), Script.NonQuery(),
         ]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
         var type = new LicenseType { Id = 2, Temporary = 1, Resale = 1 };
         var license = new EquipmentLicense
         {
@@ -95,7 +95,7 @@ public sealed class EquipmentLicensePersistenceTests
             Script.Rows(Script.Row(("КодТипаОборудования", 200), ("ЕстьХарактеристикиSoft", (byte)1))),
             Script.Scalar(0),
         ]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.SaveLicenseAsync(
             new EquipmentLicense { EquipmentId = 7 }, null));
@@ -114,7 +114,7 @@ public sealed class EquipmentLicensePersistenceTests
                 ("КоличествоСерверов", 1), ("КоличествоКлиентов", 2),
                 ("ДействуетДо", to), ("Дистрибутив", "Dist"), ("ИзменилФИО", "Editor"))),
         ]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         var licenses = await service.GetLicensesAsync(7);
 

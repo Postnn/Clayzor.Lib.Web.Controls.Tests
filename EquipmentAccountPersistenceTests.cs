@@ -18,7 +18,7 @@ public sealed class EquipmentAccountPersistenceTests
             Script.Rows(Script.Row(("КодОборудования", 7), ("Логин", "test"),
                 ("ОграниченныеПрава", (byte)1), ("Примечание", "note"))),
         ]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         var accounts = await service.GetAccountsAsync(7);
 
@@ -38,7 +38,7 @@ public sealed class EquipmentAccountPersistenceTests
             Script.Scalar(1), Script.Scalar(1), Script.NonQuery(),
             Script.Scalar(1), Script.Scalar(1), Script.NonQuery(),
         ]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
         var account = new EquipmentAccount { EquipmentId = 7, Login = "test", Password = "secret", Notes = "note" };
 
         await service.AddAccountAsync(account);
@@ -57,7 +57,7 @@ public sealed class EquipmentAccountPersistenceTests
     public async Task AddAccountWithoutInventoryRole_DoesNotWrite()
     {
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Scalar(1), Script.Scalar(0)]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.AddAccountAsync(
             new EquipmentAccount { EquipmentId = 7, Login = "test" }));
@@ -72,7 +72,7 @@ public sealed class EquipmentAccountPersistenceTests
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([
             Script.Scalar(1), Script.Rows(Script.Row(("Пароль", "secret"))),
         ]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         var password = await service.GetAccountPasswordAsync(7, "test");
 
@@ -90,7 +90,7 @@ public sealed class EquipmentAccountPersistenceTests
             Script.Scalar(1), Script.Error(SqlExceptionFactory.Create(53, "connection error")),
             Script.Scalar(1), Script.Rows(Script.Row(("Пароль", string.Empty))),
         ]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         await Assert.ThrowsAsync<Microsoft.Data.SqlClient.SqlException>(() => service.GetAccountPasswordAsync(7, "test"));
         Assert.Equal(string.Empty, await service.GetAccountPasswordAsync(7, "test"));
@@ -107,7 +107,7 @@ public sealed class EquipmentAccountPersistenceTests
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([
             Script.Scalar(1), Script.Error(SqlExceptionFactory.Create(errorNumber, "connection error")),
         ]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         await Assert.ThrowsAsync<Microsoft.Data.SqlClient.SqlException>(() => service.GetAccountPasswordAsync(7, "test"));
         Assert.DoesNotContain(connection.CommandLog, sql => sql.Contains("UPDATE"));
@@ -118,7 +118,7 @@ public sealed class EquipmentAccountPersistenceTests
     public async Task GetAccountPasswordNoRow_ThrowsInsteadOfReturningEmpty()
     {
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Scalar(1), new ScriptEntry()]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => service.GetAccountPasswordAsync(7, "test"));
         Assert.DoesNotContain(connection.CommandLog, sql => sql.Contains("UPDATE"));
@@ -129,7 +129,7 @@ public sealed class EquipmentAccountPersistenceTests
     public async Task GetAccountPasswordWithoutRole_DoesNotReadSecret()
     {
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Scalar(0)]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.GetAccountPasswordAsync(7, "test"));
 

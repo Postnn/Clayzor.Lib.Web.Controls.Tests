@@ -36,7 +36,7 @@ public sealed class EquipmentSimPersistenceTests
                 ("От", activated), ("КодДоговора", 10), ("Договор", "Contract"),
                 ("ЛицоПерсональныхДанных", "Person"), ("ИзменилФИО", "Editor"))),
         ]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         var cards = await service.GetSimCardsAsync(7);
 
@@ -57,7 +57,7 @@ public sealed class EquipmentSimPersistenceTests
             Script.Scalar(1), Script.Rows(Script.Row(("PIN", "1234"), ("PIN2", "12345"),
                 ("PUK", "12345678"), ("PUK2", "87654321"))),
         ]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         var secrets = await service.GetSimSecretsAsync(7);
 
@@ -77,7 +77,7 @@ public sealed class EquipmentSimPersistenceTests
             Script.Scalar(1), Script.Rows(Script.Row(("PIN", string.Empty), ("PIN2", string.Empty),
                 ("PUK", string.Empty), ("PUK2", string.Empty))),
         ]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         await Assert.ThrowsAsync<Microsoft.Data.SqlClient.SqlException>(() => service.GetSimSecretsAsync(7));
         var secrets = await service.GetSimSecretsAsync(7);
@@ -96,7 +96,7 @@ public sealed class EquipmentSimPersistenceTests
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([
             Script.Scalar(1), Script.Error(SqlExceptionFactory.Create(errorNumber, "connection error")),
         ]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         await Assert.ThrowsAsync<Microsoft.Data.SqlClient.SqlException>(() => service.GetSimSecretsAsync(7));
         Assert.DoesNotContain(connection.CommandLog, sql => sql.Contains("UPDATE"));
@@ -107,7 +107,7 @@ public sealed class EquipmentSimPersistenceTests
     public async Task GetSimSecretsNoRow_ThrowsInsteadOfReturningEmpty()
     {
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Scalar(1), Script.Rows()]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => service.GetSimSecretsAsync(7));
         Assert.DoesNotContain(connection.CommandLog, sql => sql.Contains("UPDATE"));
@@ -118,7 +118,7 @@ public sealed class EquipmentSimPersistenceTests
     public async Task SaveSimWithDuplicate_ComposesSingleTransaction()
     {
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Scalar(1), Script.NonQuery()]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
         var sim = ValidSim();
 
         await service.SaveSimAsync(sim, 8);
@@ -127,6 +127,9 @@ public sealed class EquipmentSimPersistenceTests
         Assert.Contains("UPDATE vwОборудование", connection.CommandLog[1]);
         Assert.Contains("UPDATE vwSIMКарты", connection.CommandLog[1]);
         Assert.Contains("COMMIT TRANSACTION", connection.CommandLog[1]);
+        Assert.Contains("Списано IS NULL", connection.CommandLog[1]);
+        Assert.Contains("НомерТелефона = @НомерТелефона", connection.CommandLog[1]);
+        Assert.Contains("IF @@ROWCOUNT <> 1", connection.CommandLog[1]);
         Assert.Contains("COALESCE", connection.CommandLog[1]);
     }
 
@@ -135,7 +138,7 @@ public sealed class EquipmentSimPersistenceTests
     public async Task SaveSimWithoutDuplicate_DoesNotWriteOtherEquipment()
     {
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Scalar(1), Script.NonQuery()]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         await service.SaveSimAsync(ValidSim());
 
@@ -148,7 +151,7 @@ public sealed class EquipmentSimPersistenceTests
     public async Task DeleteSim_DoesNotDeleteEquipment()
     {
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Scalar(1), Script.NonQuery()]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         await service.DeleteSimAsync(7);
 
@@ -161,7 +164,7 @@ public sealed class EquipmentSimPersistenceTests
     public async Task DeleteSimWithoutRole_DoesNotWrite()
     {
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Scalar(0)]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.DeleteSimAsync(7));
         Assert.DoesNotContain(connection.CommandLog, sql => sql.Contains("DELETE vwSIMКарты"));

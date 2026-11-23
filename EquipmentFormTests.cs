@@ -905,6 +905,43 @@ public sealed class EquipmentFormTests
         Assert.Equal(0, fixture.Service.AccountingRefreshCalls);
     }
 
+    /// <summary>SQL-ошибка UPDATE бухучёта сохраняет draft и не запускает success-refresh.</summary>
+    [Fact]
+    public async Task SaveAccountingConnectivity_KeepsDraftAndDoesNotRefresh()
+    {
+        var fixture = CreateFixture();
+        var existing = new EquipmentAccounting
+        {
+            Id = 41, EquipmentId = 7, OwnerId = 1, Notes = "old",
+            ChangedAt = new DateTime(2026, 11, 22, 18, 29, 44),
+        };
+        fixture.Service.StoredAccounting.Add(existing);
+        fixture.Service.SaveAccountingException = SqlExceptionFactory.Create(53, "connection error");
+        await using var context = fixture.Context;
+        var provider = context.Render<MudDialogProvider>();
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        FindSn(page).Input("CLAY_TEST_ACC_DRAFT");
+        var dialogAdded = TrackNextDialog(context);
+        var pending = InvokeHandler(page, "OpenAccountingDialogAsync", existing);
+        var dialog = await dialogAdded.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var draft = provider.FindComponent<EquipmentAccountingDialog>().Instance.Value;
+        draft.IsMaterial = true;
+        draft.DateFrom = DateTime.Today;
+        draft.Notes = "new draft";
+
+        await page.InvokeAsync(() => dialog.Close(DialogResult.Ok(draft)));
+        await pending;
+
+        page.WaitForAssertion(() => Assert.Contains("Бухгалтерский учёт не сохранён", page.Markup));
+        Assert.Same(draft, fixture.Service.LastAccountingDraft);
+        Assert.Equal("new draft", fixture.Service.LastAccountingDraft?.Notes);
+        Assert.Equal(existing.ChangedAt, fixture.Service.LastAccountingDraft?.ChangedAt);
+        Assert.Equal(0, fixture.Service.AccountingRefreshCalls);
+        Assert.Equal("CLAY_TEST_ACC_DRAFT", FindSn(page).GetAttribute("value"));
+        Assert.Equal("old", existing.Notes);
+    }
+
     /// <summary>Обновление бухучёта сохраняет изменённые владельца, арендатора и документы основной формы.</summary>
     [Fact]
     public async Task RefreshAccounting_PreservesModifiedMainFields()
@@ -934,9 +971,11 @@ public sealed class EquipmentFormTests
     public async Task RefreshAccountingWithoutDraft_UpdatesOriginalSnapshot()
     {
         var fixture = CreateFixture();
+        var changedAt = new DateTime(2026, 11, 22, 18, 47, 6);
         fixture.Service.StoredAccounting.Add(new EquipmentAccounting
         {
             EquipmentId = 7, OwnerId = 20, TenantId = 30, ReceiptDocumentId = 40, WriteOffDocumentId = 50,
+            ChangedAt = changedAt,
         });
         await using var context = fixture.Context;
         var page = context.Render<EquipmentForm>();
@@ -949,6 +988,8 @@ public sealed class EquipmentFormTests
         Assert.Equal(40, CurrentModel(page.Instance).DocumentReceiptOuId);
         Assert.Equal(50, CurrentModel(page.Instance).DocumentWriteOffId);
         Assert.False(IsModified(page.Instance));
+        Assert.Equal(changedAt.AddMinutes(180),
+            ((Dictionary<DateTime, DateTime>)GetPrivate(page.Instance, "_localDates")!)[changedAt]);
     }
 
     /// <summary>Восстановление того же типа после Escape не перечитывает и не очищает телефонные правки.</summary>
@@ -1247,6 +1288,30 @@ public sealed class EquipmentFormTests
         Assert.Null(GetPrivate(page.Instance, "_pendingPhoneSync"));
     }
 
+    /// <summary>После восстановления соединения повторное открытие UPS создаёт диалог с новым снимком.</summary>
+    [Fact]
+    public async Task UpsLoadRetryAfterRecovery_OpensDialog()
+    {
+        var fixture = CreateFixture();
+        fixture.Service.UpsReadException = SqlExceptionFactory.Create(53, "connection error");
+        fixture.Service.UpsReadFailureAt = 1;
+        await using var context = fixture.Context;
+        var provider = context.Render<MudDialogProvider>();
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        SetPrivate(page.Instance, "_canManageUps", true);
+        await InvokeHandler(page, "OpenUpsDialogAsync", new UpsServerLink { UpsEquipmentId = 10, ServerEquipmentId = 7 });
+        Assert.Empty(provider.FindComponents<EquipmentUpsDialog>());
+
+        var dialogAdded = TrackNextDialog(context);
+        var pending = InvokeHandler(page, "OpenUpsDialogAsync", new UpsServerLink { UpsEquipmentId = 10, ServerEquipmentId = 7 });
+        var reference = await dialogAdded.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.NotEmpty(provider.FindComponents<EquipmentUpsDialog>());
+
+        await page.InvokeAsync(() => reference.Close(DialogResult.Cancel()));
+        await pending;
+    }
+
     /// <summary>Поздний ответ загрузки UPS прежнего ID не открывает диалог для новой записи.</summary>
     [Fact]
     public async Task LateUpsLoadAfterIdChange_DoesNotOpenDialog()
@@ -1290,6 +1355,114 @@ public sealed class EquipmentFormTests
 
         page.WaitForAssertion(() => Assert.Contains("Результат сохранения подключения UPS неизвестен", page.Markup));
         Assert.Equal(0, fixture.Service.UpsRefreshCalls);
+    }
+
+    /// <summary>Детализация доступна для Билайн и открывается через clayOpen без навигации родителя.</summary>
+    [Fact]
+    public async Task SimDetail_Beeline_OpensExternalFormWithoutNavigation()
+    {
+        var fixture = CreateFixture();
+        fixture.Service.SimDetailUrl = "https://billing.test/phone?Phone=79000000001";
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        SetPrivate(page.Instance, "_selectedType", new EquipmentType { Id = 27, HasSimCharacteristics = 1 });
+        SetPrivate(page.Instance, "_simCards", new List<EquipmentSimCard>
+        {
+            new() { EquipmentId = 7, ExecutorPersonId = 908 },
+        });
+        ((ConfigurationManager)context.Services.GetRequiredService<IConfiguration>())["URI_accounting_phone_form"] =
+            "https://billing.test/phone";
+        page.Render();
+
+        await page.FindAll("button").Single(button => button.TextContent.Trim() == "Детализация").ClickAsync();
+
+        var invocation = context.JSInterop.Invocations.Single(call => call.Identifier == "clayOpen");
+        Assert.Equal(fixture.Service.SimDetailUrl, invocation.Arguments[0]);
+        Assert.Equal("equipment-sim-detail", invocation.Arguments[1]);
+        Assert.Equal("http://localhost/Equipment/EquipmentForm?id=7", fixture.Navigation.Uri);
+    }
+
+    /// <summary>Блокировка, предупреждение и суммы услуг SIM доступны в строках грида.</summary>
+    [Fact]
+    public async Task SimServices_RenderWarningsPlannedDatesAndTotals()
+    {
+        var fixture = CreateFixture();
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        SetPrivate(page.Instance, "_selectedType", new EquipmentType { Id = 27, HasSimCharacteristics = 1 });
+        SetPrivate(page.Instance, "_simServices", new List<EquipmentSimService>
+        {
+            new()
+            {
+                ServiceTypeId = "_BLOCK", ServiceName = "Блокировка", DateFrom = DateTime.Today.AddDays(-2),
+                PlannedDateFrom = DateTime.Today.AddDays(-1), DailyCost = 2.5m, MonthlyCost = 10m,
+            },
+            new()
+            {
+                ServiceTypeId = "_TEST", ServiceName = "Услуга", DateFrom = DateTime.Today.AddDays(-2),
+                MustBeDisabled = 1, RequiredServiceDescription = "Требуется отключение", DailyCost = 1.5m, MonthlyCost = 5m,
+            },
+        });
+        page.Render();
+
+        Assert.Contains("заблокировано", page.Markup);
+        Assert.Contains("План подкл.", page.Markup);
+        var totals = page.Find("[data-testid='sim-service-totals']").TextContent;
+        Assert.Contains("4,00", totals);
+        Assert.Contains("15,00", totals);
+        Assert.NotEmpty(page.FindAll("tr.mud-theme-error"));
+    }
+
+    /// <summary>DisplayNet скрывает звёздные имена, выделяет warning и применяет исключение switch.</summary>
+    [Fact]
+    public async Task NetworkDiagnostics_RenderWarningStarFilterAndSwitchHide()
+    {
+        var fixture = CreateFixture(network: true);
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        CurrentModel(page.Instance).MacAddress2 = null;
+        SetPrivate(page.Instance, "_networkPorts", new List<EquipmentNetworkPortLink>
+        {
+            new() { Id = 11, NetworkName = "server-a", Port = 1 },
+            new() { Id = 12, NetworkName = "*hidden", Port = 2 },
+        });
+        page.Render();
+
+        var link = Assert.Single(page.FindAll("[data-testid='equipment-network-ports'] a"));
+        Assert.Equal("server-a_1", link.TextContent.Trim());
+        Assert.Contains("mud-error-text", link.ClassList);
+
+        CurrentModel(page.Instance).EquipmentTypeId = 33;
+        SetPrivate(page.Instance, "_networkPorts", new List<EquipmentNetworkPortLink>
+        {
+            new() { Id = 11, NetworkName = "server-a", Port = 1 },
+            new() { Id = 12, NetworkName = "server-b", Port = 2 },
+            new() { Id = 13, NetworkName = "server-c", Port = 3 },
+        });
+        page.Render();
+        Assert.Empty(page.FindAll("[data-testid='equipment-network-ports']"));
+    }
+
+    /// <summary>Успешный UPDATE с последующим not-found при reload не запускает attach и не даёт NullReference.</summary>
+    [Fact]
+    public async Task NetworkAttach_AfterReloadReturnsNull_DoesNotRunAttach()
+    {
+        var fixture = CreateFixture(network: true);
+        fixture.Service.ReturnNullAfterUpdate = true;
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        SetPrivate(page.Instance, "_canChangeNetwork", true);
+        CurrentModel(page.Instance).Description = "draft";
+
+        await InvokeHandler(page, "SetNetworkAttachmentAsync", true);
+
+        Assert.Equal(1, fixture.Service.UpdateCalls);
+        Assert.Equal(0, fixture.Service.AttachNetworkCalls);
+        Assert.True(PrivateBool(page.Instance, "_notFound"));
     }
 
     private static Fixture CreateFixture(
@@ -1352,6 +1525,11 @@ public sealed class EquipmentFormTests
         context.Services.AddSingleton(new LocationSelectDataSource(CreateDb()));
         context.Services.AddKeyedSingleton<DocumentSelectDataSource>("receipt", new DocumentSelectDataSource(CreateDb()));
         context.Services.AddKeyedSingleton<DocumentSelectDataSource>("writeoff", new DocumentSelectDataSource(CreateDb(writeOffEntries)));
+        context.Services.AddSingleton(new AccountingPersonSelectDataSource(CreateDb(Script.Rows(PersonRow()))));
+        context.Services.AddKeyedSingleton<AccountingDocumentSelectDataSource>("accountingReceipt",
+            new AccountingDocumentSelectDataSource(CreateDb(), false));
+        context.Services.AddKeyedSingleton<AccountingDocumentSelectDataSource>("accountingWriteOff",
+            new AccountingDocumentSelectDataSource(CreateDb(), true));
         context.Services.AddKeyedSingleton<UpsEquipmentSelectDataSource>("ups", new UpsEquipmentSelectDataSource(CreateDb(), true));
         context.Services.AddKeyedSingleton<UpsEquipmentSelectDataSource>("server", new UpsEquipmentSelectDataSource(CreateDb(), false));
         return new Fixture(context, service, navigation, js);
@@ -1488,6 +1666,8 @@ public sealed class EquipmentFormTests
         public bool RoleForPersonResult { get; set; } = true;
         public bool AccountingAvailable { get; set; } = true;
         public int UpdateCalls { get; private set; }
+        public int AttachNetworkCalls { get; private set; }
+        public bool ReturnNullAfterUpdate { get; set; }
         public int AddAccountCalls { get; private set; }
         public int DeleteSimCalls { get; private set; }
         public int GetPhonesCalls { get; private set; }
@@ -1515,6 +1695,8 @@ public sealed class EquipmentFormTests
         public override async Task<EquipmentEntity?> GetAsync(int id)
         {
             Requests.Add(id);
+            if (ReturnNullAfterUpdate && UpdateCalls > 0)
+                return null;
             if (LoadException is not null)
             {
                 var exception = LoadException;
@@ -1590,6 +1772,11 @@ public sealed class EquipmentFormTests
         public override Task<IReadOnlyList<EquipmentAccount>> GetAccountsAsync(int equipmentId) =>
             Task.FromResult<IReadOnlyList<EquipmentAccount>>([]);
 
+        public string? SimDetailUrl { get; set; }
+
+        public override Task<string?> GetSimDetailUrlAsync(int equipmentId, string baseUri) =>
+            Task.FromResult(SimDetailUrl);
+
         public override Task<IReadOnlyList<EquipmentSimCard>> GetSimCardsAsync(int equipmentId) =>
             Task.FromResult<IReadOnlyList<EquipmentSimCard>>([]);
 
@@ -1634,7 +1821,11 @@ public sealed class EquipmentFormTests
         public override async Task<IReadOnlyList<UpsServerLink>> GetUpsServersAsync(int upsEquipmentId)
         {
             if (UpsReadFailureAt == 1 && UpsReadException is not null)
-                throw UpsReadException;
+            {
+                var exception = UpsReadException;
+                UpsReadException = null;
+                throw exception;
+            }
             if (DeferUpsServers)
             {
                 UpsServersRequested.TrySetResult();
@@ -1658,6 +1849,15 @@ public sealed class EquipmentFormTests
             IReadOnlyCollection<UpsTest> originalTests,
             IReadOnlyCollection<UpsTest> currentTests) =>
             UpsSaveException is not null ? Task.FromException(UpsSaveException) : Task.CompletedTask;
+
+        public Exception? SaveAccountingException { get; set; }
+        public EquipmentAccounting? LastAccountingDraft { get; private set; }
+
+        public override Task SaveAccountingAsync(EquipmentAccounting accounting)
+        {
+            LastAccountingDraft = accounting;
+            return SaveAccountingException is not null ? Task.FromException(SaveAccountingException) : Task.CompletedTask;
+        }
 
         public override Task DeleteAccountingAsync(int equipmentId, int accountingId) =>
             DeleteAccountingException is not null ? Task.FromException(DeleteAccountingException) : Task.CompletedTask;
@@ -1684,6 +1884,12 @@ public sealed class EquipmentFormTests
         public override Task<bool> HasRoleAsync(int roleId) => Task.FromResult(Roles.Contains(roleId));
 
         public override Task<bool> HasRoleForPersonAsync(int roleId, int? personId) => Task.FromResult(RoleForPersonResult);
+
+        public override Task AttachNetworkAsync(int equipmentId)
+        {
+            AttachNetworkCalls++;
+            return Task.CompletedTask;
+        }
 
         public override async Task UpdateAsync(EquipmentEntity equipment)
         {

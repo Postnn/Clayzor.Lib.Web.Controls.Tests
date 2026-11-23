@@ -12,7 +12,7 @@ public sealed class EquipmentPhoneConfigPersistenceTests
     public async Task GetPhoneConfig_ChecksRoleBeforeProcedure()
     {
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Scalar(1), Script.NonQuery()]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         await service.GetPhoneConfigAsync("001122334455");
 
@@ -26,7 +26,7 @@ public sealed class EquipmentPhoneConfigPersistenceTests
     public async Task GetPhoneConfigWithoutRole_DoesNotCallProcedure()
     {
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Scalar(0)]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.GetPhoneConfigAsync("001122334455"));
 

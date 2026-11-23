@@ -11,7 +11,7 @@ public sealed class EquipmentFormReadPersistenceTests
     public async Task GetAsync_NoRows_ReturnsNull()
     {
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Rows()]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         Assert.Null(await service.GetAsync(999));
         Assert.Single(connection.CommandLog);
@@ -26,7 +26,7 @@ public sealed class EquipmentFormReadPersistenceTests
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([
             Script.Error(SqlExceptionFactory.Create(errorNumber, "connection error")),
         ]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         await Assert.ThrowsAsync<Microsoft.Data.SqlClient.SqlException>(() => service.GetAsync(7));
         Assert.Single(connection.CommandLog);

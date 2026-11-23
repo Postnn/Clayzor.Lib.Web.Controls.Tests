@@ -75,7 +75,7 @@ public sealed class EquipmentPhonePersistenceTests
             Script.Rows(Script.Row(("КодТелефонногоНомера", 1), ("КодТелефоннойСтанции", 0), ("XorcomName", ""))),
             Script.NonQuery(), Script.NonQuery(),
         ]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         await service.SynchronizePhonesAsync(7,
             [Link(1, ConnectionEquipmentId: 8)], [Link(1, ConnectionEquipmentId: 9)]);
@@ -92,7 +92,7 @@ public sealed class EquipmentPhonePersistenceTests
             Script.Rows(Script.Row(("КодТелефонногоНомера", 1), ("КодТелефоннойСтанции", 0), ("XorcomName", ""))),
             Script.NonQuery(),
         ]));
-        var fallbackService = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => fallbackConnection));
+        var fallbackService = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => fallbackConnection), new TestAuthenticationStateProvider());
         await fallbackService.SynchronizePhonesAsync(7, [], [Link(1)]);
         Assert.Equal(7, EquipmentId(fallbackConnection.ParameterLog.Single(HasEquipmentId)));
     }
@@ -107,7 +107,7 @@ public sealed class EquipmentPhonePersistenceTests
             Script.Scalar(0), Script.NonQuery(),
             Script.Rows(Script.Row(("КодТелефонногоНомера", 2), ("КодТелефоннойСтанции", 0), ("XorcomName", ""))),
         ]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         await service.SynchronizePhonesAsync(7,
             [Link(1, ConnectionEquipmentId: 8)], [Link(2, ConnectionEquipmentId: 8)]);
@@ -125,7 +125,7 @@ public sealed class EquipmentPhonePersistenceTests
             Script.Rows(Script.Row(("КодТелефонногоНомера", 2), ("КодТелефоннойСтанции", 0), ("XorcomName", ""))),
             Script.NonQuery(),
         ]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         await service.SynchronizePhonesAsync(7,
             [Link(1, ConnectionEquipmentId: 8)],
@@ -143,7 +143,7 @@ public sealed class EquipmentPhonePersistenceTests
     public async Task SynchronizePhones_IgnoresMetadataOnlyChanges()
     {
         var connection = new ScriptedConnection(new Queue<ScriptEntry>());
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         var errors = await service.SynchronizePhonesAsync(7,
             [Link(1, ReturnDate: new DateTime(2026, 12, 1), Notes: "old")],
@@ -168,7 +168,7 @@ public sealed class EquipmentPhonePersistenceTests
                 ("СрокВозврата", returnDate), ("Примечание", "note"),
                 ("Изменил", "Employee"), ("Изменено", changedAt))),
         ]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         var phones = await service.GetPhonesAsync(7);
 
@@ -192,7 +192,7 @@ public sealed class EquipmentPhonePersistenceTests
             Script.Rows(Script.Row(("КодОборудованияПодключения", 9))),
             Script.Rows(),
         ]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         Assert.Equal(9, await service.GetConnectionEquipmentIdAsync(11, 4, 55));
         Assert.Null(await service.GetConnectionEquipmentIdAsync(12, null, 55));

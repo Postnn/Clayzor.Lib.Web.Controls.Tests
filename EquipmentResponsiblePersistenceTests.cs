@@ -63,7 +63,7 @@ public sealed class EquipmentResponsiblePersistenceTests
                 ("Сотрудник", "Employee"), ("СрокВозврата", to.AddDays(2)), ("Примечания", "note"),
                 ("Изменил", 3), ("ИзменилФИО", "Editor"), ("Изменено", changed))),
         ]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         var responsibles = await service.GetResponsiblesAsync(7);
 
@@ -85,7 +85,7 @@ public sealed class EquipmentResponsiblePersistenceTests
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([
             Script.Scalar(1), Script.NonQuery(), Script.Scalar(1), Script.NonQuery(),
         ]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
         var responsible = new EquipmentResponsiblePeriod
         {
             EquipmentId = 7, EmployeeId = 4, FromUtc = new DateTime(2026, 11, 18, 9, 0, 0), Notes = "note",

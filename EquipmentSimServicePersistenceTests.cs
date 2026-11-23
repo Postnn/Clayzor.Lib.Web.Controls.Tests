@@ -31,7 +31,7 @@ public sealed class EquipmentSimServicePersistenceTests
     public async Task SaveService_UsesExclusiveEndAndSymmetricOverlap()
     {
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Scalar(1), Script.NonQuery()]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         await service.SaveSimServiceAsync(new EquipmentSimService
         {
@@ -53,7 +53,7 @@ public sealed class EquipmentSimServicePersistenceTests
     public async Task UpdateService_UsesIdWithoutDelete()
     {
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Scalar(1), Script.NonQuery()]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         await service.SaveSimServiceAsync(new EquipmentSimService
         {
@@ -77,23 +77,64 @@ public sealed class EquipmentSimServicePersistenceTests
         DapperColumnMapper.Initialize();
         var from = new DateTime(2026, 11, 1);
         var to = new DateTime(2026, 11, 17);
+        var plannedFrom = new DateTime(2026, 10, 20);
+        var plannedTo = new DateTime(2026, 11, 20);
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([
             Script.Rows(Script.Row(("КодSIMКартыДопУслугиСотОператора", 15),
                 ("НомерТелефона", "79000000001"), ("КодТипаДопУслугиСотОператора", "_TEST"),
                 ("ДопУслугаСотОператора", "Test"), ("От", from), ("До", to),
+                ("ОтПлан", plannedFrom), ("ДоПлан", plannedTo),
                 ("СтоимостьВключения", 1m), ("СтоимостьВдень", 2m), ("СтоимостьВмесяц", 3m),
-                ("КодОбязательнойУслугиДляКомпании", true), ("ТарифныйПлан", (byte)1),
+                ("КодОбязательнойУслугиДляКомпании", true), ("УслугуНеобходимоОтключить", (byte)1),
+                ("ОбязательнаяУслуга", "Услуга не входит в договор"), ("ТарифныйПлан", (byte)1),
                 ("ИзменилФИО", "Editor"))),
         ]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         var services = await service.GetSimServicesAsync(7, true, true);
 
         var item = Assert.Single(services);
         Assert.Equal(15, item.Id);
         Assert.Equal(to, item.DateTo);
+        Assert.Equal(plannedFrom, item.PlannedDateFrom);
+        Assert.Equal(plannedTo, item.PlannedDateTo);
         Assert.Equal(3m, item.MonthlyCost);
         Assert.True(item.IsCompanyRequired);
+        Assert.Equal(1, item.MustBeDisabled);
+        Assert.Equal("Услуга не входит в договор", item.GetWarning(DateTime.Today));
         Assert.Contains("DATEADD(day, -1, U.До)", connection.CommandLog[0]);
+        Assert.Contains("SIMКартыДопУслугиСотОператораОбязательные R", connection.CommandLog[0]);
+        Assert.Contains("CASE WHEN U.КодТипаДопУслугиСотОператора = '_BLOCK'", connection.CommandLog[0]);
+    }
+
+    /// <summary>Плановые предупреждения используют точные неравенства legacy.</summary>
+    [Fact]
+    public void PlannedWarnings_UseLegacyBoundaries()
+    {
+        var today = new DateTime(2026, 11, 22);
+        var service = new EquipmentSimService { PlannedDateFrom = today };
+        Assert.False(service.HasOverduePlannedAction(today));
+        service.PlannedDateFrom = today.AddDays(-1);
+        Assert.True(service.HasOverduePlannedAction(today));
+        service.PlannedDateFrom = null;
+        service.PlannedDateTo = today;
+        Assert.True(service.HasOverduePlannedAction(today));
+        service.PlannedDateTo = today.AddDays(1);
+        Assert.False(service.HasOverduePlannedAction(today));
+    }
+
+    /// <summary>Блокировка учитывает перевод эксклюзивной даты БД во включительную дату UI.</summary>
+    [Fact]
+    public void ActiveBlock_UsesInclusiveUiEnd()
+    {
+        var today = new DateTime(2026, 11, 22);
+        var service = new EquipmentSimService { ServiceTypeId = "_BLOCK", DateTo = today };
+        Assert.True(service.IsActiveBlock(today));
+        service.DateTo = today.AddDays(-1);
+        Assert.False(service.IsActiveBlock(today));
+        service.DateTo = null;
+        Assert.True(service.IsActiveBlock(today));
+        service.ServiceTypeId = "_TEST";
+        Assert.False(service.IsActiveBlock(today));
     }
 }

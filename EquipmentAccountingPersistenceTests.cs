@@ -39,23 +39,21 @@ public sealed class EquipmentAccountingPersistenceTests
     [Fact]
     public async Task CanUseAccounting_ChecksRoleAndFunction()
     {
-        var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Scalar(1), Script.Scalar(1)]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>(AccessRows()));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         Assert.True(await service.CanUseAccountingAsync(1));
 
-        Assert.Contains("КодРоли = @RoleId", connection.CommandLog[0]);
-        Assert.Contains("fn_БухгалтерскийУчет", connection.CommandLog[1]);
+        Assert.Contains("КодРоли = @RoleId", connection.CommandLog[1]);
+        Assert.Contains("fn_БухгалтерскийУчет", connection.CommandLog[2]);
     }
 
     /// <summary>Сохранение сначала проверяет права, затем выполняет INSERT.</summary>
     [Fact]
     public async Task SaveAccounting_ChecksAccessBeforeInsert()
     {
-        var connection = new ScriptedConnection(new Queue<ScriptEntry>([
-            Script.Scalar(1), Script.Scalar(1), Script.NonQuery(),
-        ]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([.. AccessRows(), Script.NonQuery()]));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         await service.SaveAccountingAsync(new EquipmentAccounting
         {
@@ -65,8 +63,88 @@ public sealed class EquipmentAccountingPersistenceTests
             InventoryNumber = "INV001",
         });
 
-        Assert.Equal(3, connection.CommandLog.Count);
-        Assert.Contains("INSERT ОборудованиеБухУчета", connection.CommandLog[2]);
+        Assert.Equal(4, connection.CommandLog.Count);
+        Assert.Contains("INSERT ОборудованиеБухУчета", connection.CommandLog[3]);
+    }
+
+    /// <summary>UPDATE проверяет ID, оборудование, версию, обоих владельцев, документы и число строк.</summary>
+    [Fact]
+    public async Task SaveAccountingUpdate_UsesAtomicVersionAndAccessGuard()
+    {
+        var changedAt = new DateTime(2026, 11, 20, 10, 0, 0);
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([.. AccessRows(), Script.Scalar(0)]));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
+
+        await service.SaveAccountingAsync(new EquipmentAccounting
+        {
+            Id = 41,
+            EquipmentId = 7,
+            OwnerId = 1,
+            DateFrom = new DateTime(2026, 11, 1),
+            InventoryNumber = "INV001",
+            ChangedAt = changedAt,
+        });
+
+        Assert.Equal(4, connection.CommandLog.Count);
+        var sql = connection.CommandLog[3];
+        Assert.Contains("UPDLOCK, HOLDLOCK", sql);
+        Assert.Contains("@ActualChangedAt <> @ExpectedChangedAt", sql);
+        Assert.Contains("@ActualEquipmentId <> @КодОборудования", sql);
+        Assert.Contains("fn_ТекущиеРоли", sql);
+        Assert.Contains("[Документы].dbo.vwДокументы", sql);
+        Assert.Contains("@@ROWCOUNT <> 1", sql);
+        Assert.Equal(changedAt, connection.ParameterLog[3]["ExpectedChangedAt"]);
+    }
+
+    /// <summary>Статусы конфликтов UPDATE не считаются успешным сохранением.</summary>
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    [InlineData(5)]
+    public async Task SaveAccountingUpdate_Status_FailsClosed(int status)
+    {
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([.. AccessRows(), Script.Scalar(status)]));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
+
+        await Assert.ThrowsAnyAsync<Exception>(() => service.SaveAccountingAsync(new EquipmentAccounting
+        {
+            Id = 41, EquipmentId = 7, OwnerId = 1, DateFrom = new DateTime(2026, 11, 1), InventoryNumber = "INV001",
+        }));
+        Assert.Equal(4, connection.CommandLog.Count);
+    }
+
+    /// <summary>Connectivity, no-row и неизвестный статус UPDATE не становятся успехом.</summary>
+    [Theory]
+    [InlineData(null)]
+    [InlineData(-1)]
+    [InlineData(6)]
+    public async Task SaveAccountingUpdate_MissingOrUnknownStatus_FailsClosed(int? status)
+    {
+        var entry = status is int value ? Script.Scalar(value) : new ScriptEntry();
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([.. AccessRows(), entry]));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.SaveAccountingAsync(new EquipmentAccounting
+        {
+            Id = 41, EquipmentId = 7, OwnerId = 1, DateFrom = new DateTime(2026, 11, 1), InventoryNumber = "INV001",
+        }));
+    }
+
+    /// <summary>Ошибка соединения UPDATE пробрасывается и не считается успехом.</summary>
+    [Fact]
+    public async Task SaveAccountingUpdateConnectivity_Throws()
+    {
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([
+            Script.Error(SqlExceptionFactory.Create(53, "connection error")),
+        ]));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
+
+        await Assert.ThrowsAsync<SqlException>(() => service.SaveAccountingAsync(new EquipmentAccounting
+        {
+            Id = 41, EquipmentId = 7, OwnerId = 1, DateFrom = new DateTime(2026, 11, 1), InventoryNumber = "INV001",
+        }));
     }
 
     /// <summary>Удаление атомарно сверяет конкретный ID с последней записью и актуальными правами без изменения настроек сессии.</summary>
@@ -74,7 +152,7 @@ public sealed class EquipmentAccountingPersistenceTests
     public async Task DeleteAccounting_UsesConfirmedIdAndAtomicLatestGuard()
     {
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Scalar(0)]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         await service.DeleteAccountingAsync(7, 41);
 
@@ -95,7 +173,7 @@ public sealed class EquipmentAccountingPersistenceTests
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([
             new ScriptEntry { Exception = SqlExceptionFactory.Create(53, "connection error") },
         ]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         await Assert.ThrowsAsync<SqlException>(() => service.DeleteAccountingAsync(7, 41));
         Assert.Single(connection.CommandLog);
@@ -110,7 +188,7 @@ public sealed class EquipmentAccountingPersistenceTests
     {
         var entry = status is int value ? Script.Scalar(value) : new ScriptEntry();
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([entry]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => service.DeleteAccountingAsync(7, 41));
         Assert.Single(connection.CommandLog);
@@ -124,7 +202,7 @@ public sealed class EquipmentAccountingPersistenceTests
     public async Task DeleteAccountingConflict_ReturnsWithoutDeleteSuccess(int status, string message)
     {
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Scalar(status)]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         var exception = await Assert.ThrowsAnyAsync<Exception>(() => service.DeleteAccountingAsync(7, 41));
         Assert.Contains(message, exception.Message);
@@ -148,7 +226,7 @@ public sealed class EquipmentAccountingPersistenceTests
                 ("ДатаПоступления", from), ("ДатаСписания", to), ("Примечания", "note"),
                 ("ИзменилФИО", "Editor"))),
         ]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         var history = await service.GetAccountingAsync(7);
 
@@ -195,4 +273,12 @@ public sealed class EquipmentAccountingPersistenceTests
 
         Assert.Contains("dbo.fn_БухгалтерскийУчет(КодЛица) = 1", connection.CommandLog[0]);
     }
+
+    private static ScriptEntry[] AccessRows() =>
+    [
+        Script.Rows(Script.Row(("КодСотрудника", 4), ("Сотрудник", "Тестов Администратор"),
+            ("Employee", "Test"), ("КодЛицаЗаказчика", 1))),
+        Script.Rows(Script.Row(("Value", 1))),
+        Script.Rows(Script.Row(("Value", 1))),
+    ];
 }

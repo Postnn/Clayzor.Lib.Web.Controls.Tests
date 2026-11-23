@@ -13,7 +13,7 @@ public sealed class EquipmentNetworkPersistenceTests
     public async Task GetNetworkAttachmentCount_NoRowsReturnsZero()
     {
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Scalar(0)]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         Assert.Equal(0, await service.GetNetworkAttachmentCountAsync(7));
         Assert.Contains("Открыто <> 0", connection.CommandLog[0]);
@@ -32,7 +32,7 @@ public sealed class EquipmentNetworkPersistenceTests
             Script.Rows(Script.Row(("КодТипаОборудования", 1), ("ЕстьХарактеристикиКомпьютера", (byte)1))),
             Script.Scalar(1), Script.NonQuery(), Script.Scalar(0),
         ]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         await service.AttachNetworkAsync(7);
         await service.DetachNetworkAsync(7);
@@ -73,7 +73,7 @@ public sealed class EquipmentNetworkPersistenceTests
             Script.Rows(Script.Row(("КодТипаОборудования", 1), ("ЕстьХарактеристикиКомпьютера", (byte)1))),
             Script.Scalar(0),
         ]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.AttachNetworkAsync(7));
         Assert.DoesNotContain(connection.CommandLog, sql => sql.Contains("INSERT"));

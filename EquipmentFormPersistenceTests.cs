@@ -41,7 +41,7 @@ public sealed class EquipmentFormPersistenceTests
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([
             Script.Scalar(1), Script.Rows(Script.Row(("КодТипаОборудования", 1), ("SNобязателен", (byte)0), ("ЕстьMACадрес", (byte)0))), Script.NonQuery(),
         ]));
-        var service = new EquipmentFormService(CreateDb(connection));
+        var service = new EquipmentFormService(CreateDb(connection), new TestAuthenticationStateProvider());
 
         await service.UpdateAsync(new Equipment { Id = 7, ModelId = 5, OwnerId = 1, EquipmentTypeId = 1 });
 
@@ -59,7 +59,7 @@ public sealed class EquipmentFormPersistenceTests
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([
             Script.Scalar(1), Script.Rows(Script.Row(("КодТипаОборудования", 1), ("SNобязателен", (byte)0), ("ЕстьMACадрес", (byte)0))), Script.NonQuery(0),
         ]));
-        var service = new EquipmentFormService(CreateDb(connection));
+        var service = new EquipmentFormService(CreateDb(connection), new TestAuthenticationStateProvider());
 
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
             service.UpdateAsync(new Equipment { Id = 7, ModelId = 5, OwnerId = 1, EquipmentTypeId = 1 }));
@@ -70,7 +70,7 @@ public sealed class EquipmentFormPersistenceTests
     public async Task UpdateWithoutOwner_ThrowsBeforeSqlWrite()
     {
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Scalar(1), Script.NonQuery()]));
-        var service = new EquipmentFormService(CreateDb(connection));
+        var service = new EquipmentFormService(CreateDb(connection), new TestAuthenticationStateProvider());
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => service.UpdateAsync(new Equipment { Id = 7, ModelId = 5 }));
         Assert.DoesNotContain(connection.CommandLog, sql => sql.Contains("UPDATE vwОборудование"));
@@ -83,7 +83,7 @@ public sealed class EquipmentFormPersistenceTests
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([
             Script.Scalar(1), Script.Rows(Script.Row(("КодТипаОборудования", 1), ("SNобязателен", (byte)1), ("ЕстьMACадрес", (byte)0))),
         ]));
-        var service = new EquipmentFormService(CreateDb(connection));
+        var service = new EquipmentFormService(CreateDb(connection), new TestAuthenticationStateProvider());
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => service.UpdateAsync(
             new Equipment { Id = 7, ModelId = 5, OwnerId = 1, EquipmentTypeId = 1 }));
@@ -97,7 +97,7 @@ public sealed class EquipmentFormPersistenceTests
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([
             Script.Scalar(1), Script.Rows(Script.Row(("КодТипаОборудования", 1), ("SNобязателен", (byte)0), ("ЕстьMACадрес", (byte)1))),
         ]));
-        var service = new EquipmentFormService(CreateDb(connection));
+        var service = new EquipmentFormService(CreateDb(connection), new TestAuthenticationStateProvider());
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => service.UpdateAsync(
             new Equipment { Id = 7, ModelId = 5, OwnerId = 1, EquipmentTypeId = 1, MacAddress = "invalid" }));
@@ -123,7 +123,7 @@ public sealed class EquipmentFormPersistenceTests
                 ("Изменил", 4), ("Изменено", changed), ("ИзменилФИО", "Тестов А."),
                 ("КодРасположения", 55), ("КодСотрудника", 9))),
         ]));
-        var service = new EquipmentFormService(CreateDb(connection));
+        var service = new EquipmentFormService(CreateDb(connection), new TestAuthenticationStateProvider());
 
         var equipment = await service.GetAsync(7);
 

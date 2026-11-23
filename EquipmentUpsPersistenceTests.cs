@@ -22,7 +22,7 @@ public sealed class EquipmentUpsPersistenceTests
             Script.Rows(Script.Row(("КодТипаОборудования", 1), ("ЕстьХарактеристикиSIM", (byte)0))),
             Script.Scalar(1), Script.NonQuery(),
         ]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         await service.AddUpsLinkAsync(10, 7);
         await service.DeleteUpsLinkAsync(10, 7);
@@ -42,7 +42,7 @@ public sealed class EquipmentUpsPersistenceTests
             Script.Rows(Script.Row(("КодТипаОборудования", 1), ("ЕстьХарактеристикиSIM", (byte)0))),
             Script.Scalar(0),
         ]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.AddUpsLinkAsync(10, 7));
         Assert.DoesNotContain(connection.CommandLog, sql => sql.Contains("INSERT vwПодключенияUPS"));
@@ -201,7 +201,7 @@ public sealed class EquipmentUpsPersistenceTests
     public async Task SaveDetails_AccessGuardStatus_Throws(int status, Type exceptionType)
     {
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Scalar(status)]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         var exception = await Assert.ThrowsAnyAsync<Exception>(() => service.SaveUpsDetailsAsync(10, 1,
             [new UpsServerLink { ServerEquipmentId = 1 }, new UpsServerLink { ServerEquipmentId = 2 }],
@@ -219,7 +219,7 @@ public sealed class EquipmentUpsPersistenceTests
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([
             new ScriptEntry { Exception = SqlExceptionFactory.Create(number, "connection lost") },
         ]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         await Assert.ThrowsAsync<SqlException>(() => service.SaveUpsDetailsAsync(10, 1,
             [new UpsServerLink { ServerEquipmentId = 1 }], [new UpsServerLink { ServerEquipmentId = 1 }], [], []));
@@ -235,7 +235,7 @@ public sealed class EquipmentUpsPersistenceTests
     {
         var entry = status is int value ? Script.Scalar(value) : new ScriptEntry();
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([entry]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => service.SaveUpsDetailsAsync(10, 1,
             [new UpsServerLink { ServerEquipmentId = 1 }], [new UpsServerLink { ServerEquipmentId = 1 }], [], []));
@@ -256,8 +256,8 @@ public sealed class EquipmentUpsPersistenceTests
                 ("ДатаТестирования", new DateTime(2026, 11, 1)), ("ВремяБатарейUPS", 20),
                 ("СервераПолучившиеОповещение", "server"), ("ОшибкиТестирования", "issue"))),
         ]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => serverConnection));
-        var testService = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => testConnection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => serverConnection), new TestAuthenticationStateProvider());
+        var testService = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => testConnection), new TestAuthenticationStateProvider());
 
         var server = Assert.Single(await service.GetUpsServersAsync(10));
         var test = Assert.Single(await testService.GetUpsTestsAsync(10));
@@ -281,7 +281,7 @@ public sealed class EquipmentUpsPersistenceTests
                 ("СломаноРемонтуНеПодлежит", (byte)1), ("Примечание", "note"),
                 ("ИзменилФИО", "Editor"))),
         ]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         var inventory = await service.GetLastInventoryAsync(7);
 

@@ -23,7 +23,7 @@ public sealed class EquipmentSimDialogTests
         context.JSInterop.Mode = JSRuntimeMode.Loose;
         context.Services.AddMudServices();
         context.Services.AddSingleton<IConfiguration>(new ConfigurationManager());
-        context.Services.AddSingleton(new EquipmentFormService(CreateDb()));
+        context.Services.AddSingleton(new EquipmentFormService(CreateDb(), new TestAuthenticationStateProvider()));
         context.Services.AddSingleton(new MobileContractSelectDataSource(CreateDb(
             Script.Rows(Script.Row(("КодДокумента", 10), ("ДоговорНазвание", "CLAY_TEST"), ("ТипЛицаЗаказчика", 0))))));
         context.Services.AddSingleton(new PersonalDataPersonSelectDataSource(CreateDb()));
@@ -104,7 +104,7 @@ public sealed class EquipmentSimDialogTests
         context.JSInterop.Mode = JSRuntimeMode.Loose;
         context.Services.AddMudServices();
         context.Services.AddSingleton<IConfiguration>(new ConfigurationManager());
-        context.Services.AddSingleton(new EquipmentFormService(CreateDb(connection)));
+        context.Services.AddSingleton(new EquipmentFormService(CreateDb(connection), new TestAuthenticationStateProvider()));
         context.Services.AddSingleton(new MobileContractSelectDataSource(CreateDb(
             Script.Rows(Script.Row(("КодДокумента", 10), ("ДоговорНазвание", "CLAY_TEST"), ("ТипЛицаЗаказчика", 0))))));
         context.Services.AddSingleton(new PersonalDataPersonSelectDataSource(CreateDb()));

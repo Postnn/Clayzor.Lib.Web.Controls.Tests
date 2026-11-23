@@ -17,7 +17,7 @@ public sealed class EquipmentRouterReadOnlyTests
             Script.Rows(Script.Row(("КодОборудования", 7), ("СетевоеИмя", "router"),
                 ("OSVersion", "1.0"), ("Description", "Description"))),
         ]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         var info = await service.GetRouterInfoAsync(7);
 
@@ -38,7 +38,7 @@ public sealed class EquipmentRouterReadOnlyTests
             Script.Rows(Script.Row(("Код", 1), ("КодОборудования", 7),
                 ("СетевоеИмя", "router"), ("Модуль", "Module"), ("Характеристика", "Value"))),
         ]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         var rows = await service.GetRouterInventoryAsync(7);
 

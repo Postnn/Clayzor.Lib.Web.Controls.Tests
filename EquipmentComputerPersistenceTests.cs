@@ -41,7 +41,7 @@ public sealed class EquipmentComputerPersistenceTests
     public async Task SaveComputer_ComputesTotalsAndUsesDailyUpsert()
     {
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Scalar(1), Script.NonQuery()]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
         var snapshot = new EquipmentComputerSnapshot
         {
             EquipmentId = 7,
@@ -76,7 +76,7 @@ public sealed class EquipmentComputerPersistenceTests
                 ("SSD", 128), ("SSDDetail", "128"), ("Лицензия", "license"),
                 ("Примечания", "note"), ("ИзменилФИО", "Editor"), ("Конфигурация1", "Standard"))),
         ]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         var history = await service.GetComputerHistoryAsync(7);
 

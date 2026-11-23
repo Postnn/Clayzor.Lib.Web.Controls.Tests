@@ -199,7 +199,7 @@ public sealed class LocalNetworkPortTests
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([
             Script.Rows(Script.Row(("КодСотрудника", 4), ("Сотрудник", "Тестов А."),
                 ("Employee", "Test"), ("КодЛицаЗаказчика", 1))),
-        ]));
+        ]), emulateEquipmentIdentity: false);
         var employee = await Employee.GetCurrentAsync(CreateDb(connection), "DOMAIN\\user");
         Assert.Equal(4, employee!.Id);
         Assert.Equal(1, employee.OrganizationId);
@@ -207,9 +207,10 @@ public sealed class LocalNetworkPortTests
         Assert.Contains("@WindowsPrincipal = SUSER_SNAME()", connection.CommandLog[0]);
         Assert.Equal("DOMAIN\\user", connection.ParameterLog[0]["WindowsPrincipal"]);
 
-        var missing = new ScriptedConnection(new Queue<ScriptEntry>([Script.Rows()]));
+        var missing = new ScriptedConnection(new Queue<ScriptEntry>([Script.Rows()]), emulateEquipmentIdentity: false);
         Assert.Null(await Employee.GetCurrentAsync(CreateDb(missing), "DOMAIN\\other"));
-        Assert.Null(await Employee.GetCurrentAsync(CreateDb(new ScriptedConnection(new Queue<ScriptEntry>())), null));
+        Assert.Null(await Employee.GetCurrentAsync(CreateDb(new ScriptedConnection(new Queue<ScriptEntry>(),
+            emulateEquipmentIdentity: false)), null));
     }
 
     /// <summary>PoE вызывает подтверждённый ID с legacy timeout 120 секунд.</summary>

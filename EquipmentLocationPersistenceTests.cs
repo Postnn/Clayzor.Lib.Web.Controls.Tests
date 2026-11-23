@@ -51,7 +51,7 @@ public sealed class EquipmentLocationPersistenceTests
                 ("РасположениеPath1", "CLAY_TEST / Room"), ("СрокВозврата", null),
                 ("Примечания", "note"), ("Изменил", 4), ("ИзменилФИО", "Employee"), ("Изменено", changed))),
         ]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         var locations = await service.GetLocationsAsync(7);
 
@@ -71,7 +71,7 @@ public sealed class EquipmentLocationPersistenceTests
     public async Task Update_UsesConfirmedSql()
     {
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Scalar(1), Script.NonQuery()]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         await service.UpdateLocationAsync(new EquipmentLocationPeriod
         {

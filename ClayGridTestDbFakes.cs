@@ -1,6 +1,8 @@
 using System.Collections;
 using System.Data;
 using System.Data.Common;
+using System.Security.Claims;
+using Microsoft.AspNetCore.Components.Authorization;
 
 namespace Clayzor.Lib.Web.Controls.Tests;
 
@@ -172,6 +174,11 @@ internal sealed class ScriptedCommand : DbCommand
 
     protected override async Task<DbDataReader> ExecuteDbDataReaderAsync(CommandBehavior behavior, CancellationToken ct)
     {
+        if (_owner.EmulateEquipmentIdentity &&
+            CommandText.Contains("SID = SUSER_SID() AND @WindowsPrincipal = SUSER_SNAME()", StringComparison.Ordinal))
+            return new ScriptedDataReader([Script.Row(
+                ("КодСотрудника", 4), ("Сотрудник", "Тестов Администратор"),
+                ("Employee", "Test"), ("КодЛицаЗаказчика", 1))]);
         var e = GetEntry();
         CommandLog.Add(CommandText);
         _owner.ParameterLog.Add(DbParameterCollection.Cast<DbParameter>()
@@ -182,7 +189,8 @@ internal sealed class ScriptedCommand : DbCommand
         if (e.Release is not null)
             await e.Release.Task.WaitAsync(ct);
         if (e.Exception is not null) throw e.Exception;
-        return new ScriptedDataReader(e.Rows ?? []);
+        var rows = e.Rows ?? (e.Scalar is int scalar ? [Script.Row(("Value", scalar))] : []);
+        return new ScriptedDataReader(rows);
     }
 }
 
@@ -198,7 +206,14 @@ internal sealed class ScriptedConnection : DbConnection
     public List<Dictionary<string, int>> ParameterSizeLog { get; } = [];
     public List<int> TimeoutLog { get; } = [];
 
-    public ScriptedConnection(Queue<ScriptEntry> entries) => _entries = entries;
+    /// <summary>Эмулирует подтверждённую Windows/SQL-идентичность для старых сценариев EquipmentForm.</summary>
+    internal bool EmulateEquipmentIdentity { get; }
+
+    public ScriptedConnection(Queue<ScriptEntry> entries, bool emulateEquipmentIdentity = true)
+    {
+        _entries = entries;
+        EmulateEquipmentIdentity = emulateEquipmentIdentity;
+    }
 
     public override string ConnectionString { get; set; } = "";
     public override string Database => "";
@@ -262,6 +277,17 @@ internal sealed class FakeParameter : DbParameter
     public override bool SourceColumnNullMapping { get; set; }
     public override DataRowVersion SourceVersion { get; set; }
     public override void ResetDbType() { }
+}
+
+/// <summary>Windows principal, используемый в тестах серверной авторизации EquipmentForm.</summary>
+internal sealed class TestAuthenticationStateProvider : AuthenticationStateProvider
+{
+    /// <inheritdoc />
+    public override Task<AuthenticationState> GetAuthenticationStateAsync()
+    {
+        var identity = new ClaimsIdentity([new Claim(ClaimTypes.Name, "DOMAIN\\devadmin")], "Negotiate");
+        return Task.FromResult(new AuthenticationState(new ClaimsPrincipal(identity)));
+    }
 }
 
 /// <summary>

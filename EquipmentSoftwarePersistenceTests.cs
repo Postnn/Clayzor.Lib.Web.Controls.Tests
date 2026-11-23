@@ -33,7 +33,7 @@ public sealed class EquipmentSoftwarePersistenceTests
     public async Task InsertSoftware_UsesExclusiveEnd()
     {
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Scalar(1), Script.NonQuery()]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         await service.SaveSoftwareInstallationAsync(ValidInstallation());
 
@@ -46,7 +46,7 @@ public sealed class EquipmentSoftwarePersistenceTests
     public async Task UpdateSoftware_UsesIdAndExclusiveEnd()
     {
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Scalar(1), Script.NonQuery()]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
         var item = ValidInstallation();
         item.Id = 15;
 
@@ -71,7 +71,7 @@ public sealed class EquipmentSoftwarePersistenceTests
                 ("Установлено", "Version"), ("Дистрибутив", "Dist"), ("Примечания", "note"),
                 ("ИзменилФИО", "Editor"))),
         ]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         var installations = await service.GetSoftwareInstallationsAsync(7);
 
