@@ -32,30 +32,34 @@ public sealed class EquipmentSoftwarePersistenceTests
     [Fact]
     public async Task InsertSoftware_UsesExclusiveEnd()
     {
-        var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Scalar(1), Script.NonQuery()]));
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([
+            Script.Scalar(1), Script.Rows(Script.Row(("ЕстьХарактеристикиКомпьютера", (byte)1))), Script.NonQuery(),
+        ]));
         var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         await service.SaveSoftwareInstallationAsync(ValidInstallation());
 
-        Assert.Contains("INSERT vwОборудованиеПО", connection.CommandLog[1]);
-        Assert.Contains("CASE WHEN @До IS NOT NULL THEN DATEADD(day, 1, @До) ELSE NULL END", connection.CommandLog[1]);
+        Assert.Contains("INSERT vwОборудованиеПО", connection.CommandLog[2]);
+        Assert.Contains("CASE WHEN @До IS NOT NULL THEN DATEADD(day, 1, @До) ELSE NULL END", connection.CommandLog[2]);
     }
 
     /// <summary>UPDATE использует идентификатор установки и ту же границу даты.</summary>
     [Fact]
     public async Task UpdateSoftware_UsesIdAndExclusiveEnd()
     {
-        var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Scalar(1), Script.NonQuery()]));
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([
+            Script.Scalar(1), Script.Rows(Script.Row(("ЕстьХарактеристикиКомпьютера", (byte)1))), Script.NonQuery(),
+        ]));
         var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
         var item = ValidInstallation();
         item.Id = 15;
 
         await service.SaveSoftwareInstallationAsync(item);
 
-        Assert.Contains("UPDATE vwОборудованиеПО", connection.CommandLog[1]);
-        Assert.Contains("WHERE КодОборудованияПО = @КодОборудованияПО", connection.CommandLog[1]);
-        Assert.Contains("DATEADD(day, 1, @До)", connection.CommandLog[1]);
-        Assert.DoesNotContain("DELETE", connection.CommandLog[1]);
+        Assert.Contains("UPDATE vwОборудованиеПО", connection.CommandLog[2]);
+        Assert.Contains("WHERE КодОборудованияПО = @КодОборудованияПО", connection.CommandLog[2]);
+        Assert.Contains("DATEADD(day, 1, @До)", connection.CommandLog[2]);
+        Assert.DoesNotContain("DELETE", connection.CommandLog[2]);
     }
 
     /// <summary>История восстанавливает название ПО, поля и включительную дату.</summary>

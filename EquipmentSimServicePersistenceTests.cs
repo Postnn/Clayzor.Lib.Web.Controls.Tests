@@ -30,7 +30,9 @@ public sealed class EquipmentSimServicePersistenceTests
     [Fact]
     public async Task SaveService_UsesExclusiveEndAndSymmetricOverlap()
     {
-        var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Scalar(1), Script.NonQuery()]));
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([
+            Script.Scalar(1), Script.Rows(Script.Row(("ЕстьХарактеристикиSIM", (byte)1))), Script.NonQuery(),
+        ]));
         var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         await service.SaveSimServiceAsync(new EquipmentSimService
@@ -42,17 +44,19 @@ public sealed class EquipmentSimServicePersistenceTests
             DateFrom = DateTime.Today,
         });
 
-        Assert.Contains("INSERT vwSIMКартыДопУслугиСотОператора", connection.CommandLog[1]);
-        Assert.Contains("@От < ISNULL(До, '20500101')", connection.CommandLog[1]);
-        Assert.Contains("От < ISNULL(@До, '20500101')", connection.CommandLog[1]);
-        Assert.DoesNotContain("ОтПлан =", connection.CommandLog[1]);
+        Assert.Contains("INSERT vwSIMКартыДопУслугиСотОператора", connection.CommandLog[2]);
+        Assert.Contains("@От < ISNULL(До, '20500101')", connection.CommandLog[2]);
+        Assert.Contains("От < ISNULL(@До, '20500101')", connection.CommandLog[2]);
+        Assert.DoesNotContain("ОтПлан =", connection.CommandLog[2]);
     }
 
     /// <summary>Существующая услуга обновляется по идентификатору без DELETE.</summary>
     [Fact]
     public async Task UpdateService_UsesIdWithoutDelete()
     {
-        var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Scalar(1), Script.NonQuery()]));
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([
+            Script.Scalar(1), Script.Rows(Script.Row(("ЕстьХарактеристикиSIM", (byte)1))), Script.NonQuery(),
+        ]));
         var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         await service.SaveSimServiceAsync(new EquipmentSimService
@@ -66,8 +70,8 @@ public sealed class EquipmentSimServicePersistenceTests
             DateTo = DateTime.Today,
         });
 
-        Assert.Contains("UPDATE vwSIMКартыДопУслугиСотОператора", connection.CommandLog[1]);
-        Assert.DoesNotContain("DELETE", connection.CommandLog[1]);
+        Assert.Contains("UPDATE vwSIMКартыДопУслугиСотОператора", connection.CommandLog[2]);
+        Assert.DoesNotContain("DELETE", connection.CommandLog[2]);
     }
 
     /// <summary>История восстанавливает поля услуги и читает окончание минус один день.</summary>

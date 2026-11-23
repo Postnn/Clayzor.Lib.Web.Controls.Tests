@@ -132,7 +132,7 @@ public sealed class EquipmentSimDetailTests
 
     private static Dictionary<string, object?> DetailRow(byte subordinate) => Script.Row(
         ("КодОборудования", 7), ("НомерТелефона", "79000000001"), ("КодДоговора", 12),
-        ("Договор", "Билайн - Тест"), ("ОкруглениеСуммы", 2), ("СтавкаНДС", 20m),
+        ("КодЛицаИсполнителя", 908), ("Договор", "Билайн - Тест"), ("ОкруглениеСуммы", 2), ("СтавкаНДС", 20m),
         ("НДСВТарификации", (byte)0), ("НДСНаСумму", (byte)0), ("Подчинённый", subordinate));
 
     private static EquipmentSimCard Sim(int? onTotal, int? inRating) => new()

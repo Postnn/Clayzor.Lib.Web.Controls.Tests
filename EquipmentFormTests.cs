@@ -526,7 +526,7 @@ public sealed class EquipmentFormTests
         var link = page.Find("#equipment-locations tbody a");
         Assert.Equal("http://localhost/user?id=4", link.GetAttribute("href"));
 
-        await page.Find("#equipment-locations tbody a").ClickAsync();
+        await page.InvokeAsync(() => page.Find("#equipment-locations tbody a").Click());
 
         var invocation = context.JSInterop.Invocations.Single(call => call.Identifier == "clayOpen");
         Assert.Equal("http://localhost/user?id=4", invocation.Arguments[0]);
@@ -756,22 +756,21 @@ public sealed class EquipmentFormTests
         WaitForSn(page, "CLAY_TEST_7");
         var dialogAdded = TrackNextDialog(context);
         var pending = InvokeHandler(page, "OpenLocationDialogAsync", (object?)null);
-        var reference = await dialogAdded.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await dialogAdded.Task.WaitAsync(TimeSpan.FromSeconds(2));
         provider.WaitForAssertion(() => Assert.Single(provider.FindComponents<EquipmentLocationDialog>()));
         var dialog = provider.FindComponent<EquipmentLocationDialog>();
         Assert.True(dialog.Instance.RequireResponsible);
+        dialog.Instance.LocationId = 55;
+        dialog.Instance.FromDate = DateTime.Today;
+        dialog.Instance.FromTime = DateTime.Now.AddMinutes(-1).TimeOfDay;
 
-        await page.InvokeAsync(() => reference.Close(DialogResult.Ok(
-            new EquipmentLocationDialogResult(55, DateTime.Now.AddMinutes(-1), null, "", null))));
-        await pending;
+        await dialog.FindAll("button").Single(button => button.TextContent.Trim() == "OK").ClickAsync();
+
         Assert.Empty(fixture.Service.LocationSaves);
-        Assert.Contains("укажите ответственного сотрудника", page.Markup);
+        Assert.Contains("укажите ответственного сотрудника", dialog.Markup);
 
-        dialogAdded = TrackNextDialog(context);
-        pending = InvokeHandler(page, "OpenLocationDialogAsync", (object?)null);
-        reference = await dialogAdded.Task.WaitAsync(TimeSpan.FromSeconds(2));
-        await page.InvokeAsync(() => reference.Close(DialogResult.Ok(
-            new EquipmentLocationDialogResult(55, DateTime.Now.AddMinutes(-1), null, "", 4))));
+        dialog.Instance.EmployeeId = 4;
+        await dialog.FindAll("button").Single(button => button.TextContent.Trim() == "OK").ClickAsync();
         await pending;
 
         var save = Assert.Single(fixture.Service.LocationSaves);
@@ -950,16 +949,18 @@ public sealed class EquipmentFormTests
         WaitForSn(page, "CLAY_TEST_7");
         var dialogAdded = TrackNextDialog(context);
         var pending = InvokeHandler(page, "OpenResponsibleDialogAsync", EquipmentResponsibleDialogMode.Edit, responsible);
-        var dialog = await dialogAdded.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await dialogAdded.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var editor = provider.FindComponent<EquipmentResponsibleDialog>();
+        editor.Instance.ReturnDate = originalDate.AddDays(1);
+        editor.Instance.Notes = "new";
 
-        await page.InvokeAsync(() => dialog.Close(DialogResult.Ok(new EquipmentResponsibleDialogResult(
-            4, responsible.FromUtc, null, originalDate.AddDays(1), "new", null))));
-        await pending;
+        await editor.FindAll("button").Single(button => button.TextContent.Trim() == "OK").ClickAsync();
 
         Assert.Equal(originalDate, responsible.ReturnDate);
         Assert.Equal("old", responsible.Notes);
         Assert.Equal(originalDate.AddDays(1), fixture.Service.ResponsibleUpdated?.ReturnDate);
-        Assert.Contains("Ответственный не сохранён", page.Markup);
+        Assert.Equal("new", editor.Instance.Notes);
+        Assert.Contains("Команда «Сохранение ответственного» не выполнена", editor.Markup);
     }
 
     /// <summary>Ошибка соединения при удалении бухучёта не удаляет строку из UI и не запускает success-refresh.</summary>
@@ -980,7 +981,7 @@ public sealed class EquipmentFormTests
         await page.InvokeAsync(() => dialog.Close(DialogResult.Ok(true)));
         await pending;
 
-        page.WaitForAssertion(() => Assert.Contains("Результат удаления бухгалтерского учёта неизвестен", page.Markup));
+        page.WaitForAssertion(() => Assert.Contains("Результат команды «Удаление бухгалтерского учёта» неизвестен", page.Markup));
         Assert.Single(fixture.Service.StoredAccounting);
         Assert.Equal(0, fixture.Service.AccountingRefreshCalls);
     }
@@ -1005,21 +1006,60 @@ public sealed class EquipmentFormTests
         var dialogAdded = TrackNextDialog(context);
         var pending = InvokeHandler(page, "OpenAccountingDialogAsync", existing);
         var dialog = await dialogAdded.Task.WaitAsync(TimeSpan.FromSeconds(2));
-        var draft = provider.FindComponent<EquipmentAccountingDialog>().Instance.Value;
+        var editor = provider.FindComponent<EquipmentAccountingDialog>();
+        var draft = editor.Instance.Value;
         draft.IsMaterial = true;
         draft.DateFrom = DateTime.Today;
         draft.Notes = "new draft";
 
-        await page.InvokeAsync(() => dialog.Close(DialogResult.Ok(draft)));
-        await pending;
+        await editor.FindAll("button").Single(button => button.TextContent.Trim() == "OK").ClickAsync();
 
-        page.WaitForAssertion(() => Assert.Contains("Бухгалтерский учёт не сохранён", page.Markup));
+        editor.WaitForAssertion(() => Assert.Contains("Результат команды «Сохранение бухгалтерского учёта» неизвестен", editor.Markup));
         Assert.Same(draft, fixture.Service.LastAccountingDraft);
-        Assert.Equal("new draft", fixture.Service.LastAccountingDraft?.Notes);
-        Assert.Equal(existing.ChangedAt, fixture.Service.LastAccountingDraft?.ChangedAt);
+        Assert.Equal("new draft", editor.Instance.Value.Notes);
+        Assert.Equal(existing.ChangedAt, editor.Instance.Value.ChangedAt);
+        Assert.True(editor.FindAll("button").Single(button => button.TextContent.Trim() == "OK").HasAttribute("disabled"));
         Assert.Equal(0, fixture.Service.AccountingRefreshCalls);
         Assert.Equal("CLAY_TEST_ACC_DRAFT", FindSn(page).GetAttribute("value"));
         Assert.Equal("old", existing.Notes);
+    }
+
+    /// <summary>После commit ошибка refresh закрывает редактор как записанный; повтор выполняет только SELECT.</summary>
+    [Fact]
+    public async Task SaveAccountingRefreshFailure_DoesNotRepeatWrite()
+    {
+        var fixture = CreateFixture();
+        var existing = new EquipmentAccounting
+        {
+            Id = 41, EquipmentId = 7, OwnerId = 1, Notes = "old",
+            ChangedAt = new DateTime(2026, 11, 22, 18, 29, 44),
+        };
+        fixture.Service.StoredAccounting.Add(existing);
+        fixture.Service.AccountingRefreshException = SqlExceptionFactory.Create(53, "read after commit");
+        await using var context = fixture.Context;
+        var provider = context.Render<MudDialogProvider>();
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        var dialogAdded = TrackNextDialog(context);
+        var pending = InvokeHandler(page, "OpenAccountingDialogAsync", existing);
+        await dialogAdded.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var editor = provider.FindComponent<EquipmentAccountingDialog>();
+        editor.Instance.Value.IsMaterial = true;
+        editor.Instance.Value.DateFrom = DateTime.Today;
+        editor.Instance.Value.Notes = "committed draft";
+
+        await editor.FindAll("button").Single(button => button.TextContent.Trim() == "OK").ClickAsync();
+        await pending.WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.Equal(1, fixture.Service.SaveAccountingCalls);
+        Assert.Equal(1, fixture.Service.AccountingRefreshCalls);
+        Assert.Equal("committed draft", fixture.Service.StoredAccounting[0].Notes);
+        Assert.Contains("Сохранение бухгалтерского учёта: запись подтверждена, но экран не обновлён", page.Markup);
+
+        await InvokeHandler(page, "RefreshAccountingAsync");
+
+        Assert.Equal(1, fixture.Service.SaveAccountingCalls);
+        Assert.Equal(2, fixture.Service.AccountingRefreshCalls);
     }
 
     /// <summary>Обновление бухучёта сохраняет изменённые владельца, арендатора и документы основной формы.</summary>
@@ -1188,7 +1228,8 @@ public sealed class EquipmentFormTests
         fixture.Service.RoleForPersonResult = false;
         await InvokeHandler(page, "LoadCurrentAsync", 7);
         Assert.DoesNotContain("Подключить UPS:", page.Markup);
-        Assert.DoesNotContain("Операции", page.Markup);
+        Assert.False(PrivateBool(page.Instance, "_canManageUps"));
+        Assert.Contains("Операции", page.Markup);
         Assert.Empty(page.FindAll("#equipment-ups"));
     }
 
@@ -1243,6 +1284,66 @@ public sealed class EquipmentFormTests
         await InvokeHandler(page, "LoadCurrentAsync", 7);
         button = page.FindAll("button").Single(item => item.TextContent.Trim() == "Конфигурация");
         Assert.True(button.HasAttribute("disabled"));
+    }
+
+    /// <summary>Явная настройка сохранённого IP-телефона не выполняет SQL UPDATE.</summary>
+    [Fact]
+    public async Task ConfigureSavedPhone_UsesAtsCommandWithoutUpdate()
+    {
+        var fixture = CreateFixture(phoneConfig: true);
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+
+        await InvokeHandler(page, "ConfigurePhoneEquipmentAsync");
+
+        Assert.Equal(1, fixture.Service.SyncCalls);
+        Assert.Equal(0, fixture.Service.UpdateCalls);
+        Assert.Contains("Настройка оборудования выполнена", page.Markup);
+    }
+
+    /// <summary>Dirty-ввод не теряется и не сохраняется скрыто ради настройки телефона.</summary>
+    [Fact]
+    public async Task ConfigureDirtyPhone_KeepsInputAndSkipsCommand()
+    {
+        var fixture = CreateFixture(phoneConfig: true);
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        FindSn(page).Input("CLAY_TEST_PHONE_DRAFT");
+
+        await InvokeHandler(page, "ConfigurePhoneEquipmentAsync");
+
+        Assert.Equal(0, fixture.Service.SyncCalls);
+        Assert.Equal(0, fixture.Service.UpdateCalls);
+        Assert.Equal("CLAY_TEST_PHONE_DRAFT", FindSn(page).GetAttribute("value"));
+        Assert.Contains("Сохраните оборудование перед настройкой", page.Markup);
+    }
+
+    /// <summary>Global102 позволяет показать и скрыть пароль без роли редактирования43.</summary>
+    [Fact]
+    public async Task AccountPassword_ShowHideDoesNotRequireEditRole()
+    {
+        var fixture = CreateFixture(network: true);
+        fixture.Service.Roles.Clear();
+        fixture.Service.Roles.Add(102);
+        var account = new EquipmentAccount { EquipmentId = 7, Login = "reader", Notes = "note" };
+        fixture.Service.StoredAccounts.Add(account);
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        page.Find(".equipment-accounts-toggle").Click();
+
+        await InvokeHandler(page, "ToggleAccountPasswordAsync", account);
+
+        page.WaitForAssertion(() => Assert.Contains("secret", page.Markup));
+        Assert.Equal(1, fixture.Service.AccountPasswordCalls);
+        Assert.False(PrivateBool(page.Instance, "_canEdit"));
+
+        await InvokeHandler(page, "ToggleAccountPasswordAsync", account);
+
+        Assert.DoesNotContain("secret", page.Markup);
+        Assert.Equal(1, fixture.Service.AccountPasswordCalls);
     }
 
     /// <summary>Компьютерная секция сохраняет отдельные модули и даты стандартных конфигураций.</summary>
@@ -1428,12 +1529,12 @@ public sealed class EquipmentFormTests
         SetPrivate(page.Instance, "_canManageUps", true);
         var dialogAdded = TrackNextDialog(context);
         var pending = InvokeHandler(page, "OpenUpsDialogAsync", new UpsServerLink { UpsEquipmentId = 10, ServerEquipmentId = 7 });
-        var dialog = await dialogAdded.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await dialogAdded.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var editor = provider.FindComponent<EquipmentUpsDialog>();
 
-        await page.InvokeAsync(() => dialog.Close(DialogResult.Ok(new EquipmentUpsDialogResult([], []))));
-        await pending;
+        await editor.FindAll("button").Single(button => button.TextContent.Trim() == "OK").ClickAsync();
 
-        page.WaitForAssertion(() => Assert.Contains("Результат сохранения подключения UPS неизвестен", page.Markup));
+        editor.WaitForAssertion(() => Assert.Contains("Результат команды «Сохранение подключения UPS» неизвестен", editor.Markup));
         Assert.Equal(0, fixture.Service.UpsRefreshCalls);
     }
 
@@ -1565,6 +1666,7 @@ public sealed class EquipmentFormTests
         context.Services.AddScoped<DbManager>(_ => CreateDb());
         context.Services.AddSingleton(new ClayAppSettings());
         context.Services.AddScoped<ClayErrorService>();
+        context.Services.AddScoped<ClayDraftService>();
         context.Services.AddSingleton(new ClayFormWindowService(js));
         var navigation = new FakeNavigationManager();
         navigation.NavigateTo("http://localhost/Equipment/EquipmentForm?id=7");
@@ -1601,8 +1703,10 @@ public sealed class EquipmentFormTests
             Script.Rows(PhoneNumberRow()), Script.Rows(PhoneNumberRow()), Script.Rows(PhoneNumberRow()))));
         context.Services.AddSingleton(new PersonSelectDataSource(CreateDb(
             Script.Rows(PersonRow()), Script.Rows(PersonRow()), Script.Rows(PersonRow()), Script.Rows(PersonRow()))));
-        context.Services.AddSingleton(new EmployeeSelectDataSource(CreateDb()));
-        context.Services.AddSingleton(new LocationSelectDataSource(CreateDb()));
+        context.Services.AddSingleton(new EmployeeSelectDataSource(CreateDb(
+            Script.Rows(Script.Row(("КодСотрудника", 4), ("Сотрудник", "Тестов Администратор"))))));
+        context.Services.AddSingleton(new LocationSelectDataSource(CreateDb(
+            Script.Rows(Script.Row(("КодРасположения", 55), ("РасположениеPath1", "На руках"))))));
         context.Services.AddKeyedSingleton<DocumentSelectDataSource>("receipt", new DocumentSelectDataSource(CreateDb()));
         context.Services.AddKeyedSingleton<DocumentSelectDataSource>("writeoff", new DocumentSelectDataSource(CreateDb(writeOffEntries)));
         context.Services.AddSingleton(new AccountingPersonSelectDataSource(CreateDb(Script.Rows(PersonRow()))));
@@ -1817,7 +1921,7 @@ public sealed class EquipmentFormTests
                 HotelPhoneCount = request.IncludeHotelPhoneCount && phones.Count > 0 ? HotelPhoneCount : 0,
                 Locations = StoredLocations.Where(item => item.EquipmentId == request.EquipmentId).ToList(),
                 Responsibles = StoredResponsibles.ToList(),
-                Accounts = [],
+                Accounts = request.IncludeAccounts ? StoredAccounts.ToList() : [],
                 ComputerHistory = request.IncludeComputer ? StoredComputers.ToList() : [],
                 SimCards = [],
                 SimServices = [],
@@ -1849,8 +1953,18 @@ public sealed class EquipmentFormTests
         public override Task<IReadOnlyList<StandardConfiguration>> GetStandardConfigurationsAsync() =>
             Task.FromResult<IReadOnlyList<StandardConfiguration>>([]);
 
+        public List<EquipmentAccount> StoredAccounts { get; } = [];
+        public string AccountPassword { get; set; } = "secret";
+        public int AccountPasswordCalls { get; private set; }
+
         public override Task<IReadOnlyList<EquipmentAccount>> GetAccountsAsync(int equipmentId) =>
-            Task.FromResult<IReadOnlyList<EquipmentAccount>>([]);
+            Task.FromResult<IReadOnlyList<EquipmentAccount>>(StoredAccounts.ToList());
+
+        public override Task<string> GetAccountPasswordAsync(int equipmentId, string login)
+        {
+            AccountPasswordCalls++;
+            return Task.FromResult(AccountPassword);
+        }
 
         public string? SimDetailUrl { get; set; }
 
@@ -1879,6 +1993,12 @@ public sealed class EquipmentFormTests
         public override Task<IReadOnlyList<EquipmentAccounting>> GetAccountingAsync(int equipmentId)
         {
             AccountingRefreshCalls++;
+            if (AccountingRefreshException is not null)
+            {
+                var exception = AccountingRefreshException;
+                AccountingRefreshException = null;
+                return Task.FromException<IReadOnlyList<EquipmentAccounting>>(exception);
+            }
             return Task.FromResult<IReadOnlyList<EquipmentAccounting>>(StoredAccounting.ToList());
         }
 
@@ -1931,12 +2051,22 @@ public sealed class EquipmentFormTests
             UpsSaveException is not null ? Task.FromException(UpsSaveException) : Task.CompletedTask;
 
         public Exception? SaveAccountingException { get; set; }
+        public Exception? AccountingRefreshException { get; set; }
         public EquipmentAccounting? LastAccountingDraft { get; private set; }
+        public int SaveAccountingCalls { get; private set; }
 
         public override Task SaveAccountingAsync(EquipmentAccounting accounting)
         {
+            SaveAccountingCalls++;
             LastAccountingDraft = accounting;
-            return SaveAccountingException is not null ? Task.FromException(SaveAccountingException) : Task.CompletedTask;
+            if (SaveAccountingException is not null)
+                return Task.FromException(SaveAccountingException);
+            var index = StoredAccounting.FindIndex(item => item.Id == accounting.Id);
+            if (index >= 0)
+                StoredAccounting[index] = accounting;
+            else
+                StoredAccounting.Add(accounting);
+            return Task.CompletedTask;
         }
 
         public override Task DeleteAccountingAsync(int equipmentId, int accountingId) =>
@@ -1961,9 +2091,22 @@ public sealed class EquipmentFormTests
 
         public override Task<bool> CanUseAccountingAsync(int? personId) => Task.FromResult(AccountingAvailable);
 
-        public override Task<bool> HasRoleAsync(int roleId) => Task.FromResult(Roles.Contains(roleId));
-
-        public override Task<bool> HasRoleForPersonAsync(int roleId, int? personId) => Task.FromResult(RoleForPersonResult);
+        public override Task<Employee?> GetCurrentUserWithRolesAsync()
+        {
+            var employee = new Employee { Id = 4, Name = "Тестов Администратор" };
+            var grants = Roles.Select(roleId => new EmployeeRoleGrant
+            {
+                RoleId = roleId,
+                PersonId = roleId is 102 or 103 ? 0 : -1,
+            }).ToList();
+            if (RoleForPersonResult && Roles.Contains(43))
+            {
+                grants.Add(new EmployeeRoleGrant { RoleId = 43, PersonId = 0 });
+                grants.Add(new EmployeeRoleGrant { RoleId = 44, PersonId = 0 });
+            }
+            employee.SetRoleGrants(grants);
+            return Task.FromResult<Employee?>(employee);
+        }
 
         public override Task AttachNetworkAsync(int equipmentId)
         {
@@ -2061,7 +2204,18 @@ public sealed class EquipmentFormTests
             return Task.FromResult(SyncResults ?? (IReadOnlyList<PhoneSyncResult>)[]);
         }
 
+        public override Task<IReadOnlyList<PhoneSyncResult>> ConfigurePhoneEquipmentAsync(int equipmentId)
+        {
+            SyncCalls++;
+            if (SyncException is not null)
+                throw SyncException;
+            return Task.FromResult(SyncResults ?? (IReadOnlyList<PhoneSyncResult>)[]);
+        }
+
         public override Task<IReadOnlyList<PhoneSyncResult>> ExecutePhoneSyncOperationsAsync(
+            int equipmentId,
+            IReadOnlyCollection<EquipmentPhoneLink> original,
+            IReadOnlyCollection<EquipmentPhoneLink> current,
             IEnumerable<PhoneSyncOperation> operations)
         {
             SyncCalls++;

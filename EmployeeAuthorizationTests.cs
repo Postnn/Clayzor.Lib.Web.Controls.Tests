@@ -21,8 +21,8 @@ public sealed class EmployeeAuthorizationTests
         ]));
         var service = new EquipmentFormService(CreateDb(connection), new FakeAuthenticationStateProvider());
 
-        Assert.True(await service.HasRoleForPersonAsync(43, 1));
-        Assert.False(await service.HasRoleForPersonAsync(43, 2));
+        Assert.True(await service.HasRoleForPersonAsync(Роли.Специалист_по_инвентаризации_оборудования, 1));
+        Assert.False(await service.HasRoleForPersonAsync(Роли.Специалист_по_инвентаризации_оборудования, 2));
         Assert.Equal(2, connection.CommandLog.Count(sql => sql.Contains("fn_ТекущиеРоли")));
         Assert.Equal(1, connection.ParameterLog[1]["PersonId"]);
         Assert.Equal(2, connection.ParameterLog[3]["PersonId"]);
@@ -35,7 +35,7 @@ public sealed class EmployeeAuthorizationTests
         var connection = CreateConnection(new Queue<ScriptEntry>([Script.Rows()]));
         var service = new EquipmentFormService(CreateDb(connection), new FakeAuthenticationStateProvider());
 
-        Assert.False(await service.HasRoleAsync(43));
+        Assert.False(await service.HasRoleAsync(Роли.Специалист_по_инвентаризации_оборудования));
         Assert.Single(connection.CommandLog);
     }
 
@@ -48,7 +48,7 @@ public sealed class EmployeeAuthorizationTests
         ]));
         var service = new EquipmentFormService(CreateDb(connection), new FakeAuthenticationStateProvider());
 
-        Assert.False(await service.HasRoleAsync(43));
+        Assert.False(await service.HasRoleAsync(Роли.Специалист_по_инвентаризации_оборудования));
     }
 
     /// <summary>Ошибка identity не маскируется под допустимый отказ в правах.</summary>
@@ -60,7 +60,7 @@ public sealed class EmployeeAuthorizationTests
         ]));
         var service = new EquipmentFormService(CreateDb(connection), new FakeAuthenticationStateProvider());
 
-        await Assert.ThrowsAsync<SqlException>(() => service.HasRoleAsync(43));
+        await Assert.ThrowsAsync<SqlException>(() => service.HasRoleAsync(Роли.Специалист_по_инвентаризации_оборудования));
     }
 
     /// <summary>Отсутствие серверного provider не считается доказательством роли.</summary>
@@ -70,7 +70,7 @@ public sealed class EmployeeAuthorizationTests
         var connection = CreateConnection(new Queue<ScriptEntry>([]));
         var service = new EquipmentFormService(CreateDb(connection));
 
-        Assert.False(await service.HasRoleAsync(43));
+        Assert.False(await service.HasRoleAsync(Роли.Специалист_по_инвентаризации_оборудования));
         Assert.Empty(connection.CommandLog);
     }
 

@@ -49,6 +49,8 @@ public sealed class EquipmentEmployeeViewTests
         });
         context.Services.AddSingleton(new EmployeeSelectDataSource(CreateDb(Script.Rows(EmployeeRow()))));
         context.Services.AddSingleton(new LocationSelectDataSource(CreateDb(Script.Rows(LocationRow()))));
+        context.Services.AddSingleton(new Kesco.App.Web.Inventory.Services.EquipmentFormService(
+            CreateDb(Script.Rows()), new TestAuthenticationStateProvider()));
         var provider = context.Render<MudDialogProvider>();
         var parameters = new DialogParameters<TComponent>();
         configure(parameters);

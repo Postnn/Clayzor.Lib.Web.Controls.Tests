@@ -72,6 +72,7 @@ public sealed class EquipmentPhonePersistenceTests
     {
         DapperColumnMapper.Initialize();
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([
+            Script.Scalar(1),
             Script.Rows(Script.Row(("КодТелефонногоНомера", 1), ("КодТелефоннойСтанции", 0), ("XorcomName", ""))),
             Script.NonQuery(), Script.NonQuery(),
         ]));
@@ -89,6 +90,7 @@ public sealed class EquipmentPhonePersistenceTests
         Assert.DoesNotContain(recipients, item => Equals(EquipmentId(item), 7));
 
         var fallbackConnection = new ScriptedConnection(new Queue<ScriptEntry>([
+            Script.Scalar(1),
             Script.Rows(Script.Row(("КодТелефонногоНомера", 1), ("КодТелефоннойСтанции", 0), ("XorcomName", ""))),
             Script.NonQuery(),
         ]));
@@ -103,6 +105,7 @@ public sealed class EquipmentPhonePersistenceTests
     {
         DapperColumnMapper.Initialize();
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([
+            Script.Scalar(1),
             Script.Rows(Script.Row(("КодТелефонногоНомера", 1), ("КодТелефоннойСтанции", 2), ("XorcomName", "X"))),
             Script.Scalar(0), Script.NonQuery(),
             Script.Rows(Script.Row(("КодТелефонногоНомера", 2), ("КодТелефоннойСтанции", 0), ("XorcomName", ""))),
@@ -122,6 +125,7 @@ public sealed class EquipmentPhonePersistenceTests
     {
         DapperColumnMapper.Initialize();
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([
+            Script.Scalar(1),
             Script.Rows(Script.Row(("КодТелефонногоНомера", 2), ("КодТелефоннойСтанции", 0), ("XorcomName", ""))),
             Script.NonQuery(),
         ]));
@@ -131,7 +135,7 @@ public sealed class EquipmentPhonePersistenceTests
             [Link(1, ConnectionEquipmentId: 8)],
             [Link(1, ConnectionEquipmentId: 8), Link(2, ConnectionEquipmentId: 9)]);
 
-        Assert.Equal(2, connection.CommandLog.Count);
+        Assert.Equal(3, connection.CommandLog.Count);
         var requestedPhone = Assert.Single(connection.ParameterLog, item => item.ContainsKey("Id"));
         Assert.Equal(2, requestedPhone["Id"]);
         Assert.DoesNotContain(connection.ParameterLog, item =>
@@ -142,7 +146,7 @@ public sealed class EquipmentPhonePersistenceTests
     [Fact]
     public async Task SynchronizePhones_IgnoresMetadataOnlyChanges()
     {
-        var connection = new ScriptedConnection(new Queue<ScriptEntry>());
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Scalar(1)]));
         var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
         var errors = await service.SynchronizePhonesAsync(7,
@@ -150,7 +154,8 @@ public sealed class EquipmentPhonePersistenceTests
             [Link(1, ReturnDate: new DateTime(2026, 12, 2), Notes: "new")]);
 
         Assert.Empty(errors);
-        Assert.Empty(connection.CommandLog);
+        Assert.Single(connection.CommandLog);
+        Assert.DoesNotContain(connection.CommandLog, sql => sql.Contains("PhoneSync"));
     }
 
     /// <summary>Чтение восстанавливает поля связи и срок возврата.</summary>

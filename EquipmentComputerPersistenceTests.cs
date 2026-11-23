@@ -40,7 +40,13 @@ public sealed class EquipmentComputerPersistenceTests
     [Fact]
     public async Task SaveComputer_ComputesTotalsAndUsesDailyUpsert()
     {
-        var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Scalar(1), Script.NonQuery()]));
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([
+            Script.Scalar(1),
+            Script.Rows(Script.Row(
+                ("ModelId", 5), ("EquipmentTypeId", 1),
+                ("HasComputerCharacteristics", (byte)1), ("MemoryBanks", 3))),
+            Script.NonQuery(),
+        ]));
         var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
         var snapshot = new EquipmentComputerSnapshot
         {
@@ -60,8 +66,8 @@ public sealed class EquipmentComputerPersistenceTests
         Assert.Equal("100.5+200.25", snapshot.HdDetail);
         Assert.Equal(128, snapshot.SsdGb);
         Assert.Equal("128", snapshot.SsdDetail);
-        Assert.Contains("IF EXISTS", connection.CommandLog[1]);
-        Assert.Contains("INSERT Компьютеры", connection.CommandLog[1]);
+        Assert.Contains("IF EXISTS", connection.CommandLog[2]);
+        Assert.Contains("INSERT Компьютеры", connection.CommandLog[2]);
     }
 
     /// <summary>История восстанавливает поля и компоненты последнего снимка.</summary>
