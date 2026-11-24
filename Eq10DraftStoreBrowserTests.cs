@@ -215,6 +215,21 @@ public sealed class Eq10DraftStoreBrowserTests
                 .GetProperty("webSocketDebuggerUrl").GetString()!;
             using var client = new ClientWebSocket();
             await client.ConnectAsync(new Uri(socket), timeout.Token);
+            await InvokeCdpAsync(client, 1, "Page.enable", new { }, timeout.Token);
+            for (var attempt = 0; attempt < 200; attempt++)
+            {
+                using var ready = await InvokeCdpAsync(client, 2, "Runtime.evaluate", new
+                {
+                    expression = "document.readyState",
+                    returnByValue = true,
+                }, timeout.Token);
+                if (ready.RootElement.GetProperty("result").GetProperty("result")
+                    .GetProperty("value").GetString() == "complete")
+                    break;
+                if (attempt == 199)
+                    throw new TimeoutException("Fixture did not reach complete document state.");
+                await Task.Delay(50, timeout.Token);
+            }
             const string expression = """
                 (async () => {
                     for (let attempt = 0; attempt < 400; attempt++) {
@@ -225,16 +240,22 @@ public sealed class Eq10DraftStoreBrowserTests
                     throw new Error('Draft browser scenario did not publish a result.');
                 })()
                 """;
-            using var response = await InvokeCdpAsync(client, 1, "Runtime.evaluate", new
+            using var response = await InvokeCdpAsync(client, 3, "Runtime.evaluate", new
             {
                 expression,
                 awaitPromise = true,
                 returnByValue = true,
             }, timeout.Token);
+            if (response.RootElement.TryGetProperty("error", out var protocolError))
+                throw new InvalidOperationException($"Browser protocol failed: {protocolError}");
             if (response.RootElement.TryGetProperty("exceptionDetails", out var exception))
                 throw new InvalidOperationException($"Browser evaluation failed: {exception}");
-            return response.RootElement.GetProperty("result").GetProperty("result")
-                .GetProperty("value").Deserialize<BrowserResult>()
+            if (!response.RootElement.TryGetProperty("result", out var cdpResult) ||
+                !cdpResult.TryGetProperty("result", out var evaluation))
+                throw new InvalidOperationException($"Browser returned no evaluation result: {response.RootElement}");
+            if (!evaluation.TryGetProperty("value", out var value))
+                throw new InvalidOperationException($"Browser returned no result value: {response.RootElement}");
+            return value.Deserialize<BrowserResult>()
                 ?? throw new InvalidOperationException("Empty browser result.");
         }
         finally
