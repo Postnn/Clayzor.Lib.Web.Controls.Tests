@@ -65,6 +65,27 @@ public sealed class TerritorialEntityTests
     }
 
     [Fact]
+    public void DraftRootSelectorIsExplicitAndUniquePerCard()
+    {
+        var territory = new TerritorialEntityForm();
+        var phone = new PhoneCodeEntityForm();
+        static string Selector(object card) => (string)card.GetType().BaseType!
+            .GetProperty("DraftRootSelector", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .GetValue(card)!;
+        static string RootClass(object card) => ((Clayzor.Lib.Web.Controls.Components.Form.ClayEntityFormOptions)card.GetType().BaseType!
+            .GetProperty("FormOptions", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .GetValue(card)!).Class!;
+
+        var territorySelector = Selector(territory);
+        var phoneSelector = Selector(phone);
+        Assert.StartsWith(".territory-draft-", territorySelector);
+        Assert.StartsWith(".territory-draft-", phoneSelector);
+        Assert.NotEqual(territorySelector, phoneSelector);
+        Assert.Equal(territorySelector[1..], RootClass(territory));
+        Assert.Equal(phoneSelector[1..], RootClass(phone));
+    }
+
+    [Fact]
     public async Task RootReadIsParameterizedAndDistinguishesSqlErrorFromAnEmptyLevel()
     {
         using var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Rows(), Script.Error(new InvalidOperationException("read failed"))]));
