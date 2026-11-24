@@ -22,6 +22,7 @@ public sealed class EquipmentSimDialogTests
         await using var context = new BunitContext();
         context.JSInterop.Mode = JSRuntimeMode.Loose;
         context.Services.AddMudServices();
+        context.Services.AddScoped<Clayzor.Lib.Web.Controls.Services.ClayDraftService>();
         context.Services.AddSingleton<IConfiguration>(new ConfigurationManager());
         context.Services.AddSingleton(new EquipmentFormService(CreateDb(), new TestAuthenticationStateProvider()));
         context.Services.AddSingleton(new MobileContractSelectDataSource(CreateDb(
@@ -97,12 +98,45 @@ public sealed class EquipmentSimDialogTests
         Assert.DoesNotContain(connection.CommandLog, sql => sql.Contains("UPDATE"));
     }
 
+    /// <summary>Сохранённое несоответствующее лицо получает advisory и не удаляется.</summary>
+    [Fact]
+    public async Task ExistingInvalidPerson_ShowsAdvisoryWithoutClearingSelection()
+    {
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([
+            Script.Scalar(1), Script.Rows(), Script.Scalar(0),
+        ]));
+        await using var context = CreateContext(connection);
+        var provider = context.Render<MudDialogProvider>();
+        await ShowExistingAsync(context, 9);
+        var dialog = provider.FindComponent<EquipmentSimDialog>();
+
+        dialog.WaitForAssertion(() => Assert.Contains("не соответствует договору", dialog.Markup));
+        Assert.Equal(9, dialog.Instance.PersonalDataPersonId);
+    }
+
+    /// <summary>Ошибка advisory отличается от отрицательного результата и сохраняет лицо.</summary>
+    [Fact]
+    public async Task AdvisoryReadFailure_IsDistinctAndPreservesSelection()
+    {
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([
+            Script.Scalar(1), Script.Rows(), Script.Error(SqlExceptionFactory.Create(50000, "read failed")),
+        ]));
+        await using var context = CreateContext(connection);
+        var provider = context.Render<MudDialogProvider>();
+        await ShowExistingAsync(context, 9);
+        var dialog = provider.FindComponent<EquipmentSimDialog>();
+
+        dialog.WaitForAssertion(() => Assert.Contains("не отрицательный результат", dialog.Markup));
+        Assert.Equal(9, dialog.Instance.PersonalDataPersonId);
+    }
+
     private static BunitContext CreateContext(ScriptedConnection connection)
     {
         DapperColumnMapper.Initialize();
         var context = new BunitContext();
         context.JSInterop.Mode = JSRuntimeMode.Loose;
         context.Services.AddMudServices();
+        context.Services.AddScoped<Clayzor.Lib.Web.Controls.Services.ClayDraftService>();
         context.Services.AddSingleton<IConfiguration>(new ConfigurationManager());
         context.Services.AddSingleton(new EquipmentFormService(CreateDb(connection), new TestAuthenticationStateProvider()));
         context.Services.AddSingleton(new MobileContractSelectDataSource(CreateDb(
@@ -111,7 +145,7 @@ public sealed class EquipmentSimDialogTests
         return context;
     }
 
-    private static async Task<IDialogReference> ShowExistingAsync(BunitContext context) =>
+    private static async Task<IDialogReference> ShowExistingAsync(BunitContext context, int? personalDataPersonId = null) =>
         await context.Services.GetRequiredService<IDialogService>().ShowAsync<EquipmentSimDialog>(
             "SIM", new DialogParameters<EquipmentSimDialog>
             {
@@ -121,6 +155,7 @@ public sealed class EquipmentSimDialogTests
                 { dialog => dialog.ActivatedDate, new DateTime(2026, 11, 18) },
                 { dialog => dialog.ActivatedTime, new TimeSpan(8, 30, 0) },
                 { dialog => dialog.ContractId, 10 },
+                { dialog => dialog.PersonalDataPersonId, personalDataPersonId },
             });
 
     private static DbManager CreateDb(params ScriptEntry[] entries) =>

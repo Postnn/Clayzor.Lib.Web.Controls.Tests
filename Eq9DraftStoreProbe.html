@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="ru">
+<head><meta charset="utf-8"><title>EQ9 draft store probe</title></head>
+<body>
+<div class="equipment-form">
+    <input id="main" data-draft-key="main.sn" data-draft-scope="main">
+    <input id="account-secret" data-draft-key="account.password" data-draft-scope="child:account:A">
+    <input id="account-notes" data-draft-key="account.notes" data-draft-scope="child:account:A">
+    <input id="accepted" data-draft-key="accepted.value" data-draft-scope="child:accepted">
+    <input id="select" role="combobox" data-draft-key="main.owner" data-draft-scope="main">
+    <input id="secret" data-draft-key="sim.pin" data-draft-scope="main">
+</div>
+<pre id="result">RUNNING</pre>
+<script src="../../src/Clayzor.Lib.Web.Controls/wwwroot/js/clayDraftStore.js"></script>
+<script>
+(() => {
+    const results = [];
+    const store = window.clayDraftStore;
+    const prefix = `eq9-${Date.now()}-${Math.random()}`;
+    const assert = (condition, message) => { if (!condition) throw new Error(message); };
+    const input = id => document.getElementById(id);
+    const enter = (id, value) => {
+        const element = input(id);
+        element.disabled = false;
+        element.value = value;
+        element.dispatchEvent(new Event('input', { bubbles: true }));
+    };
+    const register = (user, entity, schema = 2) => store.register('equipment-form', entity, user, schema);
+    const finish = registration => store.unregister(registration.registrationId);
+    const run = async (name, test) => {
+        try {
+            await test();
+            results.push({ name, passed: true });
+        } catch (error) {
+            results.push({ name, passed: false, error: String(error) });
+        }
+    };
+    const openDb = () => new Promise((resolve, reject) => {
+        const request = indexedDB.open('clayzor-drafts-v1', 1);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+    });
+    const getRecord = async id => {
+        const db = await openDb();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction('drafts', 'readonly');
+            const request = tx.objectStore('drafts').get(id);
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error);
+        });
+    };
+    const putRecord = async record => {
+        const db = await openDb();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction('drafts', 'readwrite');
+            tx.objectStore('drafts').put(record);
+            tx.oncomplete = resolve;
+            tx.onerror = () => reject(tx.error);
+        });
+    };
+    const recordId = (user, entity) => {
+        const draftId = sessionStorage.getItem(`clay-draft:${user}:equipment-form:${entity}`);
+        return `${user}|equipment-form|${entity}|${draftId}`;
+    };
+
+    (async () => {
+        await run('atomic first user key across entities', async () => {
+            const user = `${prefix}:keys`;
+            const first = await register(user, '8');
+            const second = await register(user, '9');
+            await Promise.all([
+                store.saveTyped(first.registrationId, '{"entity":"8"}'),
+                store.saveTyped(second.registrationId, '{"entity":"9"}'),
+            ]);
+            await Promise.all([finish(first), finish(second)]);
+            const restoredFirst = await register(user, '8');
+            const restoredSecond = await register(user, '9');
+            assert(restoredFirst.typedState === '{"entity":"8"}', 'first draft cannot be decrypted');
+            assert(restoredSecond.typedState === '{"entity":"9"}', 'second draft cannot be decrypted');
+            await Promise.all([finish(restoredFirst), finish(restoredSecond)]);
+        });
+
+        await run('accepted scopes and late revisions', async () => {
+            const user = `${prefix}:scopes`;
+            let registration = await register(user, '10');
+            const dirtyMain = '{"serial":"UNSAVED_PARENT"}';
+            await store.saveTyped(registration.registrationId, dirtyMain);
+            await store.saveTypedScope(registration.registrationId, 'child:account:A', '{"notes":"N"}');
+            await store.saveTypedScope(registration.registrationId, 'child:accepted', '{"value":"accepted"}');
+            enter('main', 'UNSAVED_PARENT');
+            enter('account-secret', 'accepted-secret');
+            enter('account-notes', 'N');
+            enter('accepted', 'accepted-raw');
+            await store.canReload();
+            const operation = JSON.parse(await store.beginOperationIntent(registration.registrationId, JSON.stringify({
+                version: 1,
+                kind: 'account-save',
+                data: '{"equipmentId":10,"originalVersion":4}',
+                acceptedScopes: ['child:account:A', 'child:accepted'],
+                attemptId: 'scope-attempt',
+                acceptLegacyTyped: false,
+            })));
+            await store.saveTypedScope(registration.registrationId, 'child:account:A', '{"notes":"N+1"}');
+            enter('account-notes', 'N+1');
+            await store.canReload();
+            await store.commitOperation(registration.registrationId, operation.revision, dirtyMain);
+            await finish(registration);
+
+            input('main').value = 'DB';
+            input('account-secret').value = 'DB';
+            input('account-notes').value = 'DB';
+            input('accepted').value = 'DB';
+            registration = await register(user, '10');
+            assert(registration.typedState === dirtyMain, 'child commit deleted dirty main');
+            assert(registration.typedScopes['child:account:A'] === '{"notes":"N+1"}', 'late typed input was accepted');
+            assert(!registration.typedScopes['child:accepted'], 'accepted typed scope survived');
+            await store.applyRaw(registration.registrationId);
+            assert(input('main').value === 'UNSAVED_PARENT', 'main raw was deleted');
+            assert(input('account-notes').value === 'N+1', 'late raw input was deleted');
+            assert(input('account-secret').value === 'DB', 'accepted raw secret survived');
+            assert(input('accepted').value === 'DB', 'accepted raw scope survived');
+
+            await store.discardScope(registration.registrationId, 'child:account:A');
+            let lateSaveBlocked = false;
+            try {
+                await store.saveTypedScope(registration.registrationId, 'child:account:A', '{"notes":"late"}');
+            } catch {
+                lateSaveBlocked = true;
+            }
+            assert(lateSaveBlocked, 'cancelled scope accepted late autosave');
+            await store.openScope(registration.registrationId, 'child:account:A');
+            await store.saveTypedScope(registration.registrationId, 'child:account:A', '{"notes":"new-editor"}');
+            await finish(registration);
+            registration = await register(user, '10');
+            assert(registration.typedState === dirtyMain, 'scope cancel deleted main');
+            assert(registration.typedScopes['child:account:A'] === '{"notes":"new-editor"}', 'explicit reopen did not work');
+            await finish(registration);
+        });
+
+        await run('durable unknown blocks another attempt', async () => {
+            const user = `${prefix}:unknown`;
+            let registration = await register(user, '11');
+            const operation = JSON.parse(await store.beginOperationIntent(registration.registrationId, JSON.stringify({
+                version: 1,
+                kind: 'equipment-save',
+                data: '{"equipmentId":11,"originalVersion":7}',
+                acceptedScopes: ['main'],
+                attemptId: 'unknown-attempt',
+                acceptLegacyTyped: false,
+            })));
+            await store.unknownOperation(registration.registrationId, operation.revision);
+            await finish(registration);
+            registration = await register(user, '11');
+            assert(typeof registration.operation === 'string', 'operation is not versioned JSON string');
+            const restored = JSON.parse(registration.operation);
+            assert(restored.status === 'unknown' && restored.attemptId === 'unknown-attempt', 'unknown marker lost');
+            let blocked = false;
+            try { await store.beginOperation(registration.registrationId, '{"Kind":"replay"}'); } catch { blocked = true; }
+            assert(blocked, 'unknown attempt was overwritten');
+            assert((await store.getHealth(registration.registrationId)).hasOperation, 'health hides unresolved operation');
+            await store.rejectOperation(registration.registrationId, restored.revision);
+            await finish(registration);
+        });
+
+        await run('failed setup preserves bytes and can retry', async () => {
+            const user = `${prefix}:setup`;
+            let registration = await register(user, '12');
+            await store.saveTyped(registration.registrationId, '{"safe":true}');
+            await finish(registration);
+            const id = recordId(user, '12');
+            const original = await getRecord(id);
+            const corrupted = { ...original, data: 'not-base64!' };
+            await putRecord(corrupted);
+            let decryptFailed = false;
+            try { await register(user, '12'); } catch { decryptFailed = true; }
+            assert(decryptFailed, 'corrupt draft was opened');
+            assert((await getRecord(id)).data === 'not-base64!', 'decrypt failure changed durable bytes');
+            await putRecord(original);
+            registration = await register(user, '12');
+            assert(registration.typedState === '{"safe":true}', 'decrypt retry failed');
+            await finish(registration);
+            const beforeUnsupported = JSON.stringify(await getRecord(id));
+            let unsupportedFailed = false;
+            try { await register(user, '12', 3); } catch { unsupportedFailed = true; }
+            assert(unsupportedFailed, 'unsupported schema was opened');
+            assert(JSON.stringify(await getRecord(id)) === beforeUnsupported, 'unsupported migration changed record');
+            registration = await register(user, '12');
+            assert(registration.typedState === '{"safe":true}', 'supported retry failed');
+            await finish(registration);
+        });
+
+        await run('storage health gates reload and recovers', async () => {
+            const user = `${prefix}:health`;
+            const registration = await register(user, '13');
+            const originalTransaction = IDBDatabase.prototype.transaction;
+            let fail = true;
+            IDBDatabase.prototype.transaction = function (name, mode, ...args) {
+                if (fail && name === 'drafts' && mode === 'readwrite') throw new DOMException('Quota', 'QuotaExceededError');
+                return originalTransaction.call(this, name, mode, ...args);
+            };
+            try {
+                let failed = false;
+                try { await store.saveTyped(registration.registrationId, '{"input":1}'); } catch { failed = true; }
+                assert(failed, 'storage failure was hidden');
+                assert(!(await store.getHealth(registration.registrationId)).healthy, 'health reports protected after failure');
+                assert(!(await store.canReload()), 'reload allowed with failed write');
+                fail = false;
+                await store.saveTyped(registration.registrationId, '{"input":2}');
+                assert(await store.canReload(), 'successful retry did not restore health');
+            } finally {
+                IDBDatabase.prototype.transaction = originalTransaction;
+            }
+            await finish(registration);
+        });
+
+        await run('applyRaw promise and readiness result', async () => {
+            const user = `${prefix}:raw`;
+            let registration = await register(user, '14');
+            enter('select', 'draft-owner');
+            enter('secret', 'draft-pin');
+            await store.canReload();
+            await finish(registration);
+            input('select').value = 'DB';
+            input('secret').value = 'DB';
+            input('secret').disabled = true;
+            window.claySelect = {
+                restoreDraftText: async (id, value) => {
+                    await new Promise(resolve => setTimeout(resolve, 40));
+                    input(id).value = value;
+                },
+            };
+            registration = await register(user, '14');
+            const promise = store.applyRaw(registration.registrationId);
+            assert(typeof promise.then === 'function', 'applyRaw does not return Promise');
+            const result = await promise;
+            assert(input('select').value === 'draft-owner', 'await returned before select restore');
+            assert(result.pending.includes('data:sim.pin:0'), 'disabled input was reported as restored');
+            input('secret').disabled = false;
+            await store.applyRaw(registration.registrationId);
+            assert(input('secret').value === 'draft-pin', 'readiness retry did not restore secret');
+            await finish(registration);
+            const reload = await store.getReloadHealth();
+            assert(reload.participants === 0 && !reload.healthy, 'empty registrations falsely report full protection');
+        });
+
+        document.getElementById('result').textContent = JSON.stringify({
+            passed: results.every(result => result.passed),
+            results,
+        }, null, 2);
+        document.title = results.every(result => result.passed) ? 'EQ9 PASS' : 'EQ9 FAIL';
+    })().catch(error => {
+        document.getElementById('result').textContent = JSON.stringify({ passed: false, fatal: String(error) });
+        document.title = 'EQ9 FAIL';
+    });
+})();
+</script>
+</body>
+</html>

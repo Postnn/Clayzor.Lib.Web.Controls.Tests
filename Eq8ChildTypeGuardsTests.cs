@@ -111,7 +111,7 @@ public sealed class Eq8ChildTypeGuardsTests
         "software" => service.SaveSoftwareInstallationAsync(ValidInstallation()),
         "sim-save" => service.SaveSimAsync(ValidSim()),
         "sim-delete" => service.DeleteSimAsync(7),
-        "sim-service" => service.SaveSimServiceAsync(ValidSimService()),
+        "sim-service" => service.SaveSimServiceAsync(ValidSimService(), DateTime.Today),
         _ => throw new ArgumentOutOfRangeException(nameof(operation)),
     };
 

@@ -798,6 +798,49 @@ public sealed class EquipmentFormTests
             ((Dictionary<DateTime, DateTime>)GetPrivate(page.Instance, "_localDates")!)[changedAt]);
     }
 
+    /// <summary>Реальный OK компьютера ждёт запись и не закрывает редактор при отложенной ошибке.</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ComputerSave_ActualCallbackAwaitsWriteAndObservesFault(bool fault)
+    {
+        var fixture = CreateFixture(computer: true);
+        await using var context = fixture.Context;
+        var provider = context.Render<MudDialogProvider>();
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        var dialogAdded = TrackNextDialog(context);
+        var pending = InvokeHandler(page, "OpenComputerDialogAsync");
+        var reference = await dialogAdded.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var dialog = provider.FindComponent<EquipmentComputerDialog>();
+        var initialRefreshes = fixture.Service.ComputerRefreshCalls;
+
+        var click = dialog.FindAll("button").Single(button => button.TextContent.Trim() == "OK").ClickAsync();
+        await fixture.Service.ComputerSaveRequested.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.True(PrivateBool(page.Instance, "_saving"));
+        Assert.Equal(initialRefreshes, fixture.Service.ComputerRefreshCalls);
+        Assert.False(click.IsCompleted);
+
+        if (fault)
+            fixture.Service.ComputerSaveCompletion.SetException(new InvalidOperationException("Отложенная ошибка записи"));
+        else
+            fixture.Service.ComputerSaveCompletion.SetResult();
+        await click;
+
+        Assert.Equal(1, fixture.Service.ComputerSaveCalls);
+        if (fault)
+        {
+            Assert.Contains("Отложенная ошибка записи", dialog.Markup);
+            Assert.Equal(initialRefreshes, fixture.Service.ComputerRefreshCalls);
+            await provider.InvokeAsync(() => reference.Close(DialogResult.Cancel()));
+        }
+        else
+        {
+            Assert.Equal(initialRefreshes + 1, fixture.Service.ComputerRefreshCalls);
+        }
+        await pending;
+    }
+
     /// <summary>При редактировании неизменяемые расположение, дата и время визуально и функционально отключены.</summary>
     [Fact]
     public async Task LocationEdit_DisablesFixedPeriodFields()
@@ -830,6 +873,104 @@ public sealed class EquipmentFormTests
         await pending;
     }
 
+    /// <summary>Child refresh сохраняет локальный SN и исходный token при чужом изменении того же поля.</summary>
+    [Fact]
+    public async Task ChildRefresh_ConflictingMainChange_DoesNotIssueFreshTokenOrOverwrite()
+    {
+        var fixture = CreateFixture();
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        FindSn(page).Input("CLAY_TEST_LOCAL");
+        var original = OriginalEquipment(page);
+        var fresh = OriginalEquipment(page);
+        fresh.SerialNumber = "CLAY_TEST_FOREIGN";
+        fresh.Description = "Независимое изменение";
+        fresh.ChangedAtUtc = fresh.ChangedAtUtc.AddSeconds(1);
+        fixture.Service.NextModel = fresh;
+
+        await InvokeHandler(page, "RefreshMainAfterChildWriteAsync", original);
+        await InvokeSave(page, false);
+
+        Assert.Equal("CLAY_TEST_LOCAL", CurrentModel(page.Instance).SerialNumber);
+        Assert.Equal("Независимое изменение", CurrentModel(page.Instance).Description);
+        Assert.Equal(original.ChangedAtUtc, CurrentModel(page.Instance).ChangedAtUtc);
+        Assert.Equal("CLAY_TEST_7", OriginalEquipment(page).SerialNumber);
+        Assert.Equal(0, fixture.Service.UpdateCalls);
+        Assert.Contains("SerialNumber", GetPrivate(page.Instance, "_mainConflictMessage")!.ToString());
+    }
+
+    /// <summary>Child refresh объединяет независимые поля и принимает свежий token без ложного конфликта.</summary>
+    [Fact]
+    public async Task ChildRefresh_IndependentChanges_MergesWithoutConflict()
+    {
+        var fixture = CreateFixture();
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        FindSn(page).Input("CLAY_TEST_LOCAL");
+        var original = OriginalEquipment(page);
+        var fresh = OriginalEquipment(page);
+        fresh.Description = "Независимое изменение";
+        fresh.ChangedAtUtc = fresh.ChangedAtUtc.AddSeconds(1);
+        fixture.Service.NextModel = fresh;
+
+        await InvokeHandler(page, "RefreshMainAfterChildWriteAsync", original);
+
+        Assert.Equal("CLAY_TEST_LOCAL", CurrentModel(page.Instance).SerialNumber);
+        Assert.Equal("Независимое изменение", CurrentModel(page.Instance).Description);
+        Assert.Equal(fresh.ChangedAtUtc, CurrentModel(page.Instance).ChangedAtUtc);
+        Assert.Null(GetPrivate(page.Instance, "_mainConflictMessage"));
+        Assert.True(ValidateBusinessRules(page.Instance));
+    }
+
+    /// <summary>Поздний ответ и ошибка владельца A не перекрывают успешно выбранного B.</summary>
+    [Fact]
+    public async Task OwnerChanged_LateFaultFromA_DoesNotOverwriteB()
+    {
+        var fixture = CreateFixture();
+        var a = new TaskCompletionSource<Employee?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var b = new TaskCompletionSource<Employee?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.Service.OwnerReadCompletions.Enqueue(a);
+        fixture.Service.OwnerReadCompletions.Enqueue(b);
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        fixture.Service.DeferOwnerRead = true;
+
+        var pendingA = InvokeHandler(page, "OnOwnerChangedAsync", 2);
+        var pendingB = InvokeHandler(page, "OnOwnerChangedAsync", 3);
+        b.SetResult(null);
+        await pendingB;
+        a.SetException(new InvalidOperationException("late read failure"));
+        await pendingA;
+
+        Assert.Equal(3, CurrentModel(page.Instance).OwnerId);
+        Assert.Equal(3, GetPrivate(page.Instance, "_confirmedOwnerId"));
+        Assert.Null(GetPrivate(page.Instance, "_validationMessage"));
+    }
+
+    /// <summary>Нетронутый UPS test сохраняет исходный UTC instant с миллисекундами.</summary>
+    [Fact]
+    public async Task UpsSave_UnchangedTimestamp_PreservesFractionalRawInstant()
+    {
+        var fixture = CreateFixture();
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        var instant = new DateTime(2026, 11, 18, 9, 30, 0, DateTimeKind.Utc).AddMilliseconds(500);
+        var original = new UpsTest { Id = 5, UpsEquipmentId = 10, TestedAt = instant, BatteryTime = 10 };
+        var local = CloneUpsTestForTest(original, instant.AddMinutes(180));
+
+        await InvokeHandler(page, "SaveUpsDraftAsync",
+            new UpsServerLink { UpsEquipmentId = 10 },
+            Array.Empty<UpsServerLink>(),
+            new[] { original },
+            new EquipmentUpsDialogResult([], [local]));
+
+        Assert.Equal(instant, Assert.Single(fixture.Service.LastUpsCurrentTests!).TestedAt);
+    }
+
     /// <summary>Диалог прежней записи после смены id не выполняет SQL для новой записи.</summary>
     [Fact]
     public async Task AccountDialogFromPreviousId_DoesNotSaveIntoNewEquipment()
@@ -842,13 +983,22 @@ public sealed class EquipmentFormTests
         var dialogAdded = TrackNextDialog(context);
         var pending = InvokeHandler(page, "OpenAccountDialogAsync", (object?)null);
         var dialog = await dialogAdded.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var editor = provider.FindComponent<EquipmentAccountDialog>();
+        var editorInstance = editor.Instance;
+        editorInstance.Login = "account-from-a";
+        var apply = typeof(EquipmentAccountDialog).GetMethod("Apply",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
 
         await page.InvokeAsync(() => fixture.Navigation.NavigateTo("http://localhost/Equipment/EquipmentForm?id=8"));
         WaitForSn(page, "CLAY_TEST_8");
-        dialog.Close(DialogResult.Ok(new EquipmentAccountDialogResult("account-from-a", "", false, "")));
-        await pending;
+        await page.InvokeAsync(() => (Task)apply.Invoke(editorInstance, null)!);
 
         Assert.Equal(0, fixture.Service.AddAccountCalls);
+        Assert.Equal("Контекст оборудования изменился. Откройте форму повторно.",
+            typeof(EquipmentEditorDialogBase<EquipmentAccountDialogResult>).GetField("_error",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(editorInstance));
+        dialog.Close(DialogResult.Cancel());
+        await pending;
     }
 
     /// <summary>Подтверждение удаления SIM прежней записи аннулируется после смены id.</summary>
@@ -1022,6 +1172,50 @@ public sealed class EquipmentFormTests
         Assert.Equal(0, fixture.Service.AccountingRefreshCalls);
         Assert.Equal("CLAY_TEST_ACC_DRAFT", FindSn(page).GetAttribute("value"));
         Assert.Equal("old", existing.Notes);
+    }
+
+    /// <summary>Unknown child переживает Cancel, Refresh и повторное открытие без Discard и потери baseline.</summary>
+    [Fact]
+    public async Task UnknownAccounting_CancelRefreshReopen_PreservesMarkerAndDraft()
+    {
+        var fixture = CreateFixture();
+        var existing = new EquipmentAccounting
+        {
+            Id = 41, EquipmentId = 7, OwnerId = 1, Notes = "old",
+            ChangedAt = new DateTime(2026, 11, 22, 18, 29, 44),
+        };
+        fixture.Service.StoredAccounting.Add(existing);
+        fixture.Service.SaveAccountingException = SqlExceptionFactory.Create(-2, "timeout");
+        await using var context = fixture.Context;
+        var provider = context.Render<MudDialogProvider>();
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        var dialogAdded = TrackNextDialog(context);
+        var pending = InvokeHandler(page, "OpenAccountingDialogAsync", existing);
+        var reference = await dialogAdded.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var editor = provider.FindComponent<EquipmentAccountingDialog>();
+        editor.Instance.Value.IsMaterial = true;
+        editor.Instance.Value.DateFrom = DateTime.Today;
+        editor.Instance.Value.Notes = "unknown draft";
+        await editor.FindAll("button").Single(button => button.TextContent.Trim() == "OK").ClickAsync();
+        await provider.InvokeAsync(() => reference.Close(DialogResult.Cancel()));
+        await pending;
+
+        Assert.True(PrivateBool(page.Instance, "_draftOperationUnresolved"));
+        Assert.Contains("unknown draft", GetPrivate(page.Instance, "_restoredEditorState")!.ToString());
+        await InvokeHandler(page, "RefreshAsync");
+        Assert.DoesNotContain(context.JSInterop.Invocations, call => call.Identifier == "clayDraftStore.discard");
+
+        var reopenedAdded = TrackNextDialog(context);
+        var reopenedPending = InvokeHandler(page, "OpenAccountingDialogAsync", existing);
+        var reopenedReference = await reopenedAdded.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var reopened = provider.FindComponent<EquipmentAccountingDialog>();
+        Assert.Equal("unknown draft", reopened.Instance.Value.Notes);
+        Assert.Equal(existing.ChangedAt, reopened.Instance.Value.ChangedAt);
+        Assert.True(PrivateBool(page.Instance, "_draftOperationUnresolved"));
+
+        await provider.InvokeAsync(() => reopenedReference.Close(DialogResult.Cancel()));
+        await reopenedPending;
     }
 
     /// <summary>После commit ошибка refresh закрывает редактор как записанный; повтор выполняет только SELECT.</summary>
@@ -1661,6 +1855,12 @@ public sealed class EquipmentFormTests
         context.JSInterop.Mode = JSRuntimeMode.Loose;
         context.JSInterop.Setup<int>("clayGridTimeZone.getOffsetMinutes", _ => true).SetResult(180);
         context.JSInterop.Setup<long>("clayGridTimeZone.localDateTimeToUtcMilliseconds", _ => true).SetResult(0L);
+        context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.register", _ => true)
+            .SetResult(new ClayDraftRestore("test-registration", false, 0, null, null));
+        context.JSInterop.Setup<ClayDraftStorageHealth>("clayDraftStore.getHealth", _ => true)
+            .SetResult(new ClayDraftStorageHealth(true, 0, null, false, 0, 0));
+        context.JSInterop.Setup<string>("clayDraftStore.beginOperationIntent", _ => true)
+            .SetResult("""{"version":1,"attemptId":"test-attempt","kind":"test","status":"running","revision":1,"data":"{}","scopes":[],"acceptLegacyTyped":false,"legacyTypedRevision":0}""");
         context.Services.AddMudServices();
         context.Services.AddMudExtensions();
         context.Services.AddScoped<DbManager>(_ => CreateDb());
@@ -1774,6 +1974,25 @@ public sealed class EquipmentFormTests
     private static EquipmentEntity CurrentModel(EquipmentForm page) =>
         (EquipmentEntity)GetPrivate(page, "_model")!;
 
+    private static EquipmentEntity OriginalEquipment(IRenderedComponent<EquipmentForm> page)
+    {
+        var snapshot = (string)GetPrivate(page.Instance, "_originalSnapshot")!;
+        var node = System.Text.Json.Nodes.JsonNode.Parse(snapshot)!["Equipment"]!;
+        return System.Text.Json.JsonSerializer.Deserialize<EquipmentEntity>(node.ToJsonString())!;
+    }
+
+    private static UpsTest CloneUpsTestForTest(UpsTest source, DateTime testedAt) => new()
+    {
+        Id = source.Id,
+        UpsEquipmentId = source.UpsEquipmentId,
+        TestedAt = testedAt,
+        BatteryTime = source.BatteryTime,
+        Servers = source.Servers,
+        Issues = source.Issues,
+        ChangedAt = source.ChangedAt,
+        ChangedByName = source.ChangedByName,
+    };
+
     private static object? GetPrivate(EquipmentForm page, string name) => typeof(EquipmentForm)
         .GetField(name, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
         .GetValue(page);
@@ -1875,10 +2094,17 @@ public sealed class EquipmentFormTests
         public TaskCompletionSource UpdateCompletion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource InitialLoadCompletion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource InitialLoadReturned { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public EquipmentEntity? NextModel { get; set; }
 
         public override async Task<EquipmentEntity?> GetAsync(int id)
         {
             Requests.Add(id);
+            if (NextModel is not null)
+            {
+                var next = NextModel;
+                NextModel = null;
+                return next;
+            }
             if (ReturnNullAfterUpdate && UpdateCalls > 0)
                 return null;
             if (LoadException is not null)
@@ -1947,8 +2173,24 @@ public sealed class EquipmentFormTests
         public override Task<IReadOnlyList<EquipmentResponsiblePeriod>> GetResponsiblesAsync(int equipmentId) =>
             Task.FromResult<IReadOnlyList<EquipmentResponsiblePeriod>>(StoredResponsibles.ToList());
 
-        public override Task<IReadOnlyList<EquipmentComputerSnapshot>> GetComputerHistoryAsync(int equipmentId) =>
-            Task.FromResult<IReadOnlyList<EquipmentComputerSnapshot>>(StoredComputers.ToList());
+        public int ComputerRefreshCalls { get; private set; }
+        public int ComputerSaveCalls { get; private set; }
+        public TaskCompletionSource ComputerSaveRequested { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ComputerSaveCompletion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public override async Task SaveComputerAsync(EquipmentComputerSnapshot snapshot, DateTime? today = null)
+        {
+            ComputerSaveCalls++;
+            ComputerSaveRequested.TrySetResult();
+            await ComputerSaveCompletion.Task;
+            StoredComputers.Add(snapshot);
+        }
+
+        public override Task<IReadOnlyList<EquipmentComputerSnapshot>> GetComputerHistoryAsync(int equipmentId)
+        {
+            ComputerRefreshCalls++;
+            return Task.FromResult<IReadOnlyList<EquipmentComputerSnapshot>>(StoredComputers.ToList());
+        }
 
         public override Task<IReadOnlyList<StandardConfiguration>> GetStandardConfigurationsAsync() =>
             Task.FromResult<IReadOnlyList<StandardConfiguration>>([]);
@@ -2041,14 +2283,19 @@ public sealed class EquipmentFormTests
             return Task.FromResult<IReadOnlyList<UpsTest>>([]);
         }
 
+        public IReadOnlyCollection<UpsTest>? LastUpsCurrentTests { get; private set; }
+
         public override Task SaveUpsDetailsAsync(
             int upsEquipmentId,
             int sourceServerEquipmentId,
             IReadOnlyCollection<UpsServerLink> originalServers,
             IReadOnlyCollection<UpsServerLink> currentServers,
             IReadOnlyCollection<UpsTest> originalTests,
-            IReadOnlyCollection<UpsTest> currentTests) =>
-            UpsSaveException is not null ? Task.FromException(UpsSaveException) : Task.CompletedTask;
+            IReadOnlyCollection<UpsTest> currentTests)
+        {
+            LastUpsCurrentTests = currentTests.ToList();
+            return UpsSaveException is not null ? Task.FromException(UpsSaveException) : Task.CompletedTask;
+        }
 
         public Exception? SaveAccountingException { get; set; }
         public Exception? AccountingRefreshException { get; set; }
@@ -2091,8 +2338,16 @@ public sealed class EquipmentFormTests
 
         public override Task<bool> CanUseAccountingAsync(int? personId) => Task.FromResult(AccountingAvailable);
 
-        public override Task<Employee?> GetCurrentUserWithRolesAsync()
+        public Queue<TaskCompletionSource<Employee?>> OwnerReadCompletions { get; } = new();
+        public bool DeferOwnerRead { get; set; }
+        public Exception? OwnerReadException { get; set; }
+
+        public override async Task<Employee?> GetCurrentUserWithRolesAsync()
         {
+            if (OwnerReadException is not null)
+                throw OwnerReadException;
+            if (DeferOwnerRead)
+                await OwnerReadCompletions.Dequeue().Task;
             var employee = new Employee { Id = 4, Name = "Тестов Администратор" };
             var grants = Roles.Select(roleId => new EmployeeRoleGrant
             {
@@ -2105,7 +2360,7 @@ public sealed class EquipmentFormTests
                 grants.Add(new EmployeeRoleGrant { RoleId = 44, PersonId = 0 });
             }
             employee.SetRoleGrants(grants);
-            return Task.FromResult<Employee?>(employee);
+            return employee;
         }
 
         public override Task AttachNetworkAsync(int equipmentId)

@@ -115,7 +115,7 @@ public sealed class Eq8ServerGuardsComputerResponsibleTests
         var connection = WithdrawConnection(activeEmployeeId: 3);
 
         await CreateService(connection).WithdrawResponsibleAsync(
-            Current(3), Next(4, Today.AddDays(2), Today.AddDays(3)), null);
+            Current(3), Next(4, Today.AddDays(2), Today.AddDays(3)), null, Today.AddDays(2));
 
         Assert.Equal(3, connection.CommandLog.Count);
         Assert.Contains("BEGIN TRANSACTION", connection.CommandLog[2]);

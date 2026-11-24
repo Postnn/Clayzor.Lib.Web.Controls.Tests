@@ -113,6 +113,7 @@ public sealed class EquipmentAccountDialogTests
         var context = new BunitContext();
         context.JSInterop.Mode = JSRuntimeMode.Loose;
         context.Services.AddMudServices();
+        context.Services.AddScoped<Clayzor.Lib.Web.Controls.Services.ClayDraftService>();
         context.Services.AddSingleton(new EquipmentFormService(
             new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider()));
         return context;

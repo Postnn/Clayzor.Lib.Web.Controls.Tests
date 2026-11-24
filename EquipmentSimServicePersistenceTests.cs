@@ -42,7 +42,7 @@ public sealed class EquipmentSimServicePersistenceTests
             ServiceTypeId = "_TEST",
             ServiceName = "Test",
             DateFrom = DateTime.Today,
-        });
+        }, DateTime.Today);
 
         Assert.Contains("INSERT vwSIMКартыДопУслугиСотОператора", connection.CommandLog[2]);
         Assert.Contains("@От < ISNULL(До, '20500101')", connection.CommandLog[2]);
@@ -68,7 +68,7 @@ public sealed class EquipmentSimServicePersistenceTests
             ServiceName = "Test",
             DateFrom = DateTime.Today,
             DateTo = DateTime.Today,
-        });
+        }, DateTime.Today);
 
         Assert.Contains("UPDATE vwSIMКартыДопУслугиСотОператора", connection.CommandLog[2]);
         Assert.DoesNotContain("DELETE", connection.CommandLog[2]);

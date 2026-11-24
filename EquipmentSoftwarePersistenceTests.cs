@@ -33,7 +33,7 @@ public sealed class EquipmentSoftwarePersistenceTests
     public async Task InsertSoftware_UsesExclusiveEnd()
     {
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([
-            Script.Scalar(1), Script.Rows(Script.Row(("ЕстьХарактеристикиКомпьютера", (byte)1))), Script.NonQuery(),
+            Script.Scalar(1), Script.Rows(Script.Row(("ЕстьХарактеристикиКомпьютера", (byte)1))), Script.NonQuery(1),
         ]));
         var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
@@ -48,7 +48,7 @@ public sealed class EquipmentSoftwarePersistenceTests
     public async Task UpdateSoftware_UsesIdAndExclusiveEnd()
     {
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([
-            Script.Scalar(1), Script.Rows(Script.Row(("ЕстьХарактеристикиКомпьютера", (byte)1))), Script.NonQuery(),
+            Script.Scalar(1), Script.Rows(Script.Row(("ЕстьХарактеристикиКомпьютера", (byte)1))), Script.NonQuery(1),
         ]));
         var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
         var item = ValidInstallation();
