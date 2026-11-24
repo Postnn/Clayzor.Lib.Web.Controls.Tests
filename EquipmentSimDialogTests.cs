@@ -103,13 +103,12 @@ public sealed class EquipmentSimDialogTests
     public async Task ExistingInvalidPerson_ShowsAdvisoryWithoutClearingSelection()
     {
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([
-            Script.Scalar(1), Script.Rows(), Script.Scalar(0),
+            Script.Scalar(1), Script.Rows(Script.Row(("PIN", ""), ("PIN2", ""), ("PUK", ""), ("PUK2", ""))), Script.Scalar(0),
         ]));
         await using var context = CreateContext(connection);
         var provider = context.Render<MudDialogProvider>();
         await ShowExistingAsync(context, 9);
         var dialog = provider.FindComponent<EquipmentSimDialog>();
-
         dialog.WaitForAssertion(() => Assert.Contains("не соответствует договору", dialog.Markup));
         Assert.Equal(9, dialog.Instance.PersonalDataPersonId);
     }
@@ -119,7 +118,7 @@ public sealed class EquipmentSimDialogTests
     public async Task AdvisoryReadFailure_IsDistinctAndPreservesSelection()
     {
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([
-            Script.Scalar(1), Script.Rows(), Script.Error(SqlExceptionFactory.Create(50000, "read failed")),
+            Script.Scalar(1), Script.Rows(Script.Row(("PIN", ""), ("PIN2", ""), ("PUK", ""), ("PUK2", ""))), Script.Error(SqlExceptionFactory.Create(50000, "read failed")),
         ]));
         await using var context = CreateContext(connection);
         var provider = context.Render<MudDialogProvider>();

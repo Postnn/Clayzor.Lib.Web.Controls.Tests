@@ -841,6 +841,59 @@ public sealed class EquipmentFormTests
         await pending;
     }
 
+    /// <summary>Отложенное открытие Computer не связывает данные A с загруженной за время ожидания карточкой B.</summary>
+    [Fact]
+    public async Task ComputerOpen_DeferredTimeAfterNavigation_DoesNotOpenOrSave()
+    {
+        var fixture = CreateFixture(computer: true);
+        await using var context = fixture.Context;
+        var provider = context.Render<MudDialogProvider>();
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        fixture.Js.DeferredIdentifier = "clayGridTimeZone.getOffsetMinutes";
+
+        var pending = InvokeHandler(page, "OpenComputerDialogAsync");
+        await fixture.Js.Requested.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        fixture.Js.DeferredIdentifier = null;
+        typeof(EquipmentForm).GetProperty(nameof(EquipmentForm.Id))!.SetValue(page.Instance, 8);
+        await InvokeHandler(page, "LoadCurrentAsync", 8);
+        WaitForSn(page, "CLAY_TEST_8");
+        fixture.Js.Completion.SetResult();
+        await pending;
+
+        Assert.Empty(provider.FindComponents<EquipmentComputerDialog>());
+        Assert.Equal(0, fixture.Service.ComputerSaveCalls);
+    }
+
+    /// <summary>Смена карточки после отложенного чтения времени запрещает dispatch Computer Save.</summary>
+    [Fact]
+    public async Task ComputerSave_DeferredTimeAfterNavigation_DoesNotDispatch()
+    {
+        var fixture = CreateFixture(computer: true);
+        await using var context = fixture.Context;
+        var provider = context.Render<MudDialogProvider>();
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        var dialogAdded = TrackNextDialog(context);
+        var pending = InvokeHandler(page, "OpenComputerDialogAsync");
+        var reference = await dialogAdded.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var dialog = provider.FindComponent<EquipmentComputerDialog>();
+        fixture.Js.DeferredIdentifier = "clayGridTimeZone.getOffsetMinutes";
+
+        var click = dialog.FindAll("button").Single(button => button.TextContent.Trim() == "OK").ClickAsync();
+        await fixture.Js.Requested.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        fixture.Js.DeferredIdentifier = null;
+        typeof(EquipmentForm).GetProperty(nameof(EquipmentForm.Id))!.SetValue(page.Instance, 8);
+        await InvokeHandler(page, "LoadCurrentAsync", 8);
+        WaitForSn(page, "CLAY_TEST_8");
+        fixture.Js.Completion.SetResult();
+        await click;
+
+        Assert.Equal(0, fixture.Service.ComputerSaveCalls);
+        await provider.InvokeAsync(() => reference.Close(DialogResult.Cancel()));
+        await pending;
+    }
+
     /// <summary>При редактировании неизменяемые расположение, дата и время визуально и функционально отключены.</summary>
     [Fact]
     public async Task LocationEdit_DisablesFixedPeriodFields()
@@ -924,6 +977,125 @@ public sealed class EquipmentFormTests
         Assert.True(ValidateBusinessRules(page.Instance));
     }
 
+    /// <summary>Собственные изменения расположения и ответственного не становятся ложным конфликтом main.</summary>
+    [Theory]
+    [InlineData(5)]
+    [InlineData(null)]
+    public async Task ChildRefresh_DerivedLocationAndResponsible_MergeWithoutConflict(int? freshEmployeeId)
+    {
+        var fixture = CreateFixture();
+        fixture.Service.EmployeeId = 4;
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        FindSn(page).Input("CLAY_TEST_LOCAL");
+        var original = OriginalEquipment(page);
+        var fresh = OriginalEquipment(page);
+        fresh.LocationId = 66;
+        fresh.EmployeeId = freshEmployeeId;
+        fresh.ChangedAtUtc = fresh.ChangedAtUtc.AddSeconds(1);
+        fixture.Service.NextModel = fresh;
+
+        await InvokeHandler(page, "RefreshMainAfterChildWriteAsync", original);
+
+        Assert.Equal(66, CurrentModel(page.Instance).LocationId);
+        Assert.Equal(freshEmployeeId, CurrentModel(page.Instance).EmployeeId);
+        Assert.Equal("CLAY_TEST_LOCAL", CurrentModel(page.Instance).SerialNumber);
+        Assert.Null(GetPrivate(page.Instance, "_mainConflictMessage"));
+        Assert.True(ValidateBusinessRules(page.Instance));
+    }
+
+    /// <summary>Durable restore объединяет локальный ввод с независимым свежим изменением.</summary>
+    [Fact]
+    public async Task RestoreDraft_IndependentFreshChange_IsMerged()
+    {
+        var fixture = CreateFixture();
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        var originalSnapshot = (string)GetPrivate(page.Instance, "_originalSnapshot")!;
+        var local = OriginalEquipment(page);
+        local.SerialNumber = "CLAY_TEST_LOCAL";
+        CurrentModel(page.Instance).Description = "Независимое свежее изменение";
+        CurrentModel(page.Instance).ChangedAtUtc = CurrentModel(page.Instance).ChangedAtUtc.AddSeconds(1);
+        var expectedToken = CurrentModel(page.Instance).ChangedAtUtc;
+        var json = DraftJson(local, originalSnapshot);
+
+        await InvokeHandler(page, "RestoreDraftAsync", json);
+
+        Assert.Equal("CLAY_TEST_LOCAL", CurrentModel(page.Instance).SerialNumber);
+        Assert.Equal("Независимое свежее изменение", CurrentModel(page.Instance).Description);
+        Assert.Equal(expectedToken, CurrentModel(page.Instance).ChangedAtUtc);
+        Assert.Null(GetPrivate(page.Instance, "_mainConflictMessage"));
+    }
+
+    /// <summary>Durable restore сохраняет конфликт и позволяет заменить только конфликтные поля.</summary>
+    [Fact]
+    public async Task RestoreDraft_SameFieldConflict_PreservesBothAndResolvesSelectively()
+    {
+        var fixture = CreateFixture();
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        var originalSnapshot = (string)GetPrivate(page.Instance, "_originalSnapshot")!;
+        var originalToken = CurrentModel(page.Instance).ChangedAtUtc;
+        var local = OriginalEquipment(page);
+        local.SerialNumber = "CLAY_TEST_LOCAL";
+        local.Description = "Локальное описание";
+        CurrentModel(page.Instance).SerialNumber = "CLAY_TEST_FRESH";
+        CurrentModel(page.Instance).ChangedAtUtc = CurrentModel(page.Instance).ChangedAtUtc.AddSeconds(1);
+        var json = DraftJson(local, originalSnapshot);
+
+        await InvokeHandler(page, "RestoreDraftAsync", json);
+
+        Assert.Equal("CLAY_TEST_LOCAL", CurrentModel(page.Instance).SerialNumber);
+        Assert.Equal(originalToken, CurrentModel(page.Instance).ChangedAtUtc);
+        Assert.Contains("SerialNumber", GetPrivate(page.Instance, "_mainConflictMessage")!.ToString());
+        await InvokeHandler(page, "ResolveMainConflict", false);
+        Assert.Equal("CLAY_TEST_FRESH", CurrentModel(page.Instance).SerialNumber);
+        Assert.Equal("Локальное описание", CurrentModel(page.Instance).Description);
+        Assert.Null(GetPrivate(page.Instance, "_mainConflictMessage"));
+    }
+
+    /// <summary>Read-only сверка подтверждённого результата завершает Unknown без повторной записи.</summary>
+    [Fact]
+    public async Task ReconcileDraftOperation_MatchingSnapshot_CommitsWithoutWrites()
+    {
+        var fixture = CreateFixture();
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        SetDraftMainOperation(page, (string)GetPrivate(page.Instance, "_originalSnapshot")!);
+
+        await InvokeHandler(page, "ReconcileDraftOperationAsync");
+
+        Assert.False((bool)GetPrivate(page.Instance, "_draftOperationUnresolved")!);
+        Assert.Equal(0, fixture.Service.UpdateCalls);
+        Assert.Equal(0, fixture.Service.UpdateWithPhonesCalls);
+        Assert.Equal(0, fixture.Service.SyncCalls);
+    }
+
+    /// <summary>Read-only сверка расхождения сохраняет Unknown и не разрешает повтор.</summary>
+    [Fact]
+    public async Task ReconcileDraftOperation_DifferentSnapshot_KeepsUnknownWithoutWrites()
+    {
+        var fixture = CreateFixture();
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        SetDraftMainOperation(page, (string)GetPrivate(page.Instance, "_originalSnapshot")!);
+        var fresh = OriginalEquipment(page);
+        fresh.SerialNumber = "CLAY_TEST_FOREIGN";
+        fixture.Service.NextModel = fresh;
+
+        await InvokeHandler(page, "ReconcileDraftOperationAsync");
+
+        Assert.True((bool)GetPrivate(page.Instance, "_draftOperationUnresolved")!);
+        Assert.Equal(0, fixture.Service.UpdateCalls);
+        Assert.Equal(0, fixture.Service.UpdateWithPhonesCalls);
+        Assert.Equal(0, fixture.Service.SyncCalls);
+    }
+
     /// <summary>Поздний ответ и ошибка владельца A не перекрывают успешно выбранного B.</summary>
     [Fact]
     public async Task OwnerChanged_LateFaultFromA_DoesNotOverwriteB()
@@ -947,6 +1119,30 @@ public sealed class EquipmentFormTests
 
         Assert.Equal(3, CurrentModel(page.Instance).OwnerId);
         Assert.Equal(3, GetPrivate(page.Instance, "_confirmedOwnerId"));
+        Assert.Null(GetPrivate(page.Instance, "_validationMessage"));
+    }
+
+    /// <summary>Ошибка старого чтения SIM-фильтра не перекрывает успешное новое состояние.</summary>
+    [Fact]
+    public async Task SimFilters_LateFaultFromA_DoesNotOverwriteSuccessfulB()
+    {
+        var fixture = CreateFixture();
+        var a = new TaskCompletionSource<IReadOnlyList<EquipmentSimService>>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var b = new TaskCompletionSource<IReadOnlyList<EquipmentSimService>>(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.Service.SimServiceReadCompletions.Enqueue(a);
+        fixture.Service.SimServiceReadCompletions.Enqueue(b);
+        fixture.Service.DeferSimServiceRead = true;
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+
+        var pendingA = InvokeHandler(page, "OnSimServiceFiltersChangedAsync");
+        var pendingB = InvokeHandler(page, "OnSimServiceFiltersChangedAsync");
+        b.SetResult([]);
+        await pendingB;
+        a.SetException(new InvalidOperationException("late filter failure"));
+        await pendingA;
+
         Assert.Null(GetPrivate(page.Instance, "_validationMessage"));
     }
 
@@ -1101,6 +1297,8 @@ public sealed class EquipmentFormTests
         var pending = InvokeHandler(page, "OpenResponsibleDialogAsync", EquipmentResponsibleDialogMode.Edit, responsible);
         await dialogAdded.Task.WaitAsync(TimeSpan.FromSeconds(2));
         var editor = provider.FindComponent<EquipmentResponsibleDialog>();
+        Assert.NotNull(editor.Instance.Original);
+        Assert.True(editor.Instance.Original.ExpectedExisting);
         editor.Instance.ReturnDate = originalDate.AddDays(1);
         editor.Instance.Notes = "new";
 
@@ -1108,9 +1306,9 @@ public sealed class EquipmentFormTests
 
         Assert.Equal(originalDate, responsible.ReturnDate);
         Assert.Equal("old", responsible.Notes);
+        Assert.Contains("Команда «Сохранение ответственного» не выполнена", editor.Markup);
         Assert.Equal(originalDate.AddDays(1), fixture.Service.ResponsibleUpdated?.ReturnDate);
         Assert.Equal("new", editor.Instance.Notes);
-        Assert.Contains("Команда «Сохранение ответственного» не выполнена", editor.Markup);
     }
 
     /// <summary>Ошибка соединения при удалении бухучёта не удаляет строку из UI и не запускает success-refresh.</summary>
@@ -1981,6 +2179,40 @@ public sealed class EquipmentFormTests
         return System.Text.Json.JsonSerializer.Deserialize<EquipmentEntity>(node.ToJsonString())!;
     }
 
+    private static string DraftJson(EquipmentEntity model, string originalSnapshot) =>
+        System.Text.Json.JsonSerializer.Serialize(new
+        {
+            Model = model,
+            WriteOffDate = (DateTime?)null,
+            WriteOffTime = (TimeSpan?)null,
+            Phones = Array.Empty<EquipmentPhoneLink>(),
+            OriginalPhones = Array.Empty<EquipmentPhoneLink>(),
+            OriginalSnapshot = originalSnapshot,
+            PendingPhoneSync = (object?)null,
+            ActiveEditor = (object?)null,
+            ActiveEditorState = (string?)null,
+            ActiveUpsServers = (object?)null,
+            ActiveUpsTests = (object?)null,
+        });
+
+    private static void SetDraftMainOperation(IRenderedComponent<EquipmentForm> page, string snapshot)
+    {
+        var data = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            Kind = "equipment-save",
+            EquipmentId = 7,
+            Editor = (string?)null,
+            Origin = "main",
+            Intent = new { ExpectedSnapshot = snapshot, AfterSnapshot = snapshot },
+        });
+        var operation = new ClayDraftOperation(1, "test-attempt", "equipment-save",
+            ClayDraftOperationStatus.Unknown, 1, data,
+            [new ClayDraftOperationScope("main", 0, new Dictionary<string, long>())], true, 0);
+        SetPrivate(page.Instance, "_draftOperation", operation);
+        SetPrivate(page.Instance, "_draftOperationUnresolved", true);
+        SetPrivate(page.Instance, "_draftOperationScope", "main");
+    }
+
     private static UpsTest CloneUpsTestForTest(UpsTest source, DateTime testedAt) => new()
     {
         Id = source.Id,
@@ -2095,6 +2327,7 @@ public sealed class EquipmentFormTests
         public TaskCompletionSource InitialLoadCompletion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource InitialLoadReturned { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public EquipmentEntity? NextModel { get; set; }
+        public int? EmployeeId { get; set; }
 
         public override async Task<EquipmentEntity?> GetAsync(int id)
         {
@@ -2122,15 +2355,19 @@ public sealed class EquipmentFormTests
             return new EquipmentEntity
             {
                 Id = id, EquipmentTypeId = PhoneConfig ? 30 : 103, ModelId = 945, OwnerId = 1, TenantId = id,
-                LocationId = 55, SerialNumber = $"CLAY_TEST_{id}", Description = $"Copy{id}",
+                LocationId = 55, EmployeeId = EmployeeId, SerialNumber = $"CLAY_TEST_{id}", Description = $"Copy{id}",
                 MacAddress = "001122334455", WriteOffAtUtc = WriteOffDates.GetValueOrDefault(id),
                 DocumentWriteOffId = WriteOffDocumentId,
                 ChangedById = 4, ChangedAtUtc = new DateTime(2026, 11, 18, 8, 0, 0), ChangedByName = "Тестов А.",
             };
         }
 
+        public override Task<EquipmentFormReadResult> GetFormDataAsync(EquipmentFormReadRequest request) =>
+            GetFormDataAsync(request, null);
+
         /// <summary>Собирает пакетный результат из тех же тестовых данных, не обращаясь к БД.</summary>
-        public override async Task<EquipmentFormReadResult> GetFormDataAsync(EquipmentFormReadRequest request)
+        public override async Task<EquipmentFormReadResult> GetFormDataAsync(
+            EquipmentFormReadRequest request, DateTime? businessToday)
         {
             if (DetailsException is not null)
             {
@@ -2178,7 +2415,7 @@ public sealed class EquipmentFormTests
         public TaskCompletionSource ComputerSaveRequested { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource ComputerSaveCompletion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        public override async Task SaveComputerAsync(EquipmentComputerSnapshot snapshot, DateTime? today = null)
+        public override async Task SaveComputerPhasedAsync(EquipmentComputerSnapshot snapshot, DateTime? today = null)
         {
             ComputerSaveCalls++;
             ComputerSaveRequested.TrySetResult();
@@ -2218,7 +2455,18 @@ public sealed class EquipmentFormTests
 
         public override Task<IReadOnlyList<EquipmentSimService>> GetSimServicesAsync(
             int equipmentId, bool showHistory, bool showRequired) =>
-            Task.FromResult<IReadOnlyList<EquipmentSimService>>([]);
+            GetSimServicesAsync(equipmentId, showHistory, showRequired, null);
+
+        public Queue<TaskCompletionSource<IReadOnlyList<EquipmentSimService>>> SimServiceReadCompletions { get; } = new();
+        public bool DeferSimServiceRead { get; set; }
+
+        public override async Task<IReadOnlyList<EquipmentSimService>> GetSimServicesAsync(
+            int equipmentId, bool showHistory, bool showRequired, DateTime? businessToday)
+        {
+            if (DeferSimServiceRead)
+                return await SimServiceReadCompletions.Dequeue().Task;
+            return [];
+        }
 
         public override Task<IReadOnlyList<SimServiceType>> GetSimServiceTypesAsync() =>
             Task.FromResult<IReadOnlyList<SimServiceType>>([]);
@@ -2396,7 +2644,13 @@ public sealed class EquipmentFormTests
 
         public override Task AddLocationAsync(
             EquipmentLocationPeriod location,
-            EquipmentResponsiblePeriod? responsible = null)
+            EquipmentResponsiblePeriod? responsible = null) =>
+            AddLocationAsync(location, responsible, false);
+
+        public override Task AddLocationAsync(
+            EquipmentLocationPeriod location,
+            EquipmentResponsiblePeriod? responsible,
+            bool expectedActiveResponsible)
         {
             LocationSaves.Add((location, responsible));
             return Task.CompletedTask;
@@ -2447,6 +2701,53 @@ public sealed class EquipmentFormTests
             PhoneSaves.Add((original.Select(item => item.PhoneId).ToArray(), current.Select(item => item.PhoneId).ToArray()));
             return Task.CompletedTask;
         }
+
+        public override async Task<EquipmentPhoneSyncIntent> SaveWithPhonesAsync(
+            EquipmentEntity equipment,
+            IReadOnlyCollection<EquipmentPhoneLink> original,
+            IReadOnlyCollection<EquipmentPhoneLink> current)
+        {
+            await UpdateWithPhonesAsync(equipment, original, current);
+            return new EquipmentPhoneSyncIntent($"save-{equipment.Id}", equipment.Id,
+                EquipmentPhoneSyncOrigin.EquipmentSave, equipment.ChangedAtUtc, equipment.OwnerId,
+                equipment.EquipmentTypeId, original.ToList(), current.ToList());
+        }
+
+        public override Task<PhoneSyncAttempt> SynchronizePhoneAttemptAsync(EquipmentPhoneSyncIntent intent)
+        {
+            SyncCalls++;
+            if (SyncException is not null)
+                throw SyncException;
+            return Task.FromResult(CreateAttempt(intent, SyncResults));
+        }
+
+        public override Task<PhoneSyncAttempt> ConfigurePhoneEquipmentAttemptAsync(int equipmentId)
+        {
+            SyncCalls++;
+            if (SyncException is not null)
+                throw SyncException;
+            var intent = new EquipmentPhoneSyncIntent($"configure-{equipmentId}", equipmentId,
+                EquipmentPhoneSyncOrigin.ExplicitConfigure, default, 1, PhoneConfig ? 30 : 103, [], []);
+            return Task.FromResult(CreateAttempt(intent, SyncResults));
+        }
+
+        public override Task<PhoneSyncAttempt> RetryPhoneSyncAttemptAsync(PhoneSyncAttempt attempt)
+        {
+            SyncCalls++;
+            LastSyncOperations = attempt.Operations.Where(result => result.CanRetry).Select(result => result.Operation).ToArray();
+            if (SyncException is not null)
+                throw SyncException;
+            return Task.FromResult(SyncResults is null ? attempt : CreateAttempt(attempt.Intent, SyncResults));
+        }
+
+        public override Task<PhoneSyncReconciliation> ReconcilePhoneSyncAttemptAsync(PhoneSyncAttempt attempt) =>
+            Task.FromResult(new PhoneSyncReconciliation(attempt, null, [], false));
+
+        private static PhoneSyncAttempt CreateAttempt(
+            EquipmentPhoneSyncIntent intent, IReadOnlyList<PhoneSyncResult>? results) =>
+            new(intent, (results ?? []).Select(result => new PhoneSyncOperationResult(intent.AttemptId,
+                result.Operation, result.Success ? PhoneSyncPhase.Succeeded :
+                result.IsUnknown ? PhoneSyncPhase.Unknown : PhoneSyncPhase.Failed, result.Error)).ToArray());
 
         public override Task<IReadOnlyList<PhoneSyncResult>> SynchronizePhoneOperationsAsync(
             int equipmentId,

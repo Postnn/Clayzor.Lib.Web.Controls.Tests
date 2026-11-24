@@ -26,8 +26,13 @@ public sealed class Eq8PhoneSyncRetryTests
     public async Task ChangedTarget_DoesNotReachAts()
     {
         var connection = CreateConnection(
-            Script.Scalar(1), Script.Rows(EquipmentRow()), Script.Rows(PhoneRow(1, 9)));
+            Script.Scalar(1), Script.Rows(ModelTypeRow()), Script.NonQuery(),
+            Script.Rows(EquipmentRow()), Script.Scalar(1), Script.Rows(PhoneRow(1, 8)),
+            Script.Error(SqlExceptionFactory.Create(-2, "preflight")),
+            Script.Rows(EquipmentRow()), Script.Scalar(1), Script.Rows(PhoneRow(1, 9)));
         var service = CreateService(connection);
+        var intent = await service.SaveWithPhonesAsync(Equipment(), [], [Link(1)]);
+        _ = await service.SynchronizePhoneAttemptAsync(intent);
 
         var error = await Assert.ThrowsAsync<InvalidOperationException>(() => service.ExecutePhoneSyncOperationsAsync(
             7, [], [Link(1)], [Operation(1)]));
@@ -55,9 +60,16 @@ public sealed class Eq8PhoneSyncRetryTests
     public async Task AllowedRetry_ExecutesOnlyPendingOperation()
     {
         var connection = CreateConnection(
-            Script.Scalar(1), Script.Rows(EquipmentRow()), Script.Rows(PhoneRow(1, 8)),
-            Script.Scalar(1), Script.NonQuery());
+            Script.Scalar(1), Script.Rows(ModelTypeRow()), Script.NonQuery(),
+            Script.Rows(EquipmentRow()), Script.Scalar(1), Script.Rows(PhoneRow(1, 8)),
+            Script.Error(SqlExceptionFactory.Create(-2, "preflight")),
+            Script.Rows(EquipmentRow()), Script.Scalar(1), Script.Rows(PhoneRow(1, 8)),
+            Script.Rows(LookupRow()), Script.Scalar(1), Script.NonQuery());
         var service = CreateService(connection);
+        var intent = await service.SaveWithPhonesAsync(Equipment(), [], [Link(1)]);
+        _ = await service.SynchronizePhoneAttemptAsync(intent);
+        connection.CommandLog.Clear();
+        connection.ParameterLog.Clear();
 
         var results = await service.ExecutePhoneSyncOperationsAsync(
             7, [], [Link(1)], [Operation(1)]);
@@ -86,7 +98,18 @@ public sealed class Eq8PhoneSyncRetryTests
         EquipmentId = 7, PhoneId = phoneId, ConnectionEquipmentId = 8,
     };
 
+    private static Equipment Equipment() => new()
+    {
+        Id = 7, ModelId = 5, OwnerId = 1, EquipmentTypeId = 30,
+    };
+
+    private static Dictionary<string, object?> ModelTypeRow() => Script.Row(
+        ("КодТипаОборудования", 30), ("SNобязателен", (byte)0), ("ЕстьMACадрес", (byte)0));
+
     private static Dictionary<string, object?> EquipmentRow() => Script.Row(("КодОборудования", 7));
+
+    private static Dictionary<string, object?> LookupRow() => Script.Row(
+        ("КодТелефонногоНомера", 1), ("КодТелефоннойСтанции", 1), ("XorcomName", "xorcom"));
 
     private static Dictionary<string, object?> PhoneRow(int phoneId, int connectionId) => Script.Row(
         ("КодТелефонногоНомера", phoneId), ("КодОборудования", 7),

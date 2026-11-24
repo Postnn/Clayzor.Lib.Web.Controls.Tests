@@ -95,7 +95,7 @@ public sealed class EquipmentSimServicePersistenceTests
         ]));
         var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
 
-        var services = await service.GetSimServicesAsync(7, true, true);
+        var services = await service.GetSimServicesAsync(7, true, true, to);
 
         var item = Assert.Single(services);
         Assert.Equal(15, item.Id);

@@ -58,7 +58,7 @@ public sealed class EquipmentComputerPersistenceTests
             License = "CLAY_TEST",
         };
 
-        await service.SaveComputerAsync(snapshot);
+        await service.SaveComputerAsync(snapshot, snapshot.Date.Date);
 
         Assert.Equal(3072, snapshot.RamMb);
         Assert.Equal("1024+2048", snapshot.RamDetail);

@@ -12,8 +12,14 @@ public sealed class Eq9PhoneSyncTrustTests
     [Fact]
     public async Task NullPlanRetry_ChangedTargetDoesNotReachAts()
     {
-        var connection = CreateConnection(Script.Scalar(1), Script.Rows(EquipmentRow()), Script.Rows(PhoneRow(1, 9)));
+        var connection = CreateConnection(
+            Script.Scalar(1), Script.Rows(ModelTypeRow()), Script.NonQuery(),
+            Script.Rows(EquipmentRow()), Script.Scalar(1), Script.Rows(PhoneRow(1, 8)),
+            Script.Error(SqlExceptionFactory.Create(-2, "preflight")),
+            Script.Rows(EquipmentRow()), Script.Scalar(1), Script.Rows(PhoneRow(1, 9)));
         var service = CreateService(connection);
+        var intent = await service.SaveWithPhonesAsync(Equipment(), [], [Link(1)]);
+        _ = await service.SynchronizePhoneAttemptAsync(intent);
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => service.SynchronizePhoneOperationsAsync(
             7, [], [Link(1)]));
@@ -40,8 +46,13 @@ public sealed class Eq9PhoneSyncTrustTests
     public async Task ReassignedDeletedPhone_DoesNotReachAts()
     {
         var connection = CreateConnection(
-            Script.Scalar(1), Script.Rows(EquipmentRow()), Script.Rows(), Script.Rows(Script.Row(("КодОборудования", 8))));
+            Script.Scalar(1), Script.Rows(ModelTypeRow()), Script.NonQuery(),
+            Script.Rows(EquipmentRow()), Script.Scalar(1), Script.Rows(), Script.Rows(),
+            Script.Error(SqlExceptionFactory.Create(-2, "preflight")),
+            Script.Rows(EquipmentRow()), Script.Scalar(1), Script.Rows(), Script.Rows(Script.Row(("КодОборудования", 8))));
         var service = CreateService(connection);
+        var intent = await service.SaveWithPhonesAsync(Equipment(), [Link(1)], []);
+        _ = await service.SynchronizePhoneAttemptAsync(intent);
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => service.SynchronizePhoneOperationsAsync(
             7, [Link(1)], []));
@@ -108,6 +119,14 @@ public sealed class Eq9PhoneSyncTrustTests
     {
         EquipmentId = 7, PhoneId = phoneId, ConnectionEquipmentId = 8,
     };
+
+    private static Equipment Equipment() => new()
+    {
+        Id = 7, ModelId = 5, OwnerId = 1, EquipmentTypeId = 30,
+    };
+
+    private static Dictionary<string, object?> ModelTypeRow() => Script.Row(
+        ("КодТипаОборудования", 30), ("SNобязателен", (byte)0), ("ЕстьMACадрес", (byte)0));
 
     private static Dictionary<string, object?> EquipmentRow() => Script.Row(("КодОборудования", 7));
 

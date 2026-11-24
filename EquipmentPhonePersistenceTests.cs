@@ -25,7 +25,7 @@ public sealed class EquipmentPhonePersistenceTests
         Assert.Contains("UPDATE ТелефонныеНомераОборудование", command.Sql);
         Assert.Contains("INSERT INTO ТелефонныеНомераОборудование", command.Sql);
         Assert.Equal(1, command.Parameters.Get<int>("@delPhone0"));
-        Assert.Equal(2, command.Parameters.Get<int>("@updPhone0"));
+        Assert.Equal(2, command.Parameters.Get<int>("@update0Phone"));
         Assert.Equal(3, command.Parameters.Get<int>("@newPhone0"));
         Assert.Equal(4, command.Parameters.Get<int>("@newPhone1"));
         Assert.Null(command.Parameters.Get<int?>("@newConnection1"));
@@ -42,7 +42,7 @@ public sealed class EquipmentPhonePersistenceTests
             [Link(1, ReturnDate: new DateTime(2026, 12, 1), Notes: "old"), Link(2)]);
 
         Assert.DoesNotContain("UPDATE ТелефонныеНомераОборудование", command.Sql);
-        Assert.DoesNotContain("@updPhone0", command.Parameters.ParameterNames);
+        Assert.DoesNotContain("@update0Phone", command.Parameters.ParameterNames);
         Assert.Equal(2, command.Parameters.Get<int>("@newPhone0"));
     }
 
@@ -72,12 +72,16 @@ public sealed class EquipmentPhonePersistenceTests
     {
         DapperColumnMapper.Initialize();
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([
-            Script.Scalar(1),
-            EquipmentRow(), ActualPhones(Link(1, ConnectionEquipmentId: 9)),
+            Script.Scalar(1), ModelTypeRow(), Script.NonQuery(),
+            EquipmentRow(), Script.Scalar(1), ActualPhones(Link(1, ConnectionEquipmentId: 9)),
             Script.Rows(Script.Row(("КодТелефонногоНомера", 1), ("КодТелефоннойСтанции", 0), ("XorcomName", ""))),
             Script.NonQuery(), Script.NonQuery(),
         ]));
         var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
+        await service.SaveWithPhonesAsync(Equipment(),
+            [Link(1, ConnectionEquipmentId: 8)], [Link(1, ConnectionEquipmentId: 9)]);
+        connection.CommandLog.Clear();
+        connection.ParameterLog.Clear();
 
         await service.SynchronizePhonesAsync(7,
             [Link(1, ConnectionEquipmentId: 8)], [Link(1, ConnectionEquipmentId: 9)]);
@@ -91,12 +95,15 @@ public sealed class EquipmentPhonePersistenceTests
         Assert.DoesNotContain(recipients, item => Equals(EquipmentId(item), 7));
 
         var fallbackConnection = new ScriptedConnection(new Queue<ScriptEntry>([
-            Script.Scalar(1),
-            EquipmentRow(), ActualPhones(Link(1)),
+            Script.Scalar(1), ModelTypeRow(), Script.NonQuery(),
+            EquipmentRow(), Script.Scalar(1), ActualPhones(Link(1)),
             Script.Rows(Script.Row(("КодТелефонногоНомера", 1), ("КодТелефоннойСтанции", 0), ("XorcomName", ""))),
             Script.NonQuery(),
         ]));
         var fallbackService = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => fallbackConnection), new TestAuthenticationStateProvider());
+        await fallbackService.SaveWithPhonesAsync(Equipment(), [], [Link(1)]);
+        fallbackConnection.CommandLog.Clear();
+        fallbackConnection.ParameterLog.Clear();
         await fallbackService.SynchronizePhonesAsync(7, [], [Link(1)]);
         Assert.Equal(7, EquipmentId(fallbackConnection.ParameterLog.Single(HasEquipmentId)));
     }
@@ -107,13 +114,17 @@ public sealed class EquipmentPhonePersistenceTests
     {
         DapperColumnMapper.Initialize();
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([
-            Script.Scalar(1),
-            EquipmentRow(), ActualPhones(Link(1, ConnectionEquipmentId: 9), Link(2, ConnectionEquipmentId: 8)),
+            Script.Scalar(1), ModelTypeRow(), Script.NonQuery(),
+            EquipmentRow(), Script.Scalar(1), ActualPhones(Link(1, ConnectionEquipmentId: 9), Link(2, ConnectionEquipmentId: 8)),
             Script.Rows(Script.Row(("КодТелефонногоНомера", 1), ("КодТелефоннойСтанции", 2), ("XorcomName", "X"))),
             Script.Scalar(0), Script.NonQuery(),
             Script.Rows(Script.Row(("КодТелефонногоНомера", 2), ("КодТелефоннойСтанции", 0), ("XorcomName", ""))),
         ]));
         var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
+        await service.SaveWithPhonesAsync(Equipment(),
+            [Link(1, ConnectionEquipmentId: 8)], [Link(1, ConnectionEquipmentId: 9), Link(2, ConnectionEquipmentId: 8)]);
+        connection.CommandLog.Clear();
+        connection.ParameterLog.Clear();
 
         await service.SynchronizePhonesAsync(7,
             [Link(1, ConnectionEquipmentId: 8)], [Link(1, ConnectionEquipmentId: 9), Link(2, ConnectionEquipmentId: 8)]);
@@ -128,12 +139,17 @@ public sealed class EquipmentPhonePersistenceTests
     {
         DapperColumnMapper.Initialize();
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([
-            Script.Scalar(1),
-            EquipmentRow(), ActualPhones(Link(1, ConnectionEquipmentId: 8), Link(2, ConnectionEquipmentId: 9)),
+            Script.Scalar(1), ModelTypeRow(), Script.NonQuery(),
+            EquipmentRow(), Script.Scalar(1), ActualPhones(Link(1, ConnectionEquipmentId: 8), Link(2, ConnectionEquipmentId: 9)),
             Script.Rows(Script.Row(("КодТелефонногоНомера", 2), ("КодТелефоннойСтанции", 0), ("XorcomName", ""))),
             Script.NonQuery(),
         ]));
         var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
+        await service.SaveWithPhonesAsync(Equipment(),
+            [Link(1, ConnectionEquipmentId: 8)],
+            [Link(1, ConnectionEquipmentId: 8), Link(2, ConnectionEquipmentId: 9)]);
+        connection.CommandLog.Clear();
+        connection.ParameterLog.Clear();
 
         await service.SynchronizePhonesAsync(7,
             [Link(1, ConnectionEquipmentId: 8)],
@@ -150,10 +166,17 @@ public sealed class EquipmentPhonePersistenceTests
     [Fact]
     public async Task SynchronizePhones_IgnoresMetadataOnlyChanges()
     {
+        DapperColumnMapper.Initialize();
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([
-            Script.Scalar(1), EquipmentRow(), ActualPhones(Link(1, ReturnDate: new DateTime(2026, 12, 2), Notes: "new")),
+            Script.Scalar(1), ModelTypeRow(), Script.NonQuery(),
+            EquipmentRow(), Script.Scalar(1), ActualPhones(Link(1, ReturnDate: new DateTime(2026, 12, 2), Notes: "new")),
         ]));
         var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
+        await service.SaveWithPhonesAsync(Equipment(),
+            [Link(1, ReturnDate: new DateTime(2026, 12, 1), Notes: "old")],
+            [Link(1, ReturnDate: new DateTime(2026, 12, 2), Notes: "new")]);
+        connection.CommandLog.Clear();
+        connection.ParameterLog.Clear();
 
         var errors = await service.SynchronizePhonesAsync(7,
             [Link(1, ReturnDate: new DateTime(2026, 12, 1), Notes: "old")],
@@ -210,6 +233,14 @@ public sealed class EquipmentPhonePersistenceTests
         Assert.Contains("P.КодТипаТелефонныхНомеров = 200", connection.CommandLog[0]);
         Assert.Contains("TARGET.КодРасположения = @LocationId", connection.CommandLog[0]);
     }
+
+    private static Equipment Equipment() => new()
+    {
+        Id = 7, ModelId = 5, OwnerId = 1, EquipmentTypeId = 30,
+    };
+
+    private static ScriptEntry ModelTypeRow() => Script.Rows(Script.Row(
+        ("КодТипаОборудования", 30), ("SNобязателен", (byte)0), ("ЕстьMACадрес", (byte)0)));
 
     private static ScriptEntry EquipmentRow() => Script.Rows(Script.Row(("КодОборудования", 7)));
 
