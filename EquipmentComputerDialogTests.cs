@@ -108,6 +108,35 @@ public sealed class EquipmentComputerDialogTests
         Assert.DoesNotContain("Конфигурация компьютера", provider.Markup);
     }
 
+    /// <summary>Пользователь явно отклоняет Unknown прежней операции и может повторить сохранение.</summary>
+    [Fact]
+    public async Task UnknownPreviousOperation_CanBeRejectedExplicitly()
+    {
+        await using var context = new BunitContext();
+        context.JSInterop.Mode = JSRuntimeMode.Loose;
+        context.Services.AddMudServices();
+        var rejected = false;
+        var provider = context.Render<MudDialogProvider>();
+        var reference = await context.Services.GetRequiredService<IDialogService>().ShowAsync<EquipmentComputerDialog>(
+            "Компьютер", new DialogParameters<EquipmentComputerDialog>
+            {
+                { component => component.RejectUnknownOperation, () => { rejected = true; return Task.CompletedTask; } },
+            });
+        var dialog = provider.FindComponent<EquipmentComputerDialog>();
+        dialog.Instance.GetType().GetField("_error", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+            .SetValue(dialog.Instance, "Черновик не сохранён. Предыдущая команда не сверена. Повторная отправка заблокирована.");
+        dialog.Instance.GetType().GetField("_saveBlocked", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+            .SetValue(dialog.Instance, true);
+        dialog.Render();
+
+        await dialog.FindAll("button").Single(button => button.TextContent.Trim() == "Отклонить предыдущую команду").ClickAsync();
+
+        Assert.True(rejected);
+        Assert.Contains("Повторите сохранение конфигурации", dialog.Markup);
+        Assert.False((bool)dialog.Instance.GetType().GetField("_saveBlocked", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(dialog.Instance)!);
+        await provider.InvokeAsync(() => reference.Close(DialogResult.Cancel()));
+    }
+
     /// <summary>SQL type error отображается в диалоге и не оставляет незавершённую операцию.</summary>
     [Fact]
     public async Task SqlTypeError_IsShownAndAllowsRetry()
