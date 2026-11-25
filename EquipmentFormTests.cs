@@ -1691,7 +1691,8 @@ public sealed class EquipmentFormTests
 
         Assert.Equal(1, fixture.Service.SyncCalls);
         Assert.Equal(0, fixture.Service.UpdateCalls);
-        Assert.Contains("Настройка оборудования выполнена", page.Markup);
+        Assert.Contains(context.Services.GetRequiredService<ISnackbar>().ShownSnackbars,
+            snackbar => snackbar.Message.Contains("Настройка оборудования выполнена", StringComparison.Ordinal));
     }
 
     /// <summary>Dirty-ввод не теряется и не сохраняется скрыто ради настройки телефона.</summary>
