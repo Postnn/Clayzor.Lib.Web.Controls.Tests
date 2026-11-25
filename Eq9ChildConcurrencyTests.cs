@@ -62,7 +62,10 @@ public sealed class Eq9ChildConcurrencyTests
 
         var parameters = Assert.Single(connection.ParameterLog);
         Assert.Equal(expectedExisting ? 1 : 0, parameters["ОжидаетсяСуществующий"]);
-        Assert.Equal(changedAt, parameters["ИсходноеИзменено"]);
+        if (expectedExisting)
+            Assert.Equal(changedAt, parameters["ИсходноеИзменено"]);
+        else
+            Assert.Equal(DBNull.Value, parameters["ИсходноеИзменено"]);
         var sql = Assert.Single(connection.CommandLog);
         Assert.Contains("AND Изменено = @ИсходноеИзменено", sql);
         Assert.Contains("WITH (UPDLOCK, HOLDLOCK)", sql);

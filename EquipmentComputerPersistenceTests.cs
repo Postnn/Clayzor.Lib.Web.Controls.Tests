@@ -68,6 +68,7 @@ public sealed class EquipmentComputerPersistenceTests
         Assert.Equal("128", snapshot.SsdDetail);
         Assert.Contains("IF EXISTS", connection.CommandLog[2]);
         Assert.Contains("INSERT Компьютеры", connection.CommandLog[2]);
+        Assert.Equal(DBNull.Value, connection.ParameterLog[2]["ИсходноеИзменено"]);
     }
 
     /// <summary>История восстанавливает поля и компоненты последнего снимка.</summary>
