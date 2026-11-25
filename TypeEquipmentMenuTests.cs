@@ -37,6 +37,22 @@ public sealed class TypeEquipmentMenuTests
         await Assert.ThrowsAsync<InvalidOperationException>(() => EquipmentType.ReadMenuAsync(db));
     }
 
+    /// <summary>Меню передаёт в SQL доверенные фильтр, параметры и порядок.</summary>
+    [Fact]
+    public async Task ReadMenuAppliesTrustedFilterAndOrder()
+    {
+        using var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Rows([])]));
+        using var db = new DbManager("Server=test", null, () => connection);
+        var parameters = new DynamicParameters();
+        parameters.Add("name", "%Компьютер%");
+
+        await EquipmentType.ReadMenuAsync(db, default, "ТипОборудования LIKE @name", parameters, "ТипОборудования DESC");
+
+        Assert.Contains("WHERE ТипОборудования LIKE @name", connection.CommandLog[0]);
+        Assert.Contains("ORDER BY ТипОборудования DESC", connection.CommandLog[0]);
+        Assert.Equal("%Компьютер%", connection.ParameterLog[0]["name"]);
+    }
+
     [Fact]
     public void MandatoryTypeStaysAfterClearAndOverridesAStaleTypeInTheUserFilter()
     {

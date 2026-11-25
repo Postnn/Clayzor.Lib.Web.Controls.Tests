@@ -130,6 +130,27 @@ public sealed class MaintenanceTests
         Assert.Contains("Исход выполнения требует проверки", page.Markup);
     }
 
+    /// <summary>Сортировка заголовком формирует SQL ORDER BY по разрешённой колонке.</summary>
+    [Fact]
+    public async Task HeaderSortUsesSqlOrderBy()
+    {
+        await using var context = CreateContext(out var connection);
+        context.Render<MudDialogProvider>();
+        var page = context.Render<MaintenancePage>();
+        page.WaitForAssertion(() => Assert.Contains("Работа <test>", page.Markup.Replace("&lt;", "<").Replace("&gt;", ">")));
+        var header = page.FindAll(".clay-grid-column-drag-handle")
+            .Single(x => x.TextContent.Contains("Регламентная работа", StringComparison.Ordinal));
+
+        await header.ClickAsync(new MouseEventArgs());
+        page.WaitForAssertion(() => Assert.Contains("ORDER BY РегламентнаяРабота ASC", connection.LastListQuery));
+        header = page.FindAll(".clay-grid-column-drag-handle")
+            .Single(x => x.TextContent.Contains("Регламентная работа", StringComparison.Ordinal));
+        await header.ClickAsync(new MouseEventArgs());
+        page.WaitForAssertion(() => Assert.Contains("ORDER BY РегламентнаяРабота DESC", connection.LastListQuery));
+        Assert.Contains("GETUTCDATE()", connection.LastListQuery);
+        Assert.Contains("DATEDIFF(MINUTE, GETDATE(), GETUTCDATE())", connection.LastListQuery);
+    }
+
     private static Task ClickConfirmation(IRenderedComponent<MaintenancePage> page)
     {
         page.WaitForAssertion(() => Assert.False(Action(page).Instance.Disabled));
@@ -185,6 +206,7 @@ public sealed class MaintenanceTests
         public bool FailInsert { get; set; }
         public int InsertCount { get; private set; }
         public int? CompletedId { get; private set; }
+        public string LastListQuery { get; private set; } = "";
         public TaskCompletionSource? InsertGate { get; set; }
         public TaskCompletionSource InsertStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public override string ConnectionString { get; set; } = "";
@@ -242,6 +264,7 @@ public sealed class MaintenanceTests
                 if (CommandText.Contains("WHERE КодРегламентныхРабот = @id"))
                     return Table(("Value", owner.WorkAvailable)).CreateDataReader();
                 Assert.Contains("FROM dbo.vwРегламентныеРаботы", CommandText);
+                owner.LastListQuery = CommandText;
                 if (owner.FailReadAfterInsert && owner.InsertCount > 0) throw new InvalidOperationException("test read failure");
                 return new DataTableReader([
                     Table(("Now", new DateTime(2026, 11, 25, 15, 0, 0))),
