@@ -1,5 +1,6 @@
 using Clayzor.Lib.DALC;
 using Clayzor.Lib.Entities.Inventory;
+using Clayzor.Lib.Entities.MedicalTests;
 using Microsoft.Data.SqlClient;
 
 namespace Clayzor.Lib.Web.Controls.Tests;
@@ -79,6 +80,7 @@ public sealed class Eq8EquipmentConcurrencyTests
     [Fact]
     public async Task PhoneServiceConflict_FailsWholeBatchWithoutAts()
     {
+        DapperColumnMapper.Initialize();
         var version = new DateTime(2026, 11, 18, 9, 30, 0, 500, DateTimeKind.Utc);
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([
             Script.Scalar(1),

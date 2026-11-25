@@ -32,6 +32,7 @@ public sealed class EquipmentSoftwarePersistenceTests
     [Fact]
     public async Task InsertSoftware_UsesExclusiveEnd()
     {
+        DapperColumnMapper.Initialize();
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([
             Script.Scalar(1), Script.Rows(Script.Row(("ЕстьХарактеристикиКомпьютера", (byte)1))), Script.NonQuery(1),
         ]));
