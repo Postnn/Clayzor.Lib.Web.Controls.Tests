@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Security.Claims;
@@ -136,6 +137,74 @@ public sealed class PingHostTests
             Assert.Contains("Проверка остановлена.", page.Markup);
         }
         finally { transport.PendingReply!.TrySetResult(null); }
+    }
+
+    /// <summary>Повтор хранилища сохраняет видимый журнал остановленной проверки без нового запуска.</summary>
+    [Fact]
+    public async Task JournalStorageRetryPreservesLinesAndDoesNotRestart()
+    {
+        var clock = new ManualClock();
+        var transport = new Probe();
+        await using var context = Configure(transport, clock);
+        var writable = false;
+        context.JSInterop.Setup<long>("clayDraftStore.saveTypedScope", _ => !writable)
+            .SetException(new Microsoft.JSInterop.JSException("Тестовый сбой IndexedDB"));
+        context.JSInterop.Setup<long>("clayDraftStore.saveTypedScope", _ => writable).SetResult(9L);
+        var page = context.Render<PingHostPage>();
+
+        await EventuallyAsync(() => clock.HasTimerDueIn(TimeSpan.FromSeconds(1)));
+        clock.Advance(TimeSpan.FromSeconds(1));
+        page.WaitForAssertion(() => Assert.Contains("время=1мс", page.Find("[role=log]").TextContent));
+        await Button(page, "Остановить").ClickAsync(new MouseEventArgs());
+
+        Assert.Contains("Не удалось сохранить журнал", page.Markup);
+        Assert.Contains("Проверка остановлена.", page.Markup);
+        writable = true;
+        await Button(page, "Повторить сохранение журнала").ClickAsync(new MouseEventArgs());
+
+        Assert.DoesNotContain("Не удалось сохранить журнал", page.Markup);
+        Assert.Equal(1, transport.Resolutions);
+        Assert.Equal(1, transport.Sends);
+        var retry = Assert.Single(context.JSInterop.Invocations["clayDraftStore.retryStorage"]);
+        Assert.Null(retry.Arguments[1]);
+        var saved = context.JSInterop.Invocations["clayDraftStore.saveTypedScope"].Last();
+        using var journal = JsonDocument.Parse((string)saved.Arguments[2]!);
+        Assert.Equal("Проверка остановлена.", journal.RootElement.GetProperty("Status").GetString());
+        Assert.False(journal.RootElement.GetProperty("Running").GetBoolean());
+        Assert.Contains("время=1мс", Assert.Single(journal.RootElement.GetProperty("Lines").EnumerateArray()).GetProperty("Text").GetString());
+    }
+
+    /// <summary>Поздний ответ повтора сохранения старого host не пишет его журнал в новую регистрацию.</summary>
+    [Fact]
+    public async Task PendingJournalRetryDoesNotOverwriteNewHost()
+    {
+        var clock = new ManualClock();
+        var transport = new Probe();
+        await using var context = Configure(transport, clock);
+        var writable = false;
+        context.JSInterop.Setup<long>("clayDraftStore.saveTypedScope", _ => !writable)
+            .SetException(new Microsoft.JSInterop.JSException("Тестовый сбой хранилища"));
+        context.JSInterop.Setup<long>("clayDraftStore.saveTypedScope", _ => writable).SetResult(9L);
+        var delayedRetry = context.JSInterop.Setup<string?>("clayDraftStore.retryStorage", _ => true);
+        var page = context.Render<PingHostPage>();
+        await EventuallyAsync(() => clock.HasTimerDueIn(TimeSpan.FromSeconds(1)));
+        await Button(page, "Остановить").ClickAsync(new MouseEventArgs());
+
+        var retry = Button(page, "Повторить сохранение журнала").ClickAsync(new MouseEventArgs());
+        page.WaitForAssertion(() => Assert.Single(context.JSInterop.Invocations["clayDraftStore.retryStorage"]));
+        writable = true;
+        await page.InvokeAsync(() => context.Services.GetRequiredService<NavigationManager>()
+            .NavigateTo("/Equipment/PingHost?host=127.0.0.1"));
+        page.WaitForAssertion(() => Assert.Contains("Обмен пакетами с 127.0.0.1", page.Markup));
+        var savedForNewHost = context.JSInterop.Invocations["clayDraftStore.saveTypedScope"].Count;
+
+        delayedRetry.SetResult(null);
+        await retry;
+
+        Assert.Contains("Обмен пакетами с 127.0.0.1", page.Markup);
+        Assert.DoesNotContain("Не удалось сохранить журнал", page.Markup);
+        Assert.Equal(savedForNewHost, context.JSInterop.Invocations["clayDraftStore.saveTypedScope"].Count);
+        await Button(page, "Остановить").ClickAsync(new MouseEventArgs());
     }
 
     /// <summary>При восстановлении прежнего журнала проверка ожидает явного запуска.</summary>
