@@ -24,7 +24,7 @@ using MudBlazor.Services;
 namespace Clayzor.Lib.Web.Controls.Tests;
 
 /// <summary>Профильные тесты формы модели оборудования.</summary>
-public sealed class ModelEquipmentFormTests
+public sealed partial class ModelEquipmentFormTests
 {
     /// <summary>Начальный тип показывает зависимые поля и задаёт Net равным нулю.</summary>
     [Fact]

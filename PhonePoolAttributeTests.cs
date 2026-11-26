@@ -350,6 +350,49 @@ public sealed partial class PhonePoolAttributeTests
         Assert.Empty(sql.Writes);
     }
 
+    /// <summary>Восстановление подтверждает точную пару и не раскрывает значение атрибута.</summary>
+    [Theory]
+    [InlineData("owned")]
+    [InlineData("owned-denied")]
+    [InlineData("wrong-key")]
+    [InlineData("wrong-actor")]
+    [InlineData("legacy-insert")]
+    public async Task SubmittedAttributeView_ProtectsOpaqueValues(string mode)
+    {
+        using var sql = new Probe { TypeExists = mode == "owned-denied", DenyRead = mode == "owned-denied" };
+        const string privateValue = "fixture-secret-unclassified-value";
+        var exactKey = mode == "wrong-key" ? new PhonePoolAttributeKey(Key.PoolId, "Другой тип").RouteId : Key.RouteId;
+        var data = JsonSerializer.Serialize(new
+        {
+            Original = new PhonePoolAttributeForm.FormState("original-value"),
+            Current = new PhonePoolAttributeForm.FormState(privateValue),
+            Version = mode == "legacy-insert" ? null : new { Key = exactKey, ChangedBy = 4, ChangedAt = DateTime.UnixEpoch },
+        });
+        var operation = JsonSerializer.Serialize(new
+        {
+            version = 1, attemptId = "ppa-submitted", kind = mode == "legacy-insert" ? "phone-pool-attribute.insert" : "phone-pool-attribute.update",
+            status = "unknown", revision = 21, data, scopes = Array.Empty<object>(), acceptLegacyTyped = false, legacyTypedRevision = 0,
+        });
+        await using var context = CreateContext(sql, new ClayDraftRestore("recovery", true, 21, null, operation,
+            new Dictionary<string, string> { ["main"] = RecoverySnapshot("local-draft") }));
+        var page = context.Render<PhonePoolAttributeForm>();
+        page.WaitForAssertion(() => Assert.Contains("Посмотреть снимок попытки", page.Markup));
+        if (mode == "wrong-actor") sql.EmployeeId = 8;
+
+        await page.InvokeAsync(() => Button(page, "Посмотреть снимок попытки").ClickAsync());
+
+        if (mode is "owned" or "owned-denied")
+            Assert.Contains("Значение атрибута скрыто", page.Find("[data-testid=submitted-attempt]").TextContent);
+        else
+            Assert.Empty(page.FindAll("[data-testid=submitted-attempt]"));
+        Assert.DoesNotContain(privateValue, page.Markup);
+        Assert.Contains("local-draft", page.Markup);
+        Assert.True(Button(page, "Применить").HasAttribute("disabled"));
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
+        Assert.Empty(sql.Writes);
+    }
+
     private static string RecoverySnapshot(string value) => JsonSerializer.Serialize(new
     {
         Original = new PhonePoolAttributeForm.FormState("Исходное значение"),

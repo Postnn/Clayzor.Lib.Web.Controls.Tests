@@ -849,10 +849,11 @@ public sealed partial class EquipmentInsTests
         var fixture = CreateFixture(uri);
         await using var context = fixture.Context;
         var page = context.Render<EquipmentIns>();
-        page.WaitForElement("textarea");
-        await page.Find("textarea").InputAsync("Локальная правка");
+        var editor = page.WaitForElement("textarea[data-draft-key='ins.notes']", TimeSpan.FromSeconds(5));
+        await editor.InputAsync("Локальная правка");
         page.WaitForAssertion(() => Assert.Contains(context.JSInterop.Invocations["clayDraftStore.saveTypedScope"],
-            call => Equals(call.Arguments[1], "main") && ReadDraftNotes(Assert.IsType<string>(call.Arguments[2])) == "Локальная правка"));
+            call => Equals(call.Arguments[1], "main") && ReadDraftNotes(Assert.IsType<string>(call.Arguments[2])) == "Локальная правка"),
+            TimeSpan.FromSeconds(5));
         return Assert.IsType<string>(context.JSInterop.Invocations["clayDraftStore.saveTypedScope"]
             .Last(call => Equals(call.Arguments[1], "main")).Arguments[2]);
     }

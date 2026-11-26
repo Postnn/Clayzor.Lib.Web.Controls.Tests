@@ -102,7 +102,7 @@ export async function runAdvancedSearchFixture() {
     lost.dropAck = false;
     assert.equal(await choose(lost, requestId, []), true);
     const empties = calls.filter(call => Array.isArray(call.value));
-    assert.deepEqual(empties.map(call => call.revision), [1, 1]);
+    assert.deepEqual(empties.map(call => call.revision), [1]);
     assert.equal(empties[0].value.length, 0);
     assert.equal(await choose(stale, secondId, 99), false);
     assert.equal(stale.closed, false);
@@ -217,3 +217,71 @@ export async function runCircuitReplacementFixture() {
 }
 
 await runCircuitReplacementFixture();
+
+export async function runAcceptedReceiptReplayFixture() {
+    const proof = '1'.repeat(32);
+    const bindingId = '2'.repeat(32);
+    for (const selection of [107, [107, 9], []]) {
+        const calls = [];
+        let disconnected = false;
+        const fixture = transport(async (method, id) => {
+            calls.push({ method, id });
+            if (method === 'CancelAsync') return;
+            if (disconnected) throw new Error('Circuit disposed');
+            return method === 'ReadyForSelectionAsync' ? true : 'Accepted';
+        });
+        const child = fixture.open(requestId, Array.isArray(selection), { key: proof, bindingId });
+        const bridge = fixture.parent.claySelectAdvancedSearch;
+        const deliverAck = child.postMessage;
+        let firstAck;
+        const decisions = [];
+        const acceptedByParent = new Promise(resolve => {
+            child.postMessage = (message, origin) => {
+                decisions.push(message.decision);
+                if (message.decision === 'Accepted' && !firstAck) {
+                    firstAck = message;
+                    resolve();
+                }
+                if (Array.isArray(selection) && selection.length === 0 && child.dropAck)
+                    throw new Error('Child ACK delivery failed');
+                deliverAck(message, origin);
+            };
+        });
+        child.dropAck = true;
+        const first = fixture.choose(child, requestId, selection);
+        await acceptedByParent;
+        child.timeOut();
+        assert.equal(await first, false);
+        assert.equal(child.closed, false);
+        assert.deepEqual(calls.map(call => call.method), ['ReadyForSelectionAsync', 'ApplyAsync']);
+
+        child.dropAck = false;
+        disconnected = true;
+        bridge.detach(requestId, bindingId);
+        const matching = { ...child.delivery };
+        await fixture.parent.message({ origin: childOrigin, source: {}, data: matching });
+        await fixture.parent.message({ origin: parentOrigin, source: child, data: matching });
+        assert.deepEqual(decisions, ['Accepted']);
+        await fixture.parent.message({ origin: childOrigin, source: child, data: { ...matching, revision: 2 } });
+        await fixture.parent.message({ origin: childOrigin, source: child, data: {
+            ...matching, value: Array.isArray(selection) ? [1] : 1,
+        }});
+        assert.equal(child.closed, false);
+        assert.equal(calls.length, 2);
+        assert.deepEqual(decisions, ['Accepted', 'Stale', 'Stale']);
+
+        assert.equal(await fixture.choose(child, requestId, selection), true);
+        assert.notEqual(child.delivery.receipt, firstAck.receipt);
+        assert.equal(child.closed, true);
+        assert.equal(calls.length, 2);
+
+        const cancelled = fixture.open(secondId, true, { key: proof, bindingId });
+        cancelled.close();
+        fixture.parent.tick();
+        assert.equal(bridge.requests[secondId], undefined);
+        assert.deepEqual(calls.at(-1), { method: 'CancelAsync', id: secondId });
+        assert.equal(calls.filter(call => call.method === 'ApplyAsync').length, 1);
+    }
+}
+
+await runAcceptedReceiptReplayFixture();
