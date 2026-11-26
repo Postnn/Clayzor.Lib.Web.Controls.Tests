@@ -110,4 +110,24 @@ public sealed class TypeEquipmentMenuTests
         Assert.Equal("МодельОборудования", filter.Column);
         Assert.Equal("test", filter.Value);
     }
+
+    [Fact]
+    public async Task QuickSearchFiltersTheTypeCatalogAndColumnDragIsEnabled()
+    {
+        using var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Rows([])]));
+        using var db = new DbManager("Server=test", null, () => connection);
+        var pageType = typeof(Kesco.App.Web.Inventory.Components.Pages.Equipment.TypeEquipmentMenu);
+        var page = Activator.CreateInstance(pageType)!;
+        const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+        pageType.GetProperty("Db", flags)!.SetValue(page, db);
+        var options = (ClayGridOptions)pageType.GetField("_typesOptions", flags)!.GetValue(page)!;
+
+        Assert.True(options.AllowColumnReorder);
+        Assert.Equal([EquipmentType.NameColumnName], options.SearchColumns);
+        var query = new ClayDataQuery { SearchText = "Компьютер" };
+        await (Task)pageType.GetMethod("OnTypesQueryChangedAsync", flags)!.Invoke(page, [query])!;
+
+        Assert.Contains("ТипОборудования LIKE @search", connection.CommandLog[0]);
+        Assert.Equal("%Компьютер%", connection.ParameterLog[0]["search"]);
+    }
 }

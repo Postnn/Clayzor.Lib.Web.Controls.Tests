@@ -21,6 +21,7 @@ public sealed class InventoryHomeTests
 
         cut.WaitForAssertion(() => Assert.Single(cut.FindAll("[data-clay-navigation-menu]")));
         Assert.Equal(3, cut.FindAll(".clay-navigation-menu__root-button").Count);
+        Assert.Single(cut.FindAll(".clay-navigation-menu__actions [aria-label='Тема оформления']"));
         Assert.Contains("Выберите запрос в меню", cut.Markup);
         Assert.DoesNotContain("clay-grid-root", cut.Markup);
         Assert.DoesNotContain("Не указан код запроса", cut.Markup);
@@ -55,6 +56,7 @@ public sealed class InventoryHomeTests
         context.Services.AddSingleton<Microsoft.AspNetCore.Components.Authorization.AuthenticationStateProvider>(
             new FakeAuthenticationStateProvider());
         context.Services.AddSingleton(new Clayzor.Lib.Web.Settings.ClayAppSettings());
+        context.Services.AddScoped<Clayzor.Lib.Web.Controls.Themes.ClayThemeState>();
         context.Services.AddSingleton(new Clayzor.Lib.Web.Controls.ClayErrorService());
         context.Services.AddSingleton<ISqlErrorHandler, FakeSqlErrorHandler>();
         context.Services.AddSingleton<IConfiguration>(new ConfigurationBuilder().Build());
