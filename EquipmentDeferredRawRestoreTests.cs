@@ -43,12 +43,13 @@ public sealed class EquipmentDeferredRawRestoreTests
         var dialogs = context.Render<MudDialogProvider>();
         var service = context.Services.GetRequiredService<IDialogService>();
         var pending = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var retry = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var readyStates = new List<EquipmentEditorReadiness>();
         var calls = 0;
         var saves = 0;
         var editor = new EquipmentEditorContext(7, 1, () => true)
         {
-            RawRestore = () => ++calls == 1 ? pending.Task : Task.CompletedTask,
+            RawRestore = () => ++calls == 1 ? pending.Task : retry.Task,
             ReadinessChanged = state => { readyStates.Add(state); return Task.CompletedTask; },
         };
         var reference = kind switch
@@ -82,13 +83,13 @@ public sealed class EquipmentDeferredRawRestoreTests
                 Assert.False(reference.Result.IsCompleted);
             }
             pending.SetException(new InvalidOperationException("Не все поля присутствуют в DOM."));
-            dialogs.WaitForAssertion(() => Assert.Single(dialogs.FindAll("button"),
-                button => button.TextContent.Trim() == "Повторить восстановление"));
+            dialogs.WaitForAssertion(() => Assert.Equal(2, calls));
+            Assert.DoesNotContain(dialogs.FindAll("button"), button => button.TextContent.Trim() == "Повторить восстановление");
             Assert.True(FindButton(dialogs, "OK").HasAttribute("disabled"));
             Assert.False(reference.Result.IsCompleted);
             Assert.Equal(0, saves);
 
-            await FindButton(dialogs, "Повторить восстановление").ClickAsync();
+            retry.SetResult();
             dialogs.WaitForAssertion(() => Assert.False(FindButton(dialogs, "OK").HasAttribute("disabled")));
             Assert.Equal(2, calls);
             Assert.Equal([EquipmentEditorReadiness.Pending, EquipmentEditorReadiness.Failed,
@@ -101,7 +102,7 @@ public sealed class EquipmentDeferredRawRestoreTests
                 Assert.False((await reference.Result.WaitAsync(TimeSpan.FromSeconds(2)))!.Canceled);
             }
         }
-        finally { pending.TrySetResult(); }
+        finally { pending.TrySetResult(); retry.TrySetResult(); }
     }
 
     private static AngleSharp.Dom.IElement FindButton(IRenderedComponent<MudDialogProvider> dialogs, string text) =>

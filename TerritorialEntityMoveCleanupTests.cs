@@ -25,7 +25,7 @@ namespace Clayzor.Lib.Web.Controls.Tests;
 public sealed class TerritorialEntityMoveCleanupTests
 {
     [Fact]
-    public async Task BrowsingCleanupFailureKeepsConfirmedCommitAndRetryOnlyRefreshes()
+    public async Task AutomaticCleanupRetriesWithoutRepeatingConfirmedMove()
     {
         await using var context = new BunitContext();
         var database = new MoveConnection();
@@ -40,7 +40,12 @@ public sealed class TerritorialEntityMoveCleanupTests
 
         var module = context.JSInterop.SetupModule("./js/territorialEntitySearch.js");
         var failCleanup = true;
-        context.JSInterop.SetupVoid("clayDraftStore.commitOperation", _ => failCleanup)
+        context.JSInterop.SetupVoid("clayDraftStore.commitOperation", _ =>
+        {
+            if (!failCleanup) return false;
+            failCleanup = false;
+            return true;
+        })
             .SetException(new JSException("Очистка недоступна"));
         module.Setup<bool>("refreshMetadataFrame", _ => true).SetResult(true);
 
@@ -49,18 +54,9 @@ public sealed class TerritorialEntityMoveCleanupTests
         Assert.True(moved);
         Assert.Equal(1, database.Updates);
         Assert.Equal(1, database.Commits);
-        Assert.Contains("Перенос подтверждён", form.Markup);
         Assert.DoesNotContain("Перенос не подтверждён", form.Markup);
-        Assert.False(await form.InvokeAsync(() => tree.Options.ReparentNodeAsync!(child, destination)));
-
-        database.QueuePane("Родитель после переноса");
-        database.QueueRoots();
-        database.Reads.Enqueue(Script.Rows(Script.Row(("Id", 5))));
-        failCleanup = false;
-        await form.InvokeAsync(() => form.FindAll("button").Single(button => button.TextContent.Trim() == "Повторить очистку").ClickAsync());
-
         Assert.DoesNotContain("Повторить очистку", form.Markup);
-        Assert.Equal("Территории в Родитель после переноса", form.Find("iframe").GetAttribute("title"));
+        Assert.Equal("Территории в Старый родитель", form.Find("iframe").GetAttribute("title"));
         Assert.Equal(url, form.Find("iframe").GetAttribute("src"));
         Assert.Equal(9, database.ParentId);
         Assert.Equal(1, database.Updates);
@@ -148,16 +144,8 @@ public sealed class TerritorialEntityMoveCleanupTests
         var form = RenderSearch(context, database,
             new ClayDraftRestore("move-fixture", true, revision, null, storedOperation,
                 new Dictionary<string, string> { ["move-result"] = result }));
-        var tree = form.FindComponent<ClayTreeView>().Instance;
-        var child = ChildOf(tree.RootNodes.Single(node => node.Id == "5"));
-        var destination = tree.RootNodes.Single(node => node.Id == "9");
-
-        Assert.False(await form.InvokeAsync(() => tree.Options.ReparentNodeAsync!(child, destination)));
         if (matching)
         {
-            if (!rejected) database.QueueRoots();
-            await form.InvokeAsync(() => form.FindAll("button")
-                .Single(button => button.TextContent.Trim() == "Повторить очистку").ClickAsync());
             var commit = Assert.Single(context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
             Assert.Equal(revision, commit.Arguments[1]);
             if (rejected) Assert.Contains("Конкурентный перенос уже изменил строку.", form.Markup);

@@ -103,7 +103,7 @@ public sealed partial class EquipmentInsTests
         page.WaitForElement("[data-testid='ins-input-readiness']");
         SetCreationReadiness(context, new(true, [], []));
 
-        await page.InvokeAsync(() => FindButton(page, "Повторить восстановление ввода").ClickAsync());
+        await page.InvokeAsync(() => FindButton(page, "Обновить").ClickAsync());
 
         Assert.Single(fixture.Service.CopyRequests);
         Assert.Single(context.JSInterop.Invocations["clayDraftStore.applyPendingRaw"]);

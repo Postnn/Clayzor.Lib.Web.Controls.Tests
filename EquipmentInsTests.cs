@@ -606,7 +606,7 @@ public sealed partial class EquipmentInsTests
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
         if (proven)
         {
-            await FindButton(page, "Завершить обработку черновика").ClickAsync();
+            await FindButton(page, "Обновить").ClickAsync();
             Assert.Equal(6L, Assert.Single(context.JSInterop.Invocations["clayDraftStore.commitOperation"]).Arguments[1]);
             Assert.Equal(status == "confirmed" ? 0 : 1, context.JSInterop.Invocations["clayDraftStore.recordConfirmedOperation"].Count);
             await FindButton(page, "Открыть созданное оборудование").ClickAsync();
@@ -643,11 +643,11 @@ public sealed partial class EquipmentInsTests
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.recordConfirmedOperation"]);
         await FindButton(page, "Отмена").ClickAsync();
         Assert.Empty(context.JSInterop.Invocations["clayModelEquipmentForm.close"]);
-        Assert.Contains("сохранить номер созданного оборудования", page.Markup);
+        Assert.Contains("проверить результат создания оборудования", page.Markup);
         await InvokeSave(page, false);
         Assert.Equal(1, fixture.Service.CreateCalls);
 
-        await FindButton(page, "Завершить обработку черновика").ClickAsync();
+        await FindButton(page, "Обновить").ClickAsync();
         var stores = context.JSInterop.Invocations["clayDraftStore.saveTypedScope"]
             .Where(call => Equals(call.Arguments[1], "creation-result")).ToArray();
         Assert.Equal(2, stores.Length);

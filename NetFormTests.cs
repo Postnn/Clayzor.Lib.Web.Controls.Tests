@@ -828,10 +828,9 @@ public sealed partial class NetFormTests
             .SetResult(new ClayDraftRestore("net-fixture", true, 9, null, OperationJson("net.save", "unknown")));
         var page = fixture.Context.Render<NetPage>();
         WaitForLoad(page);
-        Assert.Contains("найдена сохранённая попытка", page.Markup);
+        Assert.DoesNotContain("Открыть сохранённую попытку", page.Markup);
         var count = fixture.Connection.CommandLog.Count;
 
-        await page.InvokeAsync(() => OperationJournalButton(page, "Открыть сохранённую попытку").ClickAsync());
         await TypeText(page, 1, "черновик");
         await Invoke(page, "SaveAsync", false);
         await Invoke(page, "RestartPoeAsync");
@@ -839,6 +838,24 @@ public sealed partial class NetFormTests
         Assert.Contains("Результат команды «Сохранить» неизвестен", page.Markup);
         Assert.Equal(count, fixture.Connection.CommandLog.Count);
         Assert.Single(fixture.Context.JSInterop.Invocations["clayDraftStore.recoverListedDraft"]);
+        Assert.Empty(fixture.Context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
+    }
+
+    /// <summary>Несколько сохранённых попыток порта требуют сверки и блокируют запись.</summary>
+    [Fact]
+    public async Task MultipleRecoveryCandidates_BlockCommandsWithoutChoosingAttempt()
+    {
+        using var fixture = new NetFixture(poe: 1, candidates:
+            [new("first-tab", 8, true, true), new("second-tab", 9, true, true)]);
+        var page = fixture.Context.Render<NetPage>();
+        WaitForLoad(page);
+        Assert.DoesNotContain("Открыть сохранённую попытку", page.Markup);
+        Assert.Contains("Команды заблокированы", page.Markup);
+
+        await Invoke(page, "SaveAsync", false);
+        await Invoke(page, "RestartPoeAsync");
+
+        Assert.Empty(fixture.Context.JSInterop.Invocations["clayDraftStore.recoverListedDraft"]);
         Assert.Empty(fixture.Context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
     }
 
@@ -1004,6 +1021,8 @@ public sealed partial class NetFormTests
             if (!deferRaw)
                 Context.JSInterop.Setup<ClayDraftRawApplyResult>("clayDraftStore.applyRaw", _ => true)
                     .SetResult(new ClayDraftRawApplyResult([], rawPending ? ["data:net.return-date:0"] : []));
+            Context.JSInterop.Setup<ClayDraftRawApplyResult>("clayDraftStore.applyPendingRaw", _ => true)
+                .SetResult(new ClayDraftRawApplyResult([], rawPending ? ["data:net.return-date:0"] : []));
             Context.JSInterop.Setup<ClayDraftRecoveryCandidate[]>("clayDraftStore.listRecoveryCandidates", _ => true)
                 .SetResult(candidates ?? []);
             Context.JSInterop.Setup<ClayDraftStorageHealth>("clayDraftStore.getHealth", _ => true)

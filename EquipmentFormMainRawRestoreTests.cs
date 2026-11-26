@@ -12,7 +12,7 @@ public sealed partial class EquipmentFormTests
 {
     private const string PendingApply = "clayDraftStore.applyPendingRaw";
     private const string DraftReadiness = "clayDraftStore.getRestoreReadiness";
-    private const string RetryMainRawLabel = "Повторить восстановление ввода";
+    private const string RestoreWarning = "Восстановлена только часть ввода основной формы";
 
     [Theory]
     [InlineData(false)]
@@ -28,7 +28,7 @@ public sealed partial class EquipmentFormTests
         context.JSInterop.Setup<ClayDraftRestoreReadiness>(DraftReadiness, _ => true)
             .SetResult(new ClayDraftRestoreReadiness(false, failed ? [] : ["main"], failed ? ["main"] : []));
         var page = context.Render<EquipmentForm>();
-        page.WaitForAssertion(() => Assert.Contains(RetryMainRawLabel, page.Markup));
+        page.WaitForAssertion(() => Assert.Contains(RestoreWarning, page.Markup));
         WaitForSn(page, "CLAY_TEST_7");
         await page.InvokeAsync(() => FindSn(page).Input("CLAY_TEST_NEWER"));
 
@@ -43,9 +43,9 @@ public sealed partial class EquipmentFormTests
         context.JSInterop.Setup<ClayDraftRestoreReadiness>(DraftReadiness, _ => true)
             .SetResult(new ClayDraftRestoreReadiness(false, ["child:unrelated:new:root"], []));
         await page.InvokeAsync(() => page.FindAll("button")
-            .Single(button => button.TextContent.Trim() == RetryMainRawLabel).ClickAsync());
+            .Single(button => button.TextContent.Trim() == "Обновить").ClickAsync());
 
-        page.WaitForAssertion(() => Assert.DoesNotContain(RetryMainRawLabel, page.Markup));
+        page.WaitForAssertion(() => Assert.DoesNotContain(RestoreWarning, page.Markup));
         WaitForSn(page, "CLAY_TEST_NEWER");
         Assert.Equal(2, context.JSInterop.Invocations[PendingApply].Count);
         Assert.All(context.JSInterop.Invocations[PendingApply], call => Assert.Equal("main", call.Arguments[1]));
@@ -66,14 +66,15 @@ public sealed partial class EquipmentFormTests
         context.JSInterop.Setup<ClayDraftRawApplyResult>(PendingApply, _ => true)
             .SetResult(new ClayDraftRawApplyResult([], ["data:equipment.writeoff:0"]));
         var page = context.Render<EquipmentForm>();
-        page.WaitForAssertion(() => Assert.Contains(RetryMainRawLabel, page.Markup));
+        page.WaitForAssertion(() => Assert.Contains(RestoreWarning, page.Markup));
         fixture.Service.Roles.Remove((int)Роли.Специалист_по_инвентаризации_оборудования);
 
         await page.InvokeAsync(() => page.FindAll("button")
-            .Single(button => button.TextContent.Trim() == RetryMainRawLabel).ClickAsync());
+            .Single(button => button.TextContent.Trim() == "Обновить").ClickAsync());
 
         Assert.Contains("Не удалось подтвердить доступ к восстановлению ввода", page.Markup);
-        Assert.Contains(RetryMainRawLabel, page.Markup);
+        Assert.Contains(RestoreWarning, page.Markup);
+        Assert.DoesNotContain("Повторить восстановление ввода", page.Markup);
         Assert.Single(context.JSInterop.Invocations[PendingApply]);
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.discardScope"]);
         Assert.Equal(0, fixture.Service.UpdateCalls);
@@ -86,6 +87,8 @@ public sealed partial class EquipmentFormTests
         var fixture = CreateFixture(computer: true);
         await using var context = fixture.Context;
         context.JSInterop.Setup<ClayDraftRawApplyResult>("clayDraftStore.applyRaw", call => Equals(call.Arguments[1], scope))
+            .SetResult(new ClayDraftRawApplyResult([], ["data:computer.hd:0"]));
+        context.JSInterop.Setup<ClayDraftRawApplyResult>(PendingApply, call => Equals(call.Arguments[1], scope))
             .SetResult(new ClayDraftRawApplyResult([], ["data:computer.hd:0"]));
         var provider = context.Render<MudDialogProvider>();
         var page = context.Render<EquipmentForm>();
@@ -103,7 +106,7 @@ public sealed partial class EquipmentFormTests
         Assert.DoesNotContain(context.JSInterop.Invocations["clayDraftStore.discardScope"],
             call => Equals(call.Arguments[1], scope));
         Assert.Single(context.JSInterop.Invocations["clayDraftStore.applyRaw"]);
-        Assert.Empty(context.JSInterop.Invocations[PendingApply]);
+        Assert.All(context.JSInterop.Invocations[PendingApply], call => Assert.Equal(scope, call.Arguments[1]));
         Assert.NotNull(GetPrivate(page.Instance, "_activeEditor"));
         Assert.Equal(0, fixture.Service.ComputerSaveCalls);
     }

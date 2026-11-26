@@ -15,7 +15,7 @@ public sealed partial class DutyTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task DutyManualRawRetryDoesNotReapplyRestoredFields(bool fails)
+    public async Task DutyAutomaticRawRetryDoesNotReapplyRestoredFields(bool fails)
     {
         var row = EditableDutyRow();
         var draft = DutyDraft.FromRow(row) with { PlannedId = 9 };
@@ -26,7 +26,7 @@ public sealed partial class DutyTests
             .SetResult(new(["data:duty.planned:0"], ["data:duty.time-off:0"]));
         var retry = context.JSInterop.Setup<ClayDraftRawApplyResult>("clayDraftStore.applyPendingRaw", _ => true);
         if (fails) retry.SetException(new JSException("fixture failed pending scope"));
-        else retry.SetResult(new(["data:duty.time-off:0"], []));
+
 
         var page = context.Render<DutyEditor>(p => p.Add(component => component.RouteId, "20261125"));
         page.WaitForAssertion(() => Assert.Single(context.JSInterop.Invocations["clayDraftStore.applyRaw"]));
@@ -34,9 +34,11 @@ public sealed partial class DutyTests
         await page.InvokeAsync(() => page.FindComponent<ClaySelect<DutyEngineer, int?>>().Instance.ValueChanged.InvokeAsync(11));
 
         SetDutyRawReadiness(context, new(false, ["unrelated-scope"], []));
-        await page.InvokeAsync(() => DutyAction(page, "Повторить восстановление").ClickAsync());
+        if (!fails) retry.SetResult(new(["data:duty.time-off:0"], []));
+        page.WaitForAssertion(() => Assert.Equal(fails, DutyAction(page, "Сохранить").HasAttribute("disabled")));
+        Assert.DoesNotContain("Повторить восстановление", page.Markup);
 
-        Assert.Equal("main", Assert.Single(retry.Invocations).Arguments[1]);
+        page.WaitForAssertion(() => Assert.Equal("main", Assert.Single(retry.Invocations).Arguments[1]));
         Assert.Single(context.JSInterop.Invocations["clayDraftStore.applyRaw"]);
         Assert.Equal(11, ReadDutyWorkingCopy(page).PlannedId);
         Assert.Equal(fails, DutyAction(page, "Сохранить").HasAttribute("disabled"));

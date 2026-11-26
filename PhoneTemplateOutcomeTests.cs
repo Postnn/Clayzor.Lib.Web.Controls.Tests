@@ -79,7 +79,7 @@ public sealed class PhoneTemplateOutcomeTests
             .Where(attribute => attribute.Name.StartsWith("data-", StringComparison.Ordinal) || attribute.Name == "title");
         Assert.DoesNotContain(metadata, attribute => attribute.Value.Contains(OriginalText) || attribute.Value.Contains(ProposedText));
         fixture.Enqueue(ModelRow(ProposedText));
-        await Button(page, "Прочитать состояние шаблона").ClickAsync();
+        await Button(page, "Обновить").ClickAsync();
         await SaveAsync(page);
 
         Assert.Equal(1, fixture.WriteCount);
@@ -148,7 +148,7 @@ public sealed class PhoneTemplateOutcomeTests
 
         context.JSInterop.SetupVoid("clayDraftStore.commitOperation", _ => true).SetVoidResult();
         fixture.Enqueue(ModelRow(ProposedText));
-        await Button(page, "Проверить журнал сохранения").ClickAsync();
+        await Button(page, "Обновить").ClickAsync();
 
         Assert.Equal(2, context.JSInterop.Invocations["clayDraftStore.commitOperation"].Count);
         Assert.Equal(1, fixture.WriteCount);
@@ -167,7 +167,7 @@ public sealed class PhoneTemplateOutcomeTests
         Assert.Contains("Запись шаблона подтверждена", page.Markup);
         fixture.Runtime.EditorText = OriginalText;
         fixture.Enqueue(ModelRow());
-        await Button(page, "Проверить журнал сохранения").ClickAsync();
+        await Button(page, "Обновить").ClickAsync();
 
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.recordConfirmedOperation"]);
         Assert.Single(context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
@@ -305,7 +305,7 @@ public sealed class PhoneTemplateOutcomeTests
         restored.WaitForAssertion(() => Assert.Contains("Запись шаблона подтверждена", restored.Markup));
         reopened.Enqueue(ModelRow(ProposedText));
 
-        await Button(restored, "Проверить журнал сохранения").ClickAsync();
+        await Button(restored, "Обновить").ClickAsync();
 
         Assert.Equal(0, reopened.WriteCount);
         Assert.Equal(late, restored.Find("textarea").TextContent);
@@ -328,7 +328,7 @@ public sealed class PhoneTemplateOutcomeTests
             .SetResult(new ClayDraftRestoreReadiness(false, [], [InputScope]));
         var page = Render(context);
 
-        page.WaitForAssertion(() => Assert.Contains("Повторить восстановление ввода", page.Markup));
+        page.WaitForAssertion(() => Assert.Contains("Часть ввода ещё не восстановлена", page.Markup));
         Assert.True(Button(page, "Применить").HasAttribute("disabled"));
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
         Assert.Equal(0, fixture.WriteCount);
@@ -344,7 +344,7 @@ public sealed class PhoneTemplateOutcomeTests
         context.JSInterop.Setup<ClayDraftRestoreReadiness>("clayDraftStore.getRestoreReadiness", _ => true)
             .SetResult(new ClayDraftRestoreReadiness(false, [InputScope], []));
         var page = Render(context);
-        page.WaitForAssertion(() => Assert.NotNull(Button(page, "Повторить восстановление ввода")));
+        page.WaitForAssertion(() => Assert.Contains("Часть ввода ещё не восстановлена", page.Markup));
         var newer = new string('Я', 256 * 1024);
         await EditAsync(page, fixture, newer);
         fixture.Enqueue(Roles(Роли.Дежурный_инженер));
@@ -353,7 +353,7 @@ public sealed class PhoneTemplateOutcomeTests
         context.JSInterop.Setup<ClayDraftRestoreReadiness>("clayDraftStore.getRestoreReadiness", _ => true)
             .SetResult(new ClayDraftRestoreReadiness(false, ["other-editor"], []));
 
-        await page.InvokeAsync(() => Button(page, "Повторить восстановление ввода").ClickAsync());
+        await page.InvokeAsync(() => Button(page, "Обновить").ClickAsync());
 
         var retry = Assert.Single(context.JSInterop.Invocations["clayDraftStore.applyPendingRaw"]);
         Assert.Equal(InputScope, retry.Arguments[1]);
@@ -377,10 +377,10 @@ public sealed class PhoneTemplateOutcomeTests
         context.JSInterop.Setup<ClayDraftRestoreReadiness>("clayDraftStore.getRestoreReadiness", _ => true)
             .SetResult(new ClayDraftRestoreReadiness(false, [], [InputScope]));
         var page = Render(context);
-        page.WaitForAssertion(() => Assert.NotNull(Button(page, "Повторить восстановление ввода")));
+        page.WaitForAssertion(() => Assert.Contains("Часть ввода ещё не восстановлена", page.Markup));
         fixture.Enqueue(Roles(Роли.Наблюдатель_услуг_связи));
 
-        await page.InvokeAsync(() => Button(page, "Повторить восстановление ввода").ClickAsync());
+        await page.InvokeAsync(() => Button(page, "Обновить").ClickAsync());
 
         Assert.Contains("Не удалось подтвердить сотрудника", page.Markup);
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.applyPendingRaw"]);
@@ -397,10 +397,10 @@ public sealed class PhoneTemplateOutcomeTests
         context.JSInterop.Setup<ClayDraftRestoreReadiness>("clayDraftStore.getRestoreReadiness", _ => true)
             .SetResult(new ClayDraftRestoreReadiness(false, [InputScope], []));
         var page = Render(context);
-        page.WaitForAssertion(() => Assert.NotNull(Button(page, "Повторить восстановление ввода")));
+        page.WaitForAssertion(() => Assert.Contains("Часть ввода ещё не восстановлена", page.Markup));
         fixture.Enqueue(Roles(Роли.Дежурный_инженер));
         var apply = context.JSInterop.Setup<ClayDraftRawApplyResult>("clayDraftStore.applyPendingRaw", _ => true);
-        var retry = page.InvokeAsync(() => Button(page, "Повторить восстановление ввода").ClickAsync());
+        var retry = page.InvokeAsync(() => Button(page, "Обновить").ClickAsync());
         try
         {
             page.WaitForAssertion(() => Assert.Single(apply.Invocations));
@@ -432,7 +432,7 @@ public sealed class PhoneTemplateOutcomeTests
 
         await SaveAsync(page);
 
-        Assert.Contains("Повторить восстановление ввода", page.Markup);
+        Assert.Contains("Ввод шаблона ещё не восстановлен", page.Markup);
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
         Assert.Equal(0, fixture.WriteCount);
     }

@@ -164,7 +164,7 @@ public sealed partial class MaintenanceTests
         Assert.True(Action(page).Instance.Disabled);
         using var intent = JsonDocument.Parse((string)Assert.Single(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]).Arguments[1]!);
         Assert.Equal("confirmation", Assert.Single(intent.RootElement.GetProperty("acceptedScopes").EnumerateArray()).GetString());
-        await RecoveryButton(page, "Завершить обработку черновика").ClickAsync(new MouseEventArgs());
+        await RecoveryButton(page, "Перечитать список").ClickAsync(new MouseEventArgs());
 
         Assert.Equal(1, connection.InsertCount);
         Assert.False(Action(page).Instance.Disabled);
@@ -182,10 +182,8 @@ public sealed partial class MaintenanceTests
         const string receipt = """{"version":1,"attemptId":"last-session","kind":"maintenance.complete","status":"confirmed","revision":9,"data":"17","scopes":[],"acceptLegacyTyped":false,"legacyTypedRevision":0}""";
         await using var context = CreateContext(out var connection, restoredOperation: receipt);
         var page = context.Render<MaintenancePage>();
-        page.WaitForAssertion(() => Assert.Contains("Выполнение записано", page.Markup));
-        Assert.True(Action(page).Instance.Disabled);
-
-        await RecoveryButton(page, "Завершить обработку черновика").ClickAsync(new MouseEventArgs());
+        page.WaitForAssertion(() => Assert.False(Action(page).Instance.Disabled));
+        Assert.DoesNotContain("Завершить обработку черновика", page.Markup);
 
         Assert.Equal(0, connection.InsertCount);
         Assert.False(Action(page).Instance.Disabled);
@@ -227,7 +225,7 @@ public sealed partial class MaintenanceTests
             Assert.Empty(context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
             Assert.True(Action(page).Instance.Disabled);
 
-            await RecoveryButton(page, "Завершить обработку черновика").ClickAsync(new MouseEventArgs());
+            await RecoveryButton(page, "Перечитать список").ClickAsync(new MouseEventArgs());
             Assert.Equal(1, connection.InsertCount);
             Assert.Equal(13L, Assert.Single(context.JSInterop.Invocations["clayDraftStore.commitOperation"]).Arguments[1]);
             Assert.All(context.JSInterop.Invocations["clayDraftStore.recordConfirmedOperation"],
@@ -240,8 +238,7 @@ public sealed partial class MaintenanceTests
 
         await using var reopened = CreateContext(out var freshConnection, restoredOperation: durableReceipt);
         var reopenedPage = reopened.Render<MaintenancePage>();
-        reopenedPage.WaitForAssertion(() => Assert.Contains("Выполнение записано", reopenedPage.Markup));
-        await RecoveryButton(reopenedPage, "Завершить обработку черновика").ClickAsync(new MouseEventArgs());
+        reopenedPage.WaitForAssertion(() => Assert.False(Action(reopenedPage).Instance.Disabled));
 
         Assert.Equal(0, freshConnection.InsertCount);
         Assert.Empty(reopened.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
@@ -256,26 +253,28 @@ public sealed partial class MaintenanceTests
     {
         const string receipt = """{"version":1,"attemptId":"employee-owner","kind":"maintenance.complete","status":"confirmed","revision":23,"data":"17","scopes":[],"acceptLegacyTyped":false,"legacyTypedRevision":0}""";
         await using var context = CreateContext(out var connection, restoredOperation: receipt);
+        var firstCommit = true;
+        context.JSInterop.SetupVoid("clayDraftStore.commitOperation", _ =>
+        {
+            if (!firstCommit) return false;
+            firstCommit = false;
+            return true;
+        }).SetException(new JSException("Не удалось записать подтверждение"));
+        context.JSInterop.Setup<ClayDraftRestore>("clayDraftStore.register", call => Equals(call.Arguments[2], "8"))
+            .SetResult(new ClayDraftRestore("maintenance-other-employee", false, 0, null, null));
         var page = context.Render<MaintenancePage>();
-        page.WaitForAssertion(() => Assert.Contains("Выполнение записано", page.Markup));
+        page.WaitForAssertion(() => Assert.NotNull(RecoveryButton(page, "Перечитать список")));
         connection.EmployeeId = 8;
 
-        await RecoveryButton(page, "Завершить обработку черновика").ClickAsync(new MouseEventArgs());
+        await RecoveryButton(page, "Перечитать список").ClickAsync(new MouseEventArgs());
 
-        Assert.True(Action(page).Instance.Disabled);
-        Assert.Contains("Не удалось подтвердить владельца", page.Markup);
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
-        connection.EmployeeId = 4;
-
-        await RecoveryButton(page, "Завершить обработку черновика").ClickAsync(new MouseEventArgs());
-
-        Assert.Equal(23L, Assert.Single(context.JSInterop.Invocations["clayDraftStore.commitOperation"]).Arguments[1]);
+        Assert.Single(context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
         Assert.Equal(0, connection.InsertCount);
     }
 
-    /// <summary>Потеря указателя предлагает собственный черновик и восстанавливает подтверждение без INSERT.</summary>
+    /// <summary>Потеря указателя автоматически восстанавливает единственное подтверждение без INSERT.</summary>
     [Fact]
-    public async Task DiscoveredReceiptCanBeOpenedWithoutAutomaticWrite()
+    public async Task DiscoveredReceiptIsRestoredWithoutAutomaticWrite()
     {
         const string draftId = "deadbeef-1111-2222-3333-444444444444";
         const string receipt = """{"version":1,"attemptId":"last-session","kind":"maintenance.complete","status":"confirmed","revision":9,"data":"17","scopes":[],"acceptLegacyTyped":false,"legacyTypedRevision":0}""";
@@ -283,15 +282,11 @@ public sealed partial class MaintenanceTests
         context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.recoverListedDraft", _ => true)
             .SetResult(new ClayDraftRestore("maintenance-test", true, 9, null, receipt));
         var page = context.Render<MaintenancePage>();
-        page.WaitForAssertion(() => Assert.Contains("Найдены сохранённые черновики", page.Markup));
+        page.WaitForAssertion(() => Assert.Single(context.JSInterop.Invocations["clayDraftStore.commitOperation"]));
+        Assert.DoesNotContain("Восстановить черновик", page.Markup);
         Assert.DoesNotContain("Начать отдельный черновик", page.Markup);
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.recoverListedDraft"]);
-
-        var choose = page.FindAll("button").Single(b => b.TextContent.Trim().StartsWith("Восстановить черновик", StringComparison.Ordinal));
-        await choose.ClickAsync(new MouseEventArgs());
 
         Assert.Equal(draftId, Assert.Single(context.JSInterop.Invocations["clayDraftStore.recoverListedDraft"]).Arguments[1]);
-        Assert.Contains("Выполнение записано", page.Markup);
         Assert.Equal(0, connection.InsertCount);
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
     }
@@ -335,7 +330,7 @@ public sealed partial class MaintenanceTests
         var attemptId = intent.RootElement.GetProperty("attemptId").GetString();
         Assert.True(Guid.TryParse(attemptId, out _));
 
-        await RecoveryButton(page, "Повторить сохранение черновика").ClickAsync(new MouseEventArgs());
+        await RecoveryButton(page, "Перечитать список").ClickAsync(new MouseEventArgs());
 
         Assert.Equal(attemptId, Assert.Single(context.JSInterop.Invocations["clayDraftStore.retryStorage"]).Arguments[1]);
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.unknownOperation"]);

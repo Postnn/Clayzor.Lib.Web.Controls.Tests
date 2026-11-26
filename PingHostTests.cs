@@ -150,6 +150,7 @@ public sealed class PingHostTests
         context.JSInterop.Setup<long>("clayDraftStore.saveTypedScope", _ => !writable)
             .SetException(new Microsoft.JSInterop.JSException("Тестовый сбой IndexedDB"));
         context.JSInterop.Setup<long>("clayDraftStore.saveTypedScope", _ => writable).SetResult(9L);
+        var delayedRetry = context.JSInterop.Setup<string?>("clayDraftStore.retryStorage", _ => true);
         var page = context.Render<PingHostPage>();
 
         await EventuallyAsync(() => clock.HasTimerDueIn(TimeSpan.FromSeconds(1)));
@@ -160,9 +161,9 @@ public sealed class PingHostTests
         Assert.Contains("Не удалось сохранить журнал", page.Markup);
         Assert.Contains("Проверка остановлена.", page.Markup);
         writable = true;
-        await Button(page, "Повторить сохранение журнала").ClickAsync(new MouseEventArgs());
-
-        Assert.DoesNotContain("Не удалось сохранить журнал", page.Markup);
+        page.WaitForAssertion(() => Assert.Single(context.JSInterop.Invocations["clayDraftStore.retryStorage"]));
+        delayedRetry.SetResult(null);
+        page.WaitForAssertion(() => Assert.DoesNotContain("Не удалось сохранить журнал", page.Markup));
         Assert.Equal(1, transport.Resolutions);
         Assert.Equal(1, transport.Sends);
         var retry = Assert.Single(context.JSInterop.Invocations["clayDraftStore.retryStorage"]);
@@ -190,7 +191,6 @@ public sealed class PingHostTests
         await EventuallyAsync(() => clock.HasTimerDueIn(TimeSpan.FromSeconds(1)));
         await Button(page, "Остановить").ClickAsync(new MouseEventArgs());
 
-        var retry = Button(page, "Повторить сохранение журнала").ClickAsync(new MouseEventArgs());
         page.WaitForAssertion(() => Assert.Single(context.JSInterop.Invocations["clayDraftStore.retryStorage"]));
         writable = true;
         await page.InvokeAsync(() => context.Services.GetRequiredService<NavigationManager>()
@@ -199,7 +199,7 @@ public sealed class PingHostTests
         var savedForNewHost = context.JSInterop.Invocations["clayDraftStore.saveTypedScope"].Count;
 
         delayedRetry.SetResult(null);
-        await retry;
+        await page.InvokeAsync(() => Task.CompletedTask);
 
         Assert.Contains("Обмен пакетами с 127.0.0.1", page.Markup);
         Assert.DoesNotContain("Не удалось сохранить журнал", page.Markup);

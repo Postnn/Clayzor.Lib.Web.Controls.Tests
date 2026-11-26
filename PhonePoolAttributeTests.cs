@@ -294,7 +294,7 @@ public sealed partial class PhonePoolAttributeTests
         Assert.DoesNotContain(page.FindAll("button"), button => button.TextContent.Trim() == "Удалить");
 
         sql.DenyRead = true;
-        await Button(page, "Повторить чтение атрибута").ClickAsync(new MouseEventArgs());
+        await Button(page, "Обновить").ClickAsync(new MouseEventArgs());
         Assert.DoesNotContain("Актуальное значение", page.Markup);
         Assert.Contains("Нет доступа к данным пары атрибута", page.Markup);
         Assert.Contains("Моё сохранённое значение", page.Markup);
@@ -320,7 +320,7 @@ public sealed partial class PhonePoolAttributeTests
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         sql.BeforeCardRead = () => { entered.TrySetResult(); return release.Task; };
 
-        var read = Button(page, "Повторить чтение атрибута").ClickAsync(new MouseEventArgs());
+        var read = Button(page, "Обновить").ClickAsync(new MouseEventArgs());
         try
         {
             await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));

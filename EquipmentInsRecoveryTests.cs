@@ -9,10 +9,9 @@ public sealed partial class EquipmentInsTests
 {
     private const string RecoveryListing = "clayDraftStore.listRecoveryCandidates";
     private const string RecoverStored = "clayDraftStore.recoverListedDraft";
-    private const string AttemptAction = "Открыть сохранённую попытку (ревизия 7)";
 
     [Fact]
-    public async Task CopyWithLostPointerCanOpenItsOwnUnknownAndDoesNotCreateAgain()
+    public async Task CopyWithLostPointerRestoresItsOwnUnknownAndDoesNotCreateAgain()
     {
         const string draftId = "420d5270-6413-4983-86c6-e805838c7984";
         var fixture = CreateFixture("http://localhost/Equipment/EquipmentIns?copyId=7");
@@ -25,19 +24,38 @@ public sealed partial class EquipmentInsTests
              "status":"unknown","revision":7,"data":"{}","scopes":[],"acceptLegacyTyped":false,"legacyTypedRevision":0}
             """));
         var page = context.Render<EquipmentIns>();
-        page.WaitForAssertion(() => Assert.False(FindButton(page, AttemptAction).HasAttribute("disabled")));
+        page.WaitForAssertion(() => Assert.Contains("Исход попытки", page.Markup));
         Assert.True(FindButton(page, "Применить").HasAttribute("disabled"));
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.saveTypedScope"]);
         await InvokeSave(page, false);
         Assert.Equal(0, fixture.Service.CreateCalls);
 
-        await page.InvokeAsync(() => FindButton(page, AttemptAction).ClickAsync());
+        Assert.DoesNotContain("Открыть сохранённую попытку", page.Markup);
 
         Assert.Equal(draftId, Assert.Single(recovery.Invocations).Arguments[1]);
         Assert.Contains("Исход попытки", page.Markup);
         Assert.True(FindButton(page, "Применить").HasAttribute("disabled"));
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.applyRaw"]);
+        Assert.Equal(0, fixture.Service.CreateCalls);
+    }
+
+    [Fact]
+    public async Task AmbiguousRecoveryDoesNotChooseAnAttempt()
+    {
+        var fixture = CreateFixture("http://localhost/Equipment/EquipmentIns?copyId=7");
+        await using var context = fixture.Context;
+        context.JSInterop.Setup<ClayDraftRecoveryCandidate[]>(RecoveryListing, _ => true)
+            .SetResult([
+                new("420d5270-6413-4983-86c6-e805838c7984", 7, true, true),
+                new("21cc4bdf-a41b-4aa2-ae64-9a69d63ed307", 8, true, true),
+            ]);
+
+        var page = context.Render<EquipmentIns>();
+        page.WaitForAssertion(() => Assert.Contains("Есть незавершённая попытка создания", page.Markup));
+        Assert.True(FindButton(page, "Применить").HasAttribute("disabled"));
+        Assert.DoesNotContain("Открыть сохранённую попытку", page.Markup);
+        Assert.Empty(context.JSInterop.Invocations[RecoverStored]);
         Assert.Equal(0, fixture.Service.CreateCalls);
     }
 

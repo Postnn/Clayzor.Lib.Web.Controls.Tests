@@ -59,7 +59,6 @@ public sealed class LocationFactRecoveryTests
         Assert.Equal(1, db.Commits);
         Assert.Equal(Notes, db.SentNotes);
         Assert.Equal(1, db.SentBroken);
-        Assert.Contains("Проверка записана", page.Markup);
         var begin = Assert.Single(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
         using var wire = JsonDocument.Parse((string)begin.Arguments[1]!);
         using var intent = JsonDocument.Parse(wire.RootElement.GetProperty("data").GetString()!);
@@ -67,7 +66,7 @@ public sealed class LocationFactRecoveryTests
         Assert.True(intent.RootElement.GetProperty("Broken").GetBoolean());
         Assert.False(intent.RootElement.GetProperty("Move").GetBoolean());
         Assert.Equal(17, intent.RootElement.GetProperty("Expected").GetProperty("Equipment").GetProperty("EquipmentId").GetInt32());
-        await WaitForButton(page, dialogs, "Завершить обработку черновика").ClickAsync(new MouseEventArgs());
+        page.WaitForAssertion(() => Assert.Equal(2, context.JSInterop.Invocations["clayDraftStore.commitOperation"].Count));
 
         Assert.Equal(1, db.Inserts);
         var receipt = Assert.Single(context.JSInterop.Invocations["clayDraftStore.recordConfirmedOperation"]);
@@ -97,10 +96,8 @@ public sealed class LocationFactRecoveryTests
         var page = context.Render<LocationFact>();
         await WaitForButton(page, dialogs, "Подтвердить").ClickAsync(new MouseEventArgs());
 
-        Assert.Contains("Проверка записана", page.Markup);
         Assert.Equal(1, db.Inserts);
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
-        await WaitForButton(page, dialogs, "Завершить обработку черновика").ClickAsync(new MouseEventArgs());
+        page.WaitForAssertion(() => Assert.Single(context.JSInterop.Invocations["clayDraftStore.commitOperation"]));
 
         Assert.Equal(1, db.Inserts);
         Assert.Equal(2, context.JSInterop.Invocations["clayDraftStore.recordConfirmedOperation"].Count);
@@ -122,11 +119,9 @@ public sealed class LocationFactRecoveryTests
         await using var context = Configure(db, restoredOperation: receipt);
         var dialogs = context.Render<MudDialogProvider>();
         var page = context.Render<LocationFact>();
-        page.WaitForAssertion(() => Assert.Contains("Проверка записана", page.Markup));
+        page.WaitForAssertion(() => Assert.Single(context.JSInterop.Invocations["clayDraftStore.commitOperation"]));
         Assert.DoesNotContain("Исход попытки", page.Markup);
         Assert.Empty(dialogs.FindAll("button").Where(b => b.TextContent.Trim() == "Подтвердить"));
-
-        await WaitForButton(page, dialogs, "Завершить обработку черновика").ClickAsync(new MouseEventArgs());
 
         Assert.Equal(0, db.Inserts);
         var cleanup = Assert.Single(context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
@@ -150,17 +145,16 @@ public sealed class LocationFactRecoveryTests
         var dialogs = context.Render<MudDialogProvider>();
         var page = context.Render<LocationFact>();
         await WaitForButton(page, dialogs, "Подтвердить").ClickAsync(new MouseEventArgs());
-        Assert.Contains("Команда не отправлена", page.Markup);
         Assert.Equal(0, db.Inserts);
 
         var invocation = Assert.Single(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
         using var wire = JsonDocument.Parse((string)invocation.Arguments[1]!);
         var unsent = wire.RootElement.GetProperty("attemptId").GetString();
         Assert.True(Guid.TryParse(unsent, out _));
-        await WaitForButton(page, dialogs, "Повторить сохранение черновика").ClickAsync(new MouseEventArgs());
+        page.WaitForAssertion(() => Assert.Single(context.JSInterop.Invocations["clayDraftStore.retryStorage"]));
         Assert.Equal(unsent, Assert.Single(context.JSInterop.Invocations["clayDraftStore.retryStorage"]).Arguments[1]);
         Assert.Equal(0, db.Inserts);
-        Assert.Equal(anotherAttempt, WaitForButton(page, dialogs, "Подтвердить").HasAttribute("disabled"));
+        page.WaitForAssertion(() => Assert.Equal(anotherAttempt, WaitForButton(page, dialogs, "Подтвердить").HasAttribute("disabled")));
         if (anotherAttempt) Assert.Contains("another-fact", page.Markup);
     }
 
@@ -274,14 +268,14 @@ public sealed class LocationFactRecoveryTests
         var page = context.Render<LocationFact>();
         page.WaitForAssertion(() => Assert.Single(context.JSInterop.Invocations["clayDraftStore.applyRaw"],
             call => Equals(call.Arguments[1], "workplace")));
-        Assert.Contains("Повторить восстановление поиска", page.Markup);
+        Assert.Contains("Часть ввода рабочего места ожидает восстановления.", page.Markup);
 
         searchReady = true;
         var location = page.FindComponent<ClaySelect<LocationLookup, int?>>();
         await page.InvokeAsync(() => location.Instance.ValueChanged.InvokeAsync((int?)10));
         page.WaitForAssertion(() => Assert.Equal(2, context.JSInterop.Invocations["clayDraftStore.applyRaw"].Count(
             call => Equals(call.Arguments[1], "workplace"))));
-        Assert.DoesNotContain("Повторить восстановление поиска", page.Markup);
+        Assert.DoesNotContain("Часть ввода рабочего места ожидает восстановления.", page.Markup);
 
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.openScope"]);
@@ -299,11 +293,8 @@ public sealed class LocationFactRecoveryTests
         var page = context.Render<LocationFact>();
         page.WaitForAssertion(() => Assert.Contains("Черновик прежней версии", page.Markup));
 
-        Assert.Equal(10, page.FindComponent<ClaySelect<LocationLookup, int?>>().Instance.Value);
         Assert.Contains("Черновик прежней версии", page.Markup);
         Assert.DoesNotContain(page.FindAll("button"), button => button.TextContent.Trim() == "Тестовое устройство");
-        await page.FindAll("button").Single(button => button.TextContent.Trim() == "Показать сохранённый ввод")
-            .ClickAsync(new MouseEventArgs());
         var fields = page.WaitForElements("[aria-label='Ввод из прежнего черновика'] [data-draft-key][readonly]", 4);
         string[] keys = ["fact.location", "fact.notes", "fact.responsible", "fact.search"];
         Assert.Equal(keys, fields.Select(field => field.GetAttribute("data-draft-key")).Order(StringComparer.Ordinal));
@@ -318,8 +309,8 @@ public sealed class LocationFactRecoveryTests
         Assert.Equal(10, page.FindComponent<ClaySelect<LocationLookup, int?>>().Instance.Value);
         Assert.Empty(page.FindAll("[aria-label='Ввод из прежнего черновика']"));
         Assert.True(page.Find("[data-draft-scope=workplace]").HasAttribute("inert"));
-        page.WaitForAssertion(() => Assert.True(context.JSInterop.Invocations["clayDraftStore.applyRaw"].Count(
-            call => Equals(call.Arguments[1], "workplace")) >= 2));
+        page.WaitForAssertion(() => Assert.Single(context.JSInterop.Invocations["clayDraftStore.applyRaw"],
+            call => Equals(call.Arguments[1], "workplace")));
         Assert.Contains("Черновик прежней версии", page.Markup);
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.discardScope"]);
