@@ -1,6 +1,7 @@
 using System.Data;
 using System.Data.Common;
 using System.Security.Claims;
+using System.Text.Json;
 using Bunit;
 using Clayzor.Lib.DALC;
 using Clayzor.Lib.Entities;
@@ -14,6 +15,7 @@ using Microsoft.AspNetCore.Components.Authorization;
 using Microsoft.AspNetCore.Components.Web;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.JSInterop;
 using MudBlazor;
 using MudBlazor.Extensions;
 using MudBlazor.Services;
@@ -128,7 +130,88 @@ public sealed class MaintenanceTests
         Assert.True(Action(page).Instance.Disabled);
         Assert.Single(context.JSInterop.Invocations["clayDraftStore.unknownOperation"]);
         Assert.Contains("Исход выполнения требует проверки", page.Markup);
+        Assert.Contains("Работа №17", page.Markup);
+        Assert.Contains("maintenance-test", page.Markup);
+        await RecoveryButton(page, "Перечитать список").ClickAsync(new MouseEventArgs());
+        Assert.True(Action(page).Instance.Disabled);
+        Assert.Equal(1, connection.InsertCount);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.retryStorage"]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
     }
+
+    /// <summary>Ошибка после успешного INSERT требует только повторной записи подтверждения в хранилище.</summary>
+    [Fact]
+    public async Task ConfirmedInsertRetriesOnlyCleanupWithSameRevision()
+    {
+        await using var context = CreateContext(out var connection);
+        var first = true;
+        context.JSInterop.SetupVoid("clayDraftStore.commitOperation", _ =>
+        {
+            if (!first) return false;
+            first = false;
+            return true;
+        }).SetException(new JSException("Ошибка записи IndexedDB"));
+        var provider = context.Render<MudDialogProvider>();
+        var page = context.Render<MaintenancePage>();
+        var click = ClickConfirmation(page);
+        await WaitForYes(provider).ClickAsync(new MouseEventArgs());
+        await click;
+
+        Assert.Equal(1, connection.InsertCount);
+        Assert.True(Action(page).Instance.Disabled);
+        using var intent = JsonDocument.Parse((string)Assert.Single(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]).Arguments[1]!);
+        Assert.Equal("confirmation", Assert.Single(intent.RootElement.GetProperty("acceptedScopes").EnumerateArray()).GetString());
+        await RecoveryButton(page, "Завершить обработку черновика").ClickAsync(new MouseEventArgs());
+
+        Assert.Equal(1, connection.InsertCount);
+        Assert.False(Action(page).Instance.Disabled);
+        var commits = context.JSInterop.Invocations["clayDraftStore.commitOperation"];
+        Assert.Equal(2, commits.Count);
+        Assert.All(commits, commit => Assert.Equal(2L, commit.Arguments[1]));
+        Assert.DoesNotContain("Не удалось завершить", page.Markup);
+    }
+
+    /// <summary>Потеря ответа Begin не отправляет INSERT и восстанавливает только свою попытку.</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task BeginFailureRetriesStorageWithOnlyProvenUnsentId(bool anotherOperation)
+    {
+        await using var context = CreateContext(out var connection, failBegin: true);
+        if (anotherOperation)
+        {
+            context.JSInterop.Setup<string?>("clayDraftStore.retryStorage", _ => true)
+                .SetResult("""{"version":1,"attemptId":"other-attempt","kind":"maintenance.complete","status":"unknown","revision":3,"data":"17","scopes":[],"acceptLegacyTyped":false,"legacyTypedRevision":0}""");
+        }
+
+        var provider = context.Render<MudDialogProvider>();
+        var page = context.Render<MaintenancePage>();
+        var click = ClickConfirmation(page);
+        await WaitForYes(provider).ClickAsync(new MouseEventArgs());
+        await click;
+
+        Assert.Equal(0, connection.InsertCount);
+        Assert.Contains("Команда не отправлена", page.Markup);
+        Assert.True(Action(page).Instance.Disabled);
+        using var intent = JsonDocument.Parse((string)Assert.Single(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]).Arguments[1]!);
+        var attemptId = intent.RootElement.GetProperty("attemptId").GetString();
+        Assert.True(Guid.TryParse(attemptId, out _));
+
+        await RecoveryButton(page, "Повторить сохранение черновика").ClickAsync(new MouseEventArgs());
+
+        Assert.Equal(attemptId, Assert.Single(context.JSInterop.Invocations["clayDraftStore.retryStorage"]).Arguments[1]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.unknownOperation"]);
+        Assert.Equal(0, connection.InsertCount);
+        Assert.Equal(anotherOperation, Action(page).Instance.Disabled);
+        if (anotherOperation)
+        {
+            Assert.Contains("other-attempt", page.Markup);
+            Assert.Contains("Работа №17", page.Markup);
+        }
+    }
+
+    private static AngleSharp.Dom.IElement RecoveryButton(IRenderedComponent<MaintenancePage> page, string text) =>
+        page.FindAll("button").Single(button => button.TextContent.Trim() == text);
 
     /// <summary>Сортировка заголовком формирует SQL ORDER BY по разрешённой колонке.</summary>
     [Fact]
@@ -166,7 +249,7 @@ public sealed class MaintenanceTests
         return provider.FindAll("button").Single(x => x.TextContent.Trim() == "Да");
     }
 
-    private static BunitContext CreateContext(out MaintenanceConnection connection)
+    private static BunitContext CreateContext(out MaintenanceConnection connection, bool failBegin = false)
     {
         var db = connection = new MaintenanceConnection();
         var context = new BunitContext();
@@ -175,7 +258,9 @@ public sealed class MaintenanceTests
             .SetResult(new ClayDraftRestore("maintenance-test", false, 0, null, null));
         context.JSInterop.Setup<ClayDraftStorageHealth>("clayDraftStore.getHealth", _ => true)
             .SetResult(new ClayDraftStorageHealth(true, 0, null, false, 1, 1));
-        context.JSInterop.Setup<string>("clayDraftStore.beginOperationIntent", _ => true)
+        var begin = context.JSInterop.Setup<string>("clayDraftStore.beginOperationIntent", _ => true);
+        if (failBegin) begin.SetException(new JSException("Begin не подтверждён"));
+        else begin
             .SetResult("""{"version":1,"attemptId":"maintenance-test","kind":"maintenance.complete","status":"running","revision":2,"data":"17","scopes":[],"acceptLegacyTyped":false,"legacyTypedRevision":0}""");
         context.ComponentFactories.AddStub<InventoryMainMenu>();
         DapperColumnMapper.Initialize();
