@@ -60,6 +60,8 @@ public sealed class PingHostTests
         var service = CreateService(transport, clock);
         var attempt = service.ResolveAsync("localhost", default);
         await transport.DnsEntered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        Assert.True(clock.HasTimerDueIn(TimeSpan.FromSeconds(5)));
+        Assert.False(clock.HasTimerDueIn(TimeSpan.FromSeconds(1)));
         clock.Advance(TimeSpan.FromSeconds(5));
         var error = await Assert.ThrowsAsync<PingDiagnosticException>(() => attempt);
         Assert.Equal(PingFailureKind.Resolution, error.Kind);
@@ -123,7 +125,7 @@ public sealed class PingHostTests
         var page = context.Render<PingHostPage>();
         try
         {
-            await EventuallyAsync(() => clock.HasTimers);
+            await EventuallyAsync(() => clock.HasTimerDueIn(TimeSpan.FromSeconds(1)));
             clock.Advance(TimeSpan.FromSeconds(1));
             await transport.SendEntered.Task.WaitAsync(TimeSpan.FromSeconds(3));
             var stop = Button(page, "Остановить").ClickAsync(new MouseEventArgs());
@@ -173,7 +175,7 @@ public sealed class PingHostTests
         var page = context.Render<PingHostPage>();
         for (var i = 1; i <= 33; i++)
         {
-            await EventuallyAsync(() => clock.HasTimers);
+            await EventuallyAsync(() => clock.HasTimerDueIn(TimeSpan.FromSeconds(1)));
             clock.Advance(TimeSpan.FromSeconds(1));
             var count = i;
             page.WaitForAssertion(() => Assert.Contains($"время={count}мс TTL=128", page.Find("[role=log]").TextContent));
@@ -224,7 +226,7 @@ public sealed class PingHostTests
             .NavigateTo("/Equipment/PingHost?host=127.0.0.1"));
         page.WaitForAssertion(() => Assert.Contains("Обмен пакетами с 127.0.0.1", page.Markup));
         Assert.True(transport.DnsCancelled);
-        await EventuallyAsync(() => clock.HasTimers);
+        await EventuallyAsync(() => clock.HasTimerDueIn(TimeSpan.FromSeconds(1)));
         clock.Advance(TimeSpan.FromSeconds(1));
         page.WaitForAssertion(() => Assert.Contains("Ответ от 127.0.0.1", page.Find("[role=log]").TextContent));
         await Button(page, "Остановить").ClickAsync(new MouseEventArgs());
@@ -316,7 +318,10 @@ public sealed class PingHostTests
     {
         private readonly List<ManualTimer> _timers = [];
         private TimeSpan _now;
-        public bool HasTimers { get { lock (_timers) return _timers.Any(timer => timer.Due.HasValue); } }
+        public bool HasTimerDueIn(TimeSpan delay)
+        {
+            lock (_timers) return _timers.Any(timer => timer.Due == _now + delay);
+        }
 
         public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
         {

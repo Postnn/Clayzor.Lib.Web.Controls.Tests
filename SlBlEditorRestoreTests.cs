@@ -207,6 +207,71 @@ public sealed class SlBlEditorRestoreTests
         Assert.Equal(1, sql.Dispatches);
     }
 
+    /// <summary>После расхождения baseline пользователь сам выбирает значение с защитой ревизии.</summary>
+    [Theory]
+    [InlineData(true, true, false)]
+    [InlineData(false, true, false)]
+    [InlineData(true, false, false)]
+    [InlineData(true, true, true)]
+    public async Task ConflictRebaseUsesExplicitChoiceAndExpectedRevision(bool keepLocal, bool revisionMatches, bool invalidRaw)
+    {
+        const string fresh = "fresh.example.invalid";
+        var local = invalidRaw ? "<неполный>" : LatestText;
+        using var sql = new MailboxConnection();
+        sql.ExternalWrite(fresh);
+        await using var context = new BunitContext();
+        context.JSInterop.Mode = JSRuntimeMode.Loose;
+        var snapshot = JsonSerializer.Serialize(new { Address, Kind = SlBlKind.Safe, Original = Baseline, Current = OldText });
+        context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.register", _ => true)
+            .SetResult(new ClayDraftRestore("slbl-conflict", true, 5, null, null, new Dictionary<string, string> { ["main"] = snapshot }));
+        context.JSInterop.Setup<ClayDraftRawApplyResult>("clayDraftStore.applyRaw", _ => true)
+            .SetResult(new ClayDraftRawApplyResult([], []));
+        context.JSInterop.Setup<ClayDraftRestoreReadiness>("clayDraftStore.getRestoreReadiness", _ => true)
+            .SetResult(new ClayDraftRestoreReadiness(true, [], []));
+        context.JSInterop.Setup<ClayDraftRebaseState>("clayDraftStore.readRebaseState", _ => true)
+            .SetResult(new ClayDraftRebaseState(7, ["data:slbl.text", "data:unrelated"]));
+        context.JSInterop.Setup<bool>("clayDraftStore.rebaseScope", _ => true).SetResult(revisionMatches);
+        context.JSInterop.SetupModule("./js/slblDraftText.js").Setup<string?>("readText", _ => true).SetResult(local);
+
+        ConfigureEditor(context, sql);
+        var form = context.Render<SlBlForm>(p => p.Add(component => component.Id, Address + ":0"));
+        form.WaitForAssertion(() => Assert.Contains("Список в базе изменился", form.Markup));
+
+        await Button(form, "Обновить").ClickAsync(new MouseEventArgs()).WaitAsync(TimeSpan.FromSeconds(2));
+        var comparison = form.Find("[aria-label='Сравнение списков']");
+        Assert.Contains(Baseline, comparison.TextContent);
+        Assert.Contains(local, comparison.TextContent);
+        Assert.Contains(fresh, comparison.TextContent);
+        Assert.True(Button(form, "Сохранить").HasAttribute("disabled"));
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.rebaseScope"]);
+
+        await Button(form, keepLocal ? "Оставить мой список" : "Принять список из базы").ClickAsync(new MouseEventArgs());
+
+        var request = Assert.Single(context.JSInterop.Invocations["clayDraftStore.rebaseScope"]);
+        Assert.Equal("main", request.Arguments[1]);
+        Assert.Equal(7L, request.Arguments[2]);
+        using var rebased = JsonDocument.Parse((string)request.Arguments[3]!);
+        Assert.Equal(fresh, rebased.RootElement.GetProperty("Original").GetString());
+        Assert.Equal(keepLocal ? local : fresh, rebased.RootElement.GetProperty("Current").GetString());
+        Assert.Equal(keepLocal ? Array.Empty<string>() : ["data:slbl.text"],
+            Assert.IsAssignableFrom<IReadOnlyList<string>>(request.Arguments[4]));
+        Assert.Equal(0, sql.Dispatches);
+        Assert.Equal(invalidRaw ? 0 : 1, sql.ComparisonReads);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
+
+        if (revisionMatches)
+        {
+            Assert.Empty(form.FindAll("[aria-label='Сравнение списков']"));
+            Assert.Equal(!keepLocal, Button(form, "Сохранить").HasAttribute("disabled"));
+            Assert.Contains(keepLocal ? local : fresh, form.Find("textarea").TextContent);
+        }
+        else
+        {
+            Assert.Contains("Черновик изменился", form.Markup);
+            Assert.True(Button(form, "Сохранить").HasAttribute("disabled"));
+        }
+    }
+
     private static IRenderedComponent<MudDialogProvider> ConfigureEditor(BunitContext context, MailboxConnection sql)
     {
         DapperColumnMapper.Initialize();
