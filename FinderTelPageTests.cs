@@ -1,5 +1,8 @@
 using System.Data;
 using System.Data.Common;
+using System.Text.Json;
+using Clayzor.Lib.Entities.Inventory;
+using Clayzor.Lib.Web.Controls.Components.Select;
 using Bunit;
 using Clayzor.Lib.DALC;
 using Clayzor.Lib.Web.Controls.Services;
@@ -91,10 +94,55 @@ public sealed class FinderTelPageTests
         Assert.Equal(17, database.ResolvedPhoneId);
     }
 
+    /// <summary>Реальный Finder отправляет составной ключ с nullable частью в подтверждаемый запрос.</summary>
+    [Fact]
+    public async Task ActualFinderSendsNullableKeyAndWaitsForAcknowledgement()
+    {
+        await using var opener = new BunitContext();
+        opener.JSInterop.Mode = JSRuntimeMode.Loose;
+        await using var service = new ClaySelectAdvancedSearchService(opener.JSInterop.JSRuntime);
+        PhoneEquipmentKey? applied = null;
+        var pending = service.OpenAcknowledgedAsync<PhoneEquipmentLookup, PhoneEquipmentKey>(
+            "http://localhost/Default/Finder.aspx", (result, _) =>
+            {
+                applied = result.Value;
+                return Task.FromResult(ClaySelectReturnDecision.Accepted);
+            });
+        var requestId = Assert.IsType<string>(Assert.Single(opener.JSInterop.Invocations["claySelectAdvancedSearch.open"]).Arguments[1]);
+        using var database = new FinderConnection(1, equipment: true);
+        await using var sender = Configure(database, "/Default/Finder.aspx", requestId: requestId);
+        var returned = sender.JSInterop.Setup<bool>(ReturnValue, _ => true);
+        var page = sender.Render<Finder>();
+        var choices = page.FindAll("button").Where(button => button.TextContent.Trim() == "Выбрать").ToArray();
+        var choose = Assert.Single(choices).ClickAsync(new Microsoft.AspNetCore.Components.Web.MouseEventArgs());
+
+        try
+        {
+            page.WaitForAssertion(() => Assert.Single(sender.JSInterop.Invocations[ReturnValue]));
+            var invocation = Assert.Single(sender.JSInterop.Invocations[ReturnValue]);
+            Assert.Equal(requestId, invocation.Arguments[0]);
+            var key = Assert.IsType<PhoneEquipmentKey>(invocation.Arguments[1]);
+            Assert.Equal(new PhoneEquipmentKey(17, null), key);
+            Assert.Null(applied);
+            Assert.False(pending.IsCompleted);
+
+            Assert.Equal("Accepted", await service.ApplyAsync(requestId, 1, JsonSerializer.SerializeToElement(key)));
+            Assert.True(await pending);
+            Assert.Equal(key, applied);
+            Assert.Equal(1, database.CandidateReads);
+        }
+        finally
+        {
+            returned.SetResult(applied is not null);
+            await choose;
+            await service.CancelAsync(requestId);
+        }
+    }
+
     private static AngleSharp.Dom.IElement[] ChoiceButtons(IRenderedComponent<FinderTel> page) =>
         page.FindAll("button").Where(button => button.TextContent.Trim() == "Выбрать").ToArray();
 
-    private static BunitContext Configure(FinderConnection database, string path, int mode = 1)
+    private static BunitContext Configure(FinderConnection database, string path, int mode = 1, string requestId = RequestId)
     {
         var context = new BunitContext();
         context.JSInterop.Mode = JSRuntimeMode.Loose;
@@ -107,11 +155,11 @@ public sealed class FinderTelPageTests
         context.Services.AddMudServices();
         context.Render<MudPopoverProvider>();
         context.Services.GetRequiredService<NavigationManager>().NavigateTo(
-            $"{path}?return={mode}&requestId={RequestId}&returnOrigin=http%3A%2F%2Flocalhost");
+            $"{path}?return={mode}&requestId={requestId}&returnOrigin=http%3A%2F%2Flocalhost");
         return context;
     }
 
-    private sealed class FinderConnection(int count, bool candidateAvailable = true) : DbConnection
+    private sealed class FinderConnection(int count, bool candidateAvailable = true, bool equipment = false) : DbConnection
     {
         private ConnectionState _state;
         internal int PageReads { get; private set; }
@@ -139,6 +187,11 @@ public sealed class FinderTelPageTests
             if (sql.Contains("SELECT COUNT(*)", StringComparison.Ordinal))
             {
                 PageReads++;
+                if (equipment)
+                {
+                    var equipmentRows = EquipmentRow();
+                    return new DataTableReader([Table("Total", count), equipmentRows]);
+                }
                 var rows = new DataTable();
                 rows.Columns.Add("Id", typeof(int));
                 rows.Columns.Add("FullNumber", typeof(string));
@@ -146,6 +199,13 @@ public sealed class FinderTelPageTests
                 for (var index = 0; index < count; index++)
                     rows.Rows.Add(17 + index, $"+7 (001) 002-0{3 + index}", $"001{2 + index}");
                 return new DataTableReader([Table("Total", count), rows]);
+            }
+            if (sql.Contains("@SelectedEquipmentId", StringComparison.Ordinal))
+            {
+                CandidateReads++;
+                Assert.Equal(17, command.Parameters["SelectedEquipmentId"].Value);
+                Assert.Equal(DBNull.Value, command.Parameters["SelectedConnectionId"].Value);
+                return EquipmentRow().CreateDataReader();
             }
             if (sql.Contains("@SelectedPhoneId", StringComparison.Ordinal))
             {
@@ -155,6 +215,16 @@ public sealed class FinderTelPageTests
                 return (candidateAvailable ? row : row.Clone()).CreateDataReader();
             }
             throw new InvalidOperationException(sql);
+        }
+
+        private static DataTable EquipmentRow()
+        {
+            var table = new DataTable();
+            table.Columns.Add("EquipmentId", typeof(int));
+            table.Columns.Add("ConnectionEquipmentId", typeof(int));
+            table.Columns.Add("Model", typeof(string));
+            table.Rows.Add(17, DBNull.Value, "Телефон без подключения");
+            return table;
         }
 
         private static DataTable Table(string column, int value)

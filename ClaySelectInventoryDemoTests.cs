@@ -105,9 +105,40 @@ public sealed class ClaySelectInventoryDemoTests
         }
         Assert.True(cancelled);
         using var document = System.Text.Json.JsonDocument.Parse("3");
-        await service.CompleteAsync(requestId, document.RootElement.Clone());
+        Assert.Equal("Stale", await service.ApplyAsync(requestId, 1, document.RootElement.Clone()));
 
         Assert.Equal(focusCount, ctx.JSInterop.Invocations.Count(item => item.Identifier == "focus"));
+    }
+
+    /// <summary>Внешний поиск подтверждается после восстановления и применения сотрудника на форме.</summary>
+    [Fact]
+    public async Task DemoAcknowledgesOnlyAfterEmployeeIsApplied()
+    {
+        Clayzor.Lib.Entities.MedicalTests.DapperColumnMapper.Initialize();
+        using var ctx = CreateContext(CreateDb(new Queue<ScriptEntry>([
+            Script.Rows(),
+            Script.Rows(),
+            Script.Rows(Script.Row(("КодСотрудника", 42), ("Сотрудник", "Сотрудник из поиска")))
+        ])));
+        var page = ctx.Render<SelectTest>();
+        var select = page.FindComponent<ClaySelect<Employee, int?>>();
+        select.Find(".clay-select-button").Click();
+        select.Find(".clay-select-advanced").Click();
+        var open = ctx.JSInterop.Invocations.Single(item => item.Identifier == "claySelectAdvancedSearch.open");
+        Assert.Equal(true, open.Arguments[4]);
+        var requestId = (string)open.Arguments[1]!;
+        var service = ctx.Services.GetRequiredService<Clayzor.Lib.Web.Controls.Services.ClaySelectAdvancedSearchService>();
+
+        try
+        {
+            Assert.Equal("Rejected", await service.ApplyAsync(requestId, 1, System.Text.Json.JsonSerializer.SerializeToElement(11)));
+            Assert.Null(select.Instance.Value);
+            Assert.Equal("Accepted", await service.ApplyAsync(requestId, 2, System.Text.Json.JsonSerializer.SerializeToElement(42)));
+            Assert.Equal("Accepted", await service.ApplyAsync(requestId, 2, System.Text.Json.JsonSerializer.SerializeToElement(42)));
+            Assert.Equal(42, select.Instance.Value);
+            Assert.Equal("Сотрудник из поиска", select.Find("input").GetAttribute("value"));
+        }
+        finally { await service.CancelAsync(requestId); }
     }
 
     private static TestContext CreateContext(DbManager db)

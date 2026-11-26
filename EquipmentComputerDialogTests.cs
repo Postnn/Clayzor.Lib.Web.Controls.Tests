@@ -108,33 +108,41 @@ public sealed class EquipmentComputerDialogTests
         Assert.DoesNotContain("Конфигурация компьютера", provider.Markup);
     }
 
-    /// <summary>Пользователь явно отклоняет Unknown прежней операции и может повторить сохранение.</summary>
-    [Fact]
-    public async Task UnknownPreviousOperation_CanBeRejectedExplicitly()
+    /// <summary>Неподтверждённый исход блокирует запись при получении ошибки и при новом открытии редактора.</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task UnknownOutcome_BlocksSaveWithoutManualRejection(bool restored)
     {
         await using var context = new BunitContext();
         context.JSInterop.Mode = JSRuntimeMode.Loose;
         context.Services.AddMudServices();
-        var rejected = false;
+        var writes = 0;
         var provider = context.Render<MudDialogProvider>();
         var reference = await context.Services.GetRequiredService<IDialogService>().ShowAsync<EquipmentComputerDialog>(
             "Компьютер", new DialogParameters<EquipmentComputerDialog>
             {
-                { component => component.RejectUnknownOperation, () => { rejected = true; return Task.CompletedTask; } },
+                { component => component.HasUnresolvedComputerOperation, restored },
+                { component => component.Notes, "несохранённая конфигурация" },
+                { component => component.Save, _ =>
+                {
+                    writes++;
+                    return Task.FromResult(EquipmentEditorSaveResult.Unknown("Результат предыдущей записи неизвестен."));
+                } },
             });
         var dialog = provider.FindComponent<EquipmentComputerDialog>();
-        dialog.Instance.GetType().GetField("_error", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
-            .SetValue(dialog.Instance, "Черновик не сохранён. Предыдущая команда не сверена. Повторная отправка заблокирована.");
-        dialog.Instance.GetType().GetField("_saveBlocked", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
-            .SetValue(dialog.Instance, true);
-        dialog.Render();
 
-        await dialog.FindAll("button").Single(button => button.TextContent.Trim() == "Отклонить предыдущую команду").ClickAsync();
+        if (!restored)
+            await dialog.FindAll("button").Single(button => button.TextContent.Trim() == "OK").ClickAsync();
 
-        Assert.True(rejected);
-        Assert.Contains("Повторите сохранение конфигурации", dialog.Markup);
-        Assert.False((bool)dialog.Instance.GetType().GetField("_saveBlocked", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(dialog.Instance)!);
-        await provider.InvokeAsync(() => reference.Close(DialogResult.Cancel()));
+        Assert.True(dialog.FindAll("button").Single(button => button.TextContent.Trim() == "OK").HasAttribute("disabled"));
+        Assert.DoesNotContain("Отклонить предыдущую команду", dialog.Markup);
+        Assert.Contains(restored ? "Повторная запись заблокирована" : "Результат предыдущей записи неизвестен", dialog.Markup);
+        Assert.Equal("несохранённая конфигурация", dialog.Instance.Notes);
+
+        await dialog.FindAll("button").Single(button => button.TextContent.Trim() == "Отмена").ClickAsync();
+        Assert.True((await reference.Result)!.Canceled);
+        Assert.Equal(restored ? 0 : 1, writes);
     }
 
     /// <summary>SQL type error отображается в диалоге и не оставляет незавершённую операцию.</summary>

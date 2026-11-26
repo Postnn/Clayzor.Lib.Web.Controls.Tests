@@ -2,6 +2,7 @@ using Bunit;
 using Clayzor.Lib.Entities;
 using Clayzor.Lib.Web.Controls.Components;
 using Clayzor.Lib.Web.Controls.Components.Form;
+using Clayzor.Lib.Web.Controls.Components.Select;
 using MudBlazor;
 using MudBlazor.Services;
 
@@ -10,14 +11,14 @@ namespace Clayzor.Lib.Web.Controls.Tests;
 /// <summary>Проверки обязательности общих полей в разных режимах редактирования.</summary>
 public sealed class ClayRequiredFieldStyleTests
 {
-    /// <summary>Список сохраняет обязательность после выбора и снимает её в режиме просмотра.</summary>
+    /// <summary>Жёлтая заливка списка применима только к пустому редактируемому обязательному полю.</summary>
     [Theory]
     [InlineData(null, true, false, false, true)]
-    [InlineData(1, true, false, false, true)]
+    [InlineData(1, true, false, false, false)]
     [InlineData(null, false, false, false, false)]
     [InlineData(null, true, true, false, false)]
     [InlineData(null, true, false, true, false)]
-    public async Task DropdownHighlightsEditableRequiredFieldRegardlessOfValue(
+    public async Task DropdownHighlightsOnlyEmptyEditableRequiredField(
         int? value, bool required, bool disabled, bool readOnly, bool highlight)
     {
         await using var context = CreateContext();
@@ -33,15 +34,15 @@ public sealed class ClayRequiredFieldStyleTests
                 ReadOnly = readOnly,
             }));
 
-        Assert.Equal(highlight, field.FindAll(".clay-required-editable .mud-input-outlined").Count == 1);
+        Assert.Equal(highlight, field.FindAll(".clay-required-empty .mud-input-outlined").Count == 1);
     }
 
-    /// <summary>Справочник сохраняет обязательность с выбранным элементом.</summary>
+    /// <summary>Справочник показывает заливку до выбора элемента.</summary>
     [Theory]
     [InlineData(0, true, true)]
-    [InlineData(1, true, true)]
+    [InlineData(1, true, false)]
     [InlineData(0, false, false)]
-    public async Task ComboBoxHighlightsRequiredFieldRegardlessOfDisplayedItem(int value, bool required, bool highlight)
+    public async Task ComboBoxHighlightsOnlyEmptyRequiredField(int value, bool required, bool highlight)
     {
         await using var context = CreateContext();
         var field = context.Render<ClayComboBox<Option>>(parameters => parameters
@@ -49,12 +50,12 @@ public sealed class ClayRequiredFieldStyleTests
             .Add(component => component.Value, value)
             .Add(component => component.Required, required));
 
-        Assert.Equal(highlight, field.FindAll(".clay-required-editable .mud-input-outlined").Count == 1);
+        Assert.Equal(highlight, field.FindAll(".clay-required-empty .mud-input-outlined").Count == 1);
     }
 
     /// <summary>Текст, placeholder и семантическая обязательность обновляются независимо.</summary>
     [Fact]
-    public async Task TextBoxPreservesRequiredForFilledTextAndClearsHighlightWhenReadOnly()
+    public async Task TextBoxSuppliesEmptyInputAndPlaceholderToLiveCss()
     {
         await using var context = CreateContext();
         var field = context.Render<ClayTextBox>(parameters => parameters
@@ -69,6 +70,9 @@ public sealed class ClayRequiredFieldStyleTests
         Assert.Equal("Готовое значение", input.GetAttribute("value"));
         Assert.Equal("Подсказка", input.GetAttribute("placeholder"));
 
+        field.Render(parameters => parameters.Add(component => component.Value, ""));
+        Assert.Equal("", field.Find(".clay-required-editable input[required]").GetAttribute("value"));
+
         field.Render(parameters => parameters
             .Add(component => component.Options, new ClayTextBoxOptions
             {
@@ -76,13 +80,13 @@ public sealed class ClayRequiredFieldStyleTests
                 ReadOnly = true,
             }));
         var readOnly = field.Find("input[readonly]");
-        Assert.Equal("Готовое значение", readOnly.GetAttribute("value"));
+        Assert.Equal("", readOnly.GetAttribute("value"));
         Assert.Empty(field.FindAll(".clay-required-editable"));
     }
 
     /// <summary>Интерактивный календарь допускает выбор даже при нередактируемом вручную вводе.</summary>
     [Fact]
-    public async Task DatePickerHighlightsCalendarWithReadOnlyTextInput()
+    public async Task DatePickerSupportsEmptyHighlightWithTechnicalReadOnlyInput()
     {
         await using var context = CreateContext();
         var date = new DateTime(2026, 11, 26);
@@ -97,6 +101,12 @@ public sealed class ClayRequiredFieldStyleTests
 
         var input = field.Find(".clay-required-editable .mud-input-control .mud-input input[readonly]");
         Assert.Equal("2026-11-26", input.GetAttribute("value"));
+        Assert.Equal(" ", input.GetAttribute("placeholder"));
+
+        field.Render(parameters => parameters.Add(component => component.Value, (DateTime?)null));
+        var emptyInput = Assert.IsAssignableFrom<AngleSharp.Html.Dom.IHtmlInputElement>(
+            field.Find(".clay-required-editable input[readonly]"));
+        Assert.Empty(emptyInput.Value);
 
         field.Render(parameters => parameters
             .Add(component => component.Options, new ClayDatePickerOptions
@@ -106,6 +116,37 @@ public sealed class ClayRequiredFieldStyleTests
             }));
         Assert.NotNull(field.Find("input[disabled]"));
         Assert.Empty(field.FindAll(".clay-required-editable"));
+    }
+
+    /// <summary>Поисковая строка не заменяет значение, выбранное в обязательном селекторе.</summary>
+    [Fact]
+    public async Task SelectHighlightsMissingSelectionUntilChoiceAndAgainAfterClear()
+    {
+        await using var context = CreateContext();
+        var field = context.Render<ClaySelect<Option, int?>>(parameters => parameters
+            .Add(component => component.Items, [new Option(1, "First")])
+            .Add(component => component.ValueSelector, option => (int?)option.Id)
+            .Add(component => component.TextSelector, option => option.Name)
+            .Add(component => component.Options, new ClaySelectOptions { Required = true, Placeholder = "Выберите" }));
+
+        Assert.NotNull(field.Find("input[required][data-clay-required-empty]"));
+        await field.InvokeAsync(() => field.Instance.RestoreDraftTextAsync("непринятый поиск"));
+        Assert.Equal("непринятый поиск", field.Find("input[data-clay-required-empty]").GetAttribute("value"));
+
+        field.Render(parameters => parameters.Add(component => component.Value, 1));
+        Assert.Equal("First", field.Find("input[required]").GetAttribute("value"));
+        Assert.Empty(field.FindAll("[data-clay-required-empty]"));
+
+        field.Render(parameters => parameters.Add(component => component.Value, (int?)null));
+        Assert.NotNull(field.Find("input[required][data-clay-required-empty]"));
+        field.Render(parameters => parameters
+            .Add(component => component.Options, new ClaySelectOptions { Required = true, ReadOnly = true }));
+        Assert.NotNull(field.Find("input[readonly]"));
+        Assert.Empty(field.FindAll("[data-clay-required-empty]"));
+        field.Render(parameters => parameters
+            .Add(component => component.Options, new ClaySelectOptions { Required = true, Disabled = true }));
+        Assert.NotNull(field.Find("input[disabled]"));
+        Assert.Empty(field.FindAll("[data-clay-required-empty]"));
     }
 
     private static BunitContext CreateContext()

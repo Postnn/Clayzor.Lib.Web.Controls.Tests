@@ -1,4 +1,6 @@
 using System.Security.Claims;
+using System.Text.Json;
+using Clayzor.Lib.Web.Controls.Components.Select;
 using Bunit;
 using Clayzor.Lib.DALC;
 using Clayzor.Lib.Entities.TerritorialEntity;
@@ -123,13 +125,73 @@ public sealed class TerritorialEntitySearchRefreshTests
         Assert.Empty(script);
     }
 
+    /// <summary>Фактический поиск возвращает single, multiple и явно подтверждённый пустой набор.</summary>
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task SearchSendsExactSelectionToAcknowledgedOpener(bool multiple, bool initialChecked)
+    {
+        await using var opener = new BunitContext();
+        opener.JSInterop.Mode = JSRuntimeMode.Loose;
+        await using var service = new ClaySelectAdvancedSearchService(opener.JSInterop.JSRuntime);
+        int[]? accepted = null;
+        Task<ClaySelectReturnDecision> Accept(int[] ids)
+        {
+            accepted = ids;
+            return Task.FromResult(ClaySelectReturnDecision.Accepted);
+        }
+
+        const string url = "http://localhost/TerritorialEntity/TerritorialEntity_search";
+        var selection = multiple
+            ? service.OpenAcknowledgedMultipleIdsAsync(url, (ids, _) => Accept(ids))
+            : service.OpenAcknowledgedAsync<TerritorialEntityLookup, int?>(url, (result, _) => Accept([result.Value!.Value]));
+        var open = Assert.Single(opener.JSInterop.Invocations["claySelectAdvancedSearch.open"]);
+        var requestId = Assert.IsType<string>(open.Arguments[1]);
+        var query = $"&return={(multiple ? 2 : 1)}&requestId={requestId}&returnOrigin=http%3A%2F%2Flocalhost" +
+            (initialChecked ? "&selectedids=5" : "");
+        var (context, script, form, tree) = RenderSearch(returnQuery: query, initialChecked: initialChecked);
+        await using var sender = context;
+        const string method = "claySelectAdvancedSearch.returnValue";
+        var returned = sender.JSInterop.Setup<bool>(method, _ => true);
+        if (!multiple || initialChecked)
+            script.Enqueue(Script.Rows(Script.Row(("Id", 5))));
+        var submit = multiple
+            ? form.FindAll("button").Single(button => button.TextContent.Trim() == "Сохранить")
+                .ClickAsync(new Microsoft.AspNetCore.Components.Web.MouseEventArgs())
+            : form.InvokeAsync(() => tree.Options.CustomMenuItems.Single().OnExecute(tree.RootNodes.Single()));
+
+        try
+        {
+            form.WaitForAssertion(() => Assert.Single(sender.JSInterop.Invocations[method]));
+            var invocation = Assert.Single(sender.JSInterop.Invocations[method]);
+            Assert.Equal(requestId, invocation.Arguments[0]);
+            var value = invocation.Arguments[1]!;
+            Assert.Null(accepted);
+            Assert.False(selection.IsCompleted);
+            var decision = await service.ApplyAsync(requestId, 1, JsonSerializer.SerializeToElement(value, value.GetType()));
+            Assert.Equal("Accepted", decision);
+            Assert.True(await selection);
+            Assert.Equal(multiple && !initialChecked ? [] : new[] { 5 }, accepted);
+            Assert.Empty(script);
+        }
+        finally
+        {
+            returned.SetResult(accepted is not null);
+            await submit;
+            await service.CancelAsync(requestId);
+        }
+    }
+
     private static (BunitContext Context, Queue<ScriptEntry> Script, IRenderedComponent<TerritorialEntitySearch> Form, ClayTreeView Tree) RenderSearch(
-        bool frameReady = true, bool hasChildren = false)
+        bool frameReady = true, bool hasChildren = false, string? returnQuery = null, bool initialChecked = false)
     {
         var script = new Queue<ScriptEntry>();
         script.Enqueue(Script.Rows(Script.Row(("Id", 4))));
         script.Enqueue(Script.Rows());
         script.Enqueue(Script.Rows(Script.Row(("TerritoryUpdate", true))));
+        if (initialChecked)
+            script.Enqueue(Script.Rows(Script.Row(("Id", 5))));
         script.Enqueue(Script.Rows(TreeRow("Область", hasChildren: hasChildren)));
         var connection = new ScriptedConnection(script, emulateEquipmentIdentity: false);
         var context = new BunitContext();
@@ -145,7 +207,7 @@ public sealed class TerritorialEntitySearchRefreshTests
         context.Services.AddClayTree(new ConfigurationBuilder().Build());
         context.ComponentFactories.AddStub<InventoryMainMenu>();
         context.Render<MudPopoverProvider>();
-        context.Services.GetRequiredService<NavigationManager>().NavigateTo("/TerritorialEntity/TerritorialEntity_search?root=5");
+        context.Services.GetRequiredService<NavigationManager>().NavigateTo("/TerritorialEntity/TerritorialEntity_search?root=5" + returnQuery);
         var form = context.Render<TerritorialEntitySearch>();
         form.WaitForAssertion(() =>
         {

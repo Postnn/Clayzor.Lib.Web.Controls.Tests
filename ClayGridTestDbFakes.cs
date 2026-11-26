@@ -162,14 +162,17 @@ internal sealed class ScriptedCommand : DbCommand
         return Task.FromResult(e.AffectedRows ?? 1);
     }
 
-    public override Task<object?> ExecuteScalarAsync(CancellationToken ct)
+    public override async Task<object?> ExecuteScalarAsync(CancellationToken ct)
     {
         var e = GetEntry();
         CommandLog.Add(CommandText);
         _owner.ParameterLog.Add(DbParameterCollection.Cast<DbParameter>()
             .ToDictionary(parameter => parameter.ParameterName, parameter => parameter.Value));
+        e.Started?.TrySetResult();
+        if (e.Release is not null)
+            await e.Release.Task.WaitAsync(ct);
         if (e.Exception is not null) throw e.Exception;
-        return Task.FromResult((object?)e.Scalar);
+        return e.Scalar;
     }
 
     protected override async Task<DbDataReader> ExecuteDbDataReaderAsync(CommandBehavior behavior, CancellationToken ct)

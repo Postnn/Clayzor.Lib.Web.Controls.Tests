@@ -532,6 +532,100 @@ public sealed class NetFormTests
         Assert.Contains(expected, page.Markup);
     }
 
+    /// <summary>Поздний текст остаётся изменённым после отправки и не закрывает форму по ОК.</summary>
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public async Task Save_DoesNotAcceptTextEnteredAfterDispatch(bool closeAfterSave, bool concurrentChange)
+    {
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var fixture = new NetFixture();
+        fixture.Enqueue(Script.Rows(Script.Row(("КодСотрудника", 4), ("Сотрудник", "Тестов А."),
+            ("Employee", "Test"), ("КодЛицаЗаказчика", 1))));
+        fixture.Enqueue(new ScriptEntry { Scalar = 0, Started = started, Release = release });
+        var freshChangedAt = new DateTime(2026, 11, 21, 11, 0, 0);
+        fixture.AddLoad(description: concurrentChange ? "чужое изменение" : "отправлено",
+            customerId: 2, changedAt: freshChangedAt, includeCustomerLookup: !concurrentChange);
+        var page = fixture.Context.Render<NetPage>();
+        WaitForLoad(page);
+        var originalChangedAt = Model(page.Instance).ChangedAtUtc;
+        await page.FindAll("textarea")[1].InputAsync(new ChangeEventArgs { Value = "отправлено" });
+
+        var save = Invoke(page, "SaveAsync", closeAfterSave);
+        try
+        {
+            await started.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            await page.FindAll("textarea")[1].InputAsync(new ChangeEventArgs { Value = "после отправки" });
+        }
+        finally
+        {
+            release.TrySetResult();
+        }
+        await save;
+
+        var sent = Assert.Single(fixture.Connection.ParameterLog, args => args.ContainsKey("ExpectedChangedAt"));
+        Assert.Equal("отправлено", sent["Description"]);
+        Assert.Equal("после отправки", Model(page.Instance).Description);
+        Assert.Equal(concurrentChange ? 1 : 2, Model(page.Instance).PersonCustomerId);
+        Assert.Equal(concurrentChange ? originalChangedAt : freshChangedAt, Model(page.Instance).ChangedAtUtc);
+        if (concurrentChange)
+            Assert.Contains("Сервер также изменил", page.Markup);
+        Assert.True(IsModified(page.Instance));
+        Assert.DoesNotContain(fixture.Context.JSInterop.Invocations, call => call.Identifier == "clayModelEquipmentForm.close");
+    }
+
+    /// <summary>Поздний ответ начальной загрузки A не публикует её организацию для B.</summary>
+    [Fact]
+    public async Task InitialEmployeeResponseAfterRouteChange_DoesNotPublishOldOrganization()
+    {
+        using var fixture = new NetFixture();
+        var page = fixture.Context.Render<NetPage>();
+        WaitForLoad(page);
+
+        var employeeStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseEmployee = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.AddLoad(employeeId: 5, initialEmployeeLookup: new ScriptEntry
+        {
+            Started = employeeStarted,
+            Release = releaseEmployee,
+            Rows = [Script.Row(("КодСотрудника", 5), ("КодЛицаЗаказчика", 9), ("Организация", "Старая"))],
+        }, includeCustomerLookup: false);
+        var pendingA = Invoke(page, "LoadCurrentAsync", 10);
+        await employeeStarted.Task.WaitAsync(TimeSpan.FromSeconds(3));
+
+        var secondLoadStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseSecondLoad = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var authentication = (FakeAuthenticationStateProvider)fixture.Context.Services.GetRequiredService<AuthenticationStateProvider>();
+        authentication.BeforeRead = async () =>
+        {
+            secondLoadStarted.TrySetResult();
+            await releaseSecondLoad.Task;
+        };
+        fixture.AddLoad(id: 11, port: 12, customerId: 3, employeeId: 6, organizationId: 2);
+        ChangeId(page.Instance, 11);
+        var pendingB = Invoke(page, "LoadCurrentAsync", 11);
+        try
+        {
+            await secondLoadStarted.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            releaseEmployee.TrySetResult();
+            await pendingA;
+            Assert.Null(GetPrivate<int?>(page.Instance, "_employeeOrganizationId"));
+            Assert.Null(GetPrivate<string>(page.Instance, "_employeeOrganizationName"));
+        }
+        finally
+        {
+            releaseEmployee.TrySetResult();
+            releaseSecondLoad.TrySetResult();
+            await pendingB;
+        }
+
+        Assert.Equal(11, Model(page.Instance).Id);
+        Assert.Equal(2, GetPrivate<int?>(page.Instance, "_employeeOrganizationId"));
+        Assert.Equal("Организация 2", GetPrivate<string>(page.Instance, "_employeeOrganizationName"));
+    }
+
     private static void Render(IRenderedComponent<NetPage> page) => page.InvokeAsync(() =>
         typeof(NetPage).GetMethod("StateHasChanged",
             System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
@@ -627,7 +721,10 @@ public sealed class NetFormTests
             byte port = 2,
             int customerId = 1,
             int? employeeId = null,
-            int organizationId = 1)
+            int organizationId = 1,
+            ScriptEntry? initialEmployeeLookup = null,
+            bool includeCustomerLookup = true,
+            DateTime? changedAt = null)
         {
             _entries.Enqueue(currentUser
                 ? Script.Rows(Script.Row(("КодСотрудника", 4), ("Сотрудник", "Тестов А."),
@@ -637,7 +734,7 @@ public sealed class NetFormTests
                 ("КодЛокальнойСети", id), ("КодОборудования", 8), ("Порт", port), ("PoE", poe),
                 ("КодРозетки", null), ("КодЛицаЗаказчика", customerId), ("КодСотрудника", employeeId),
                 ("Подключено", connected), ("Примечания", description), ("СрокВозврата", null),
-                ("Изменил", 4), ("Сотрудник", "Тестов А."), ("Изменено", new DateTime(2026, 11, 21, 10, 0, 0)))));
+                ("Изменил", 4), ("Сотрудник", "Тестов А."), ("Изменено", changedAt ?? new DateTime(2026, 11, 21, 10, 0, 0)))));
             _entries.Enqueue(Script.Rows(Script.Row(("СетевоеИмя", "clay-test-net"))));
             _entries.Enqueue(Script.Rows(Script.Row(("КодРасположения", 50))));
             _entries.Enqueue(Script.Rows(
@@ -646,12 +743,13 @@ public sealed class NetFormTests
                 Script.Row(("КодЛокальнойСети", 11), ("Строка", "sw-a, порт:1")),
                 Script.Row(("КодЛокальнойСети", 12), ("Строка", "sw-a, порт:2"))));
             if (employeeId is > 0)
-                _entries.Enqueue(Script.Rows(Script.Row(("КодСотрудника", employeeId.Value),
+                _entries.Enqueue(initialEmployeeLookup ?? Script.Rows(Script.Row(("КодСотрудника", employeeId.Value),
                     ("Сотрудник", "Тестов А."), ("Employee", "Test"),
                     ("КодЛицаЗаказчика", organizationId), ("Организация", $"Организация {organizationId}"))));
             if (NetEquipmentLinkExtractor.Extract(connected).Count > 0 || NetEquipmentLinkExtractor.Extract(description).Count > 0)
                 _entries.Enqueue(linkEntry ?? Script.Rows());
-            _entries.Enqueue(Script.Rows(Script.Row(("КодЛица", customerId), ("Кличка", "Тестовая организация"))));
+            if (includeCustomerLookup)
+                _entries.Enqueue(Script.Rows(Script.Row(("КодЛица", customerId), ("Кличка", "Тестовая организация"))));
         }
 
         public void Enqueue(ScriptEntry entry) => _entries.Enqueue(entry);
@@ -662,10 +760,14 @@ public sealed class NetFormTests
     private sealed class FakeAuthenticationStateProvider : AuthenticationStateProvider
     {
         /// <inheritdoc />
-        public override Task<AuthenticationState> GetAuthenticationStateAsync()
+        public Func<Task>? BeforeRead { get; set; }
+
+        public override async Task<AuthenticationState> GetAuthenticationStateAsync()
         {
             var identity = new ClaimsIdentity([new Claim(ClaimTypes.Name, "DOMAIN\\devadmin")], "Negotiate");
-            return Task.FromResult(new AuthenticationState(new ClaimsPrincipal(identity)));
+            if (BeforeRead is not null)
+                await BeforeRead();
+            return new AuthenticationState(new ClaimsPrincipal(identity));
         }
     }
 }

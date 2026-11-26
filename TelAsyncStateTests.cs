@@ -2,6 +2,8 @@ using System.Reflection;
 using Bunit;
 using Clayzor.Lib.DALC;
 using Clayzor.Lib.Entities.Inventory;
+using Clayzor.Lib.Web.Controls.Components.Select;
+using Clayzor.Lib.Web.Controls.Services;
 using Clayzor.Lib.Web.DBSelect.Phones;
 using Kesco.App.Web.Inventory.Components.Pages.Telefon;
 using Kesco.App.Web.Inventory.Services;
@@ -437,6 +439,44 @@ public sealed class TelAsyncStateTests
         Assert.Equal(1, fixture.PendingCount);
     }
 
+    /// <summary>Результат Finder подтверждается только после создания одной связи в фактической форме Tel.</summary>
+    [Theory]
+    [InlineData(null)]
+    [InlineData(39)]
+    public async Task FinderRetriesMissingCandidateAndAcknowledgesExactRelation(int? connectionId)
+    {
+        Clayzor.Lib.Entities.MedicalTests.DapperColumnMapper.Initialize();
+        var script = new Queue<ScriptEntry>([
+            Script.Rows(),
+            Script.Rows(Script.Row(("EquipmentId", 17), ("ConnectionEquipmentId", connectionId), ("Model", "Телефон")))
+        ]);
+        await using var fixture = new TelFixture(script);
+        fixture.PrepareWrite();
+        var phoneType = (int)Clayzor.Lib.Entities.ТипыТелефонныхНомеров.Аналоговый;
+        fixture.Model.PhoneTypeId = phoneType;
+        fixture.SetMember("_availability", PhoneFormRules.Evaluate(new PhoneFormRuleInput { PhoneTypeId = phoneType }));
+        var search = fixture.Invoke("OpenEquipmentFinderAsync", new ClaySelectAdvancedSearchContext());
+        var requestId = fixture.WaitForFinderRequest();
+        var payload = System.Text.Json.JsonSerializer.SerializeToElement(new { equipmentId = 17, connectionEquipmentId = connectionId });
+        try
+        {
+            Assert.Equal("Rejected", await fixture.Finder.ApplyAsync(requestId, 1, payload));
+            Assert.Empty(fixture.Get<PhoneRelationsSnapshot>("_relations").Equipment);
+            Assert.False(search.IsCompleted);
+            Assert.Equal("Accepted", await fixture.Finder.ApplyAsync(requestId, 2, payload));
+            Assert.Equal("Accepted", await fixture.Finder.ApplyAsync(requestId, 2, payload));
+            var relation = Assert.Single(fixture.Get<PhoneRelationsSnapshot>("_relations").Equipment);
+            Assert.Equal(17, relation.EquipmentId);
+            Assert.Equal(connectionId, relation.ConnectionEquipmentId);
+            Assert.Empty(script);
+        }
+        finally
+        {
+            await fixture.Finder.CancelAsync(requestId);
+            await search;
+        }
+    }
+
     private sealed class TelFixture : IAsyncDisposable
     {
         private readonly BunitContext _context;
@@ -444,7 +484,7 @@ public sealed class TelAsyncStateTests
         private readonly IRenderedComponent<Tel> _page;
         private readonly Tel _tel;
 
-        internal TelFixture()
+        internal TelFixture(Queue<ScriptEntry>? databaseScript = null)
         {
             var db = new DbManager("Server=test", new FakeSqlErrorHandler(),
                 () => new ScriptedConnection(new Queue<ScriptEntry>()));
@@ -454,6 +494,9 @@ public sealed class TelAsyncStateTests
             var services = _context.Services;
             services.AddMudServices();
             services.AddSingleton<PhoneFormService>(Service);
+            services.AddSingleton(databaseScript is null ? db : new DbManager("Server=test", new FakeSqlErrorHandler(),
+                () => new ScriptedConnection(databaseScript)));
+            services.AddSingleton(new ClaySelectAdvancedSearchService(_context.JSInterop.JSRuntime));
             services.AddSingleton(new global::Clayzor.Lib.Web.Controls.ClayErrorService());
             services.AddSingleton(new PhoneTypeSelectDataSource(db));
             services.AddSingleton(new PhoneStationSelectDataSource(db));
@@ -478,6 +521,16 @@ public sealed class TelAsyncStateTests
         }
 
         internal DelayedPhoneFormService Service { get; }
+        internal ClaySelectAdvancedSearchService Finder => _context.Services.GetRequiredService<ClaySelectAdvancedSearchService>();
+        internal string WaitForFinderRequest()
+        {
+            const string method = "claySelectAdvancedSearch.open";
+            _page.WaitForAssertion(() => Assert.Single(_context.JSInterop.Invocations[method]));
+            var invocation = Assert.Single(_context.JSInterop.Invocations[method]);
+            Assert.Equal(true, invocation.Arguments[4]);
+            return Assert.IsType<string>(invocation.Arguments[1]);
+        }
+
         internal Phone Model => Get<Phone>("_model");
         internal int PendingCount => Get<IReadOnlyList<PhoneSyncOperation>>("_pendingOperations").Count;
 

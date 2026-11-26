@@ -95,6 +95,8 @@ public class ClayTreePagingRestoreTests : IDisposable
     public ClayTreePagingRestoreTests()
     {
         _ctx.Services.AddMudServices();
+        _ctx.JSInterop.SetupVoid("clayTree.attachKeyboard", _ => true).SetVoidResult();
+        _ctx.JSInterop.SetupVoid("clayTree.detachKeyboard", _ => true).SetVoidResult();
         _ctx.Services.AddSingleton<IClayTreeStateStore>(new FakeStateStore());
         _ctx.Services.AddSingleton<ISqlErrorHandler>(new FakeErrorHandler());
         _ctx.Services.AddSingleton<DbManager>(_ => new DbManager("Server=.", new FakeErrorHandler()));

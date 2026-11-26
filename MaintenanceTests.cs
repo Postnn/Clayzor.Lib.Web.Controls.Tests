@@ -173,6 +173,61 @@ public sealed class MaintenanceTests
         Assert.DoesNotContain("Не удалось завершить", page.Markup);
     }
 
+    /// <summary>Подтверждённый исход из новой регистрации продолжает очистку без повторного INSERT.</summary>
+    [Fact]
+    public async Task ReopenedConfirmedReceiptOnlyRetriesCleanup()
+    {
+        const string receipt = """{"version":1,"attemptId":"last-session","kind":"maintenance.complete","status":"confirmed","revision":9,"data":"17","scopes":[],"acceptLegacyTyped":false,"legacyTypedRevision":0}""";
+        await using var context = CreateContext(out var connection, restoredOperation: receipt);
+        var page = context.Render<MaintenancePage>();
+        page.WaitForAssertion(() => Assert.Contains("Выполнение записано", page.Markup));
+        Assert.True(Action(page).Instance.Disabled);
+
+        await RecoveryButton(page, "Завершить обработку черновика").ClickAsync(new MouseEventArgs());
+
+        Assert.Equal(0, connection.InsertCount);
+        Assert.False(Action(page).Instance.Disabled);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
+        Assert.Equal(9L, Assert.Single(context.JSInterop.Invocations["clayDraftStore.commitOperation"]).Arguments[1]);
+        Assert.Equal(9L, Assert.Single(context.JSInterop.Invocations["clayDraftStore.recordConfirmedOperation"]).Arguments[1]);
+    }
+
+    /// <summary>Потеря указателя предлагает собственный черновик и восстанавливает подтверждение без INSERT.</summary>
+    [Fact]
+    public async Task DiscoveredReceiptCanBeOpenedWithoutAutomaticWrite()
+    {
+        const string draftId = "deadbeef-1111-2222-3333-444444444444";
+        const string receipt = """{"version":1,"attemptId":"last-session","kind":"maintenance.complete","status":"confirmed","revision":9,"data":"17","scopes":[],"acceptLegacyTyped":false,"legacyTypedRevision":0}""";
+        await using var context = CreateContext(out var connection, recoveryCandidates: [new(draftId, 9, true, true)]);
+        context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.recoverListedDraft", _ => true)
+            .SetResult(new ClayDraftRestore("maintenance-test", true, 9, null, receipt));
+        var page = context.Render<MaintenancePage>();
+        page.WaitForAssertion(() => Assert.Contains("Найдены сохранённые черновики", page.Markup));
+        Assert.DoesNotContain("Начать отдельный черновик", page.Markup);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.recoverListedDraft"]);
+
+        var choose = page.FindAll("button").Single(b => b.TextContent.Trim().StartsWith("Восстановить черновик", StringComparison.Ordinal));
+        await choose.ClickAsync(new MouseEventArgs());
+
+        Assert.Equal(draftId, Assert.Single(context.JSInterop.Invocations["clayDraftStore.recoverListedDraft"]).Arguments[1]);
+        Assert.Contains("Выполнение записано", page.Markup);
+        Assert.Equal(0, connection.InsertCount);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
+    }
+
+    /// <summary>Даже здоровое хранилище не разрешает отправку при невосстановленном вводе принимаемой области.</summary>
+    [Fact]
+    public async Task PendingConfirmationScopePreventsBeginAndInsert()
+    {
+        await using var context = CreateContext(out var connection,
+            readiness: new ClayDraftRestoreReadiness(false, ["confirmation"], []));
+        var page = context.Render<MaintenancePage>();
+        await ClickConfirmation(page);
+
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
+        Assert.Equal(0, connection.InsertCount);
+    }
+
     /// <summary>Потеря ответа Begin не отправляет INSERT и восстанавливает только свою попытку.</summary>
     [Theory]
     [InlineData(false)]
@@ -423,13 +478,17 @@ public sealed class MaintenanceTests
         return provider.FindAll("button").Single(x => x.TextContent.Trim() == "Да");
     }
 
-    private static BunitContext CreateContext(out MaintenanceConnection connection, bool failBegin = false, string? sourceZone = null)
+    private static BunitContext CreateContext(out MaintenanceConnection connection, bool failBegin = false, string? sourceZone = null, string? restoredOperation = null, ClayDraftRecoveryCandidate[]? recoveryCandidates = null, ClayDraftRestoreReadiness? readiness = null)
     {
         var db = connection = new MaintenanceConnection();
         var context = new BunitContext();
         context.JSInterop.Mode = JSRuntimeMode.Loose;
         context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.register", _ => true)
-            .SetResult(new ClayDraftRestore("maintenance-test", false, 0, null, null));
+            .SetResult(new ClayDraftRestore("maintenance-test", restoredOperation is not null, 0, null, restoredOperation));
+        context.JSInterop.Setup<ClayDraftRecoveryCandidate[]>("clayDraftStore.listRecoveryCandidates", _ => true)
+            .SetResult(recoveryCandidates ?? []);
+        context.JSInterop.Setup<ClayDraftRestoreReadiness>("clayDraftStore.getRestoreReadiness", _ => true)
+            .SetResult(readiness ?? new ClayDraftRestoreReadiness(true, [], []));
         context.JSInterop.Setup<ClayDraftStorageHealth>("clayDraftStore.getHealth", _ => true)
             .SetResult(new ClayDraftStorageHealth(true, 0, null, false, 1, 1));
         var begin = context.JSInterop.Setup<string>("clayDraftStore.beginOperationIntent", _ => true);

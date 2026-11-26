@@ -11,11 +11,13 @@ function createBrowser() {
     const drafts = new Map();
     const session = new Map();
     const listeners = new Map();
+    const heldLocks = new Set();
     let interceptWrite;
+    let rejectDelete = false;
     const makeField = scope => ({
         type: 'text', value: '', disabled: false,
         dataset: { draftKey: scope + '.name', draftScope: scope },
-        matches: () => true, closest: () => null,
+        matches: () => true, closest: () => null, getAttribute: () => null, dispatchEvent: () => {},
     });
     const main = makeField('main');
     const child = makeField('child');
@@ -39,8 +41,18 @@ function createBrowser() {
                             queueMicrotask(() => { if (!aborted) request.onsuccess?.(); });
                             return request;
                         },
+                        getAll({ lower, upper }) {
+                            const request = { result: [...store.entries()].filter(([id]) => id >= lower && id <= upper).map(([, value]) => value) };
+                            return request;
+                        },
                         put(entry) { updates.push(() => store.set(entry.id, entry)); return {}; },
-                        delete(id) { updates.push(() => store.delete(id)); return {}; },
+                        delete(id) {
+                            updates.push(() => {
+                                if (rejectDelete) throw new Error('delete refused');
+                                store.delete(id);
+                            });
+                            return {};
+                        },
                     };
                 },
                 abort() {
@@ -79,12 +91,23 @@ function createBrowser() {
     };
     const window = {};
     vm.runInNewContext(script, {
-        indexedDB, crypto: webcrypto, navigator: {}, window, document, TextEncoder, TextDecoder, btoa, atob,
+        indexedDB, crypto: webcrypto, window, document, TextEncoder, TextDecoder, Event, btoa, atob,
+        IDBKeyRange: { bound: (lower, upper) => ({ lower, upper }) },
+        navigator: { locks: { async request(name, _, callback) {
+            if (heldLocks.has(name)) return callback(null);
+            heldLocks.add(name);
+            try { return await callback({ name }); }
+            finally { heldLocks.delete(name); }
+        } } },
         sessionStorage: { getItem: key => session.get(key), setItem: (key, value) => session.set(key, value) },
     });
     return {
         store: window.clayDraftStore,
-        open: () => window.clayDraftStore.register('territory', '4', 'employee', 1, '#editor'),
+        open: (entity = '4', user = 'employee') => window.clayDraftStore.register('territory', entity, user, 1, '#editor'),
+        forgetPointer: () => session.clear(),
+        rejectDeletes: value => { rejectDelete = value; },
+        mountValue: (scope, value) => { (scope === 'main' ? main : child).value = value; },
+        displayedValue: scope => (scope === 'main' ? main : child).value,
         writeHook: hook => { interceptWrite = hook; },
         input: (scope, value) => {
             const field = scope === 'main' ? main : child;
@@ -181,4 +204,130 @@ test('unresolved operation survives scoped cancel and an old revision cannot res
     const reopened = await browser.open();
     assert.equal(reopened.typedScopes.main, 'newer');
     assert.ok(reopened.operation);
+});
+test('durable confirmed receipt survives failed cleanup and prevents downgrade', async () => {
+    const browser = createBrowser();
+    const { store } = browser;
+    const { registrationId: id } = await browser.open();
+    await store.saveTypedScope(id, 'main', 'submitted');
+    await store.saveTypedScope(id, 'child', 'unrelated');
+    const attempt = JSON.parse(await store.beginOperationIntent(id, JSON.stringify({
+        version: 1, attemptId: 'attempt-1', kind: 'test', data: 'submitted', acceptedScopes: ['main'],
+    })));
+    await store.recordConfirmedOperation(id, attempt.revision);
+    await assert.rejects(store.unknownOperation(id, attempt.revision));
+    await assert.rejects(store.rejectOperation(id, attempt.revision));
+    await store.saveTypedScope(id, 'main', 'newer after dispatch');
+
+    browser.writeHook(() => { throw new Error('cleanup unavailable'); });
+    await assert.rejects(store.commitOperation(id, attempt.revision), /cleanup unavailable/);
+    await assert.rejects(store.unregister(id));
+
+    const restored = await browser.open();
+    const receipt = JSON.parse(restored.operation);
+    assert.equal(receipt.attemptId, attempt.attemptId);
+    assert.equal(receipt.revision, attempt.revision);
+    assert.equal(receipt.status, 'confirmed');
+    await store.recordConfirmedOperation(restored.registrationId, receipt.revision);
+    await store.commitOperation(restored.registrationId, receipt.revision);
+    await store.unregister(restored.registrationId);
+    const final = await browser.open();
+    assert.equal(final.operation, null);
+    assert.equal(final.typedScopes.main, 'newer after dispatch');
+    assert.equal(final.typedScopes.child, 'unrelated');
+});
+
+test('finds the same user and entity after losing the pointer without taking an active tab', async () => {
+    const browser = createBrowser();
+    const { store } = browser;
+    const first = await browser.open();
+    await store.saveTypedScope(first.registrationId, 'main', 'existing local');
+    const prior = await store.beginOperation(first.registrationId, '{}');
+    await store.recordConfirmedOperation(first.registrationId, prior);
+    browser.forgetPointer();
+
+    const empty = await browser.open();
+    const candidates = await store.listRecoveryCandidates(empty.registrationId);
+    assert.equal(candidates.length, 1);
+    assert.equal(candidates[0].hasOperation, true);
+    assert.equal(await store.recoverListedDraft(empty.registrationId, candidates[0].draftId), null);
+
+    const otherEntity = await browser.open('5');
+    const otherUser = await browser.open('4', 'different employee');
+    assert.equal((await store.listRecoveryCandidates(otherEntity.registrationId)).length, 0);
+    assert.equal((await store.listRecoveryCandidates(otherUser.registrationId)).length, 0);
+
+    await store.unregister(first.registrationId);
+    const restored = await store.recoverListedDraft(empty.registrationId, candidates[0].draftId);
+    assert.equal(restored.registrationId, empty.registrationId);
+    assert.equal(restored.typedScopes.main, 'existing local');
+    assert.equal(JSON.parse(restored.operation).status, 'confirmed');
+    assert.equal((await store.recoverListedDraft(empty.registrationId, candidates[0].draftId)).typedScopes.main,
+        'existing local');
+});
+
+test('recovery cannot merge or overwrite input already made in the new registration', async () => {
+    const browser = createBrowser();
+    const { store } = browser;
+    const first = await browser.open();
+    await store.saveTypedScope(first.registrationId, 'main', 'stored');
+    await store.unregister(first.registrationId);
+    browser.forgetPointer();
+
+    const empty = await browser.open();
+    const [candidate] = await store.listRecoveryCandidates(empty.registrationId);
+    await store.saveTypedScope(empty.registrationId, 'main', 'new independent draft');
+    assert.equal(await store.recoverListedDraft(empty.registrationId, candidate.draftId), null);
+    await store.unregister(empty.registrationId);
+    const current = await browser.open();
+    assert.equal(current.typedScopes.main, 'new independent draft');
+    assert.equal((await store.listRecoveryCandidates(current.registrationId)).length, 1);
+});
+
+test('healthy storage rejects an accepted unrestored scope and preserves it during an unrelated commit', async () => {
+    const browser = createBrowser();
+    const { store } = browser;
+    const first = await browser.open();
+    browser.input('main', 'unrestored last character!');
+    await store.unregister(first.registrationId);
+    browser.mountValue('main', 'rendered default');
+
+    const { registrationId: id } = await browser.open();
+    assert.equal((await store.getHealth(id)).healthy, true);
+    assert.ok((await store.getRestoreReadiness(id)).pendingScopes.includes('main'));
+    const createIntent = scope => JSON.stringify({
+        version: 1, kind: 'fixture', data: '{}', acceptedScopes: [scope],
+    });
+
+    await assert.rejects(store.beginOperationIntent(id, createIntent('main')), /восстановите/);
+    assert.equal((await store.getHealth(id)).hasOperation, false);
+    const child = JSON.parse(await store.beginOperationIntent(id, createIntent('child')));
+    await store.commitOperation(id, child.revision);
+    assert.ok((await store.getRestoreReadiness(id)).pendingScopes.includes('main'));
+    const restored = await store.applyRaw(id, 'main');
+    assert.equal(restored.pending.length, 0);
+    assert.equal(browser.displayedValue('main'), 'unrestored last character!');
+});
+
+test('failed deletion after accepted cleanup leaves a clean classification on re-registration', async () => {
+    const browser = createBrowser();
+    const { store } = browser;
+    const first = await browser.open();
+    await store.saveTypedScope(first.registrationId, 'main', 'submitted');
+    const attempt = JSON.parse(await store.beginOperationIntent(first.registrationId, JSON.stringify({
+        version: 1, kind: 'fixture', data: '{}', acceptedScopes: ['main', 'child'],
+    })));
+    browser.rejectDeletes(true);
+    await assert.rejects(store.commitOperation(first.registrationId, attempt.revision), /delete refused/);
+    await store.unregister(first.registrationId);
+
+    const reopened = await browser.open();
+    assert.equal(reopened.hasDraft, false);
+    assert.equal(reopened.operation, null);
+    assert.equal(Object.keys(reopened.typedScopes).length, 0);
+    browser.rejectDeletes(false);
+    await store.unregister(reopened.registrationId);
+    const clean = await browser.open();
+    assert.equal(clean.hasDraft, false);
+    assert.equal((await store.getHealth(clean.registrationId)).healthy, true);
 });
