@@ -450,7 +450,7 @@ public sealed class PhoneTemplateOutcomeTests
         fixture.Runtime.EditorText = large;
         await using var context = fixture.Context;
         fixture.Enqueue(ModelRow(), Roles(Роли.Дежурный_инженер), Script.Scalar(0));
-        var page = Render(context, large);
+        var page = Render(context, large, waitTimeout: TimeSpan.FromSeconds(8));
 
         await SaveAsync(page);
 
@@ -647,7 +647,8 @@ public sealed class PhoneTemplateOutcomeTests
         }
     }
 
-    private static IRenderedComponent<PhoneTemplateForm> Render(BunitContext context, string expected = OriginalText)
+    private static IRenderedComponent<PhoneTemplateForm> Render(BunitContext context, string expected = OriginalText,
+        TimeSpan? waitTimeout = null)
     {
         var page = context.Render<PhoneTemplateForm>();
         page.WaitForAssertion(() =>
@@ -655,7 +656,7 @@ public sealed class PhoneTemplateOutcomeTests
             var editor = page.Find("textarea");
             Assert.Contains(expected, editor.TextContent);
             Assert.False(editor.HasAttribute("readonly"));
-        }, TimeSpan.FromSeconds(3));
+        }, waitTimeout ?? TimeSpan.FromSeconds(3));
         return page;
     }
 

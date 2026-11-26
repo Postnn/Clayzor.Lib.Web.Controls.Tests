@@ -448,6 +448,58 @@ public sealed class BeelineParamsTests
         dialogs.InvokeAsync(() => dialogs.FindComponent<ClayEditorCancelDialog>().FindAll("button")
             .Single(button => button.TextContent.Trim() == choice).ClickAsync(new MouseEventArgs()));
 
+    /// <summary>Разрешённые поля видит только свежеподтверждённый владелец точного договора.</summary>
+    [Theory]
+    [InlineData("owned")]
+    [InlineData("owned-denied")]
+    [InlineData("wrong-key")]
+    [InlineData("wrong-actor")]
+    [InlineData("wrong-kind")]
+    [InlineData("invalid-email")]
+    public async Task SubmittedBeelineView_RequiresExactOwnerAndKey(string mode)
+    {
+        using var sql = new Probe { Row = mode == "owned-denied" ? Original : null, DenyRead = mode == "owned-denied" };
+        const string submittedEmail = "submitted@example.test";
+        var data = JsonSerializer.Serialize(new
+        {
+            Original = new BeelineDraft(Zones[0], "base@example.test"),
+            Current = new BeelineDraft(Zones[1], mode == "invalid-email" ? "fixture-private-payload" : submittedEmail),
+            Version = new { Key = mode == "wrong-key" ? "FOREIGN" : Number, ChangedBy = 4, ChangedAt = Actual },
+            PrivateMetadata = "fixture-unrelated-wire-data",
+        });
+        var operation = JsonSerializer.Serialize(new
+        {
+            version = 1, attemptId = "beeline-submitted", kind = mode == "wrong-kind" ? "phone-pool-attribute.update" : "beeline.update",
+            status = "unknown", revision = 18, data, scopes = Array.Empty<object>(), acceptLegacyTyped = false, legacyTypedRevision = 0,
+        });
+        await using var context = Configure(sql, restore: new ClayDraftRestore("beeline-recovery", true, 18, null, operation,
+            new Dictionary<string, string> { ["main"] = RecoverySnapshot("local@example.test") }));
+        var page = context.Render<BeelineParamsForm>();
+        page.WaitForAssertion(() => Assert.Contains("Посмотреть снимок попытки", page.Markup));
+        if (mode == "wrong-actor") sql.ActorId = 8;
+
+        await page.InvokeAsync(() => Button(page, "Посмотреть снимок попытки").ClickAsync());
+
+        if (mode is "owned" or "owned-denied")
+        {
+            var panel = page.Find("[data-testid=submitted-attempt]");
+            Assert.Contains(submittedEmail, panel.TextContent);
+            Assert.Contains(Zones[1], panel.TextContent);
+            Assert.DoesNotContain("local@example.test", panel.TextContent);
+        }
+        else
+        {
+            Assert.Empty(page.FindAll("[data-testid=submitted-attempt]"));
+            Assert.DoesNotContain(submittedEmail, page.Markup);
+        }
+        Assert.DoesNotContain("fixture-private-payload", page.Markup);
+        Assert.DoesNotContain("fixture-unrelated-wire-data", page.Markup);
+        Assert.True(Button(page, "Сохранить").HasAttribute("disabled"));
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
+        Assert.Equal(0, sql.Updates);
+    }
+
     private static string RecoverySnapshot(string email) => JsonSerializer.Serialize(new
     {
         Original = new BeelineDraft(Original.TimeZone, Original.EmailManager),

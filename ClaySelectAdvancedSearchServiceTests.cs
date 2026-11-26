@@ -177,7 +177,7 @@ public sealed class ClaySelectAdvancedSearchServiceTests : IDisposable
     [Fact]
     public async Task RecoverableOpen_PersistsRequestBeforeOpeningAndDisposesOnlyBinding()
     {
-        await using var service = new ClaySelectAdvancedSearchService(_ctx.JSInterop.JSRuntime);
+        await using var service = new ClaySelectAdvancedSearchService(new SynchronizedInvocationRuntime(_ctx.JSInterop.JSRuntime));
         var started = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
         var durable = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var request = service.OpenRecoverableAsync("https://directory.example/search", false, Guid.NewGuid().ToString("N"),
@@ -247,6 +247,24 @@ public sealed class ClaySelectAdvancedSearchServiceTests : IDisposable
 
     private string LastRequestId() =>
         (string)_ctx.JSInterop.Invocations.Last(item => item.Identifier == "claySelectAdvancedSearch.open").Arguments[1]!;
+
+    // bUnit регистрирует вызов синхронно. Сам ValueTask ожидается вызывающей стороной вне блокировки.
+    private sealed class SynchronizedInvocationRuntime(IJSRuntime inner) : IJSRuntime
+    {
+        private readonly object _sync = new();
+
+        public ValueTask<TValue> InvokeAsync<TValue>(string identifier, object?[]? args)
+        {
+            lock (_sync)
+                return inner.InvokeAsync<TValue>(identifier, args);
+        }
+
+        public ValueTask<TValue> InvokeAsync<TValue>(string identifier, CancellationToken cancellationToken, object?[]? args)
+        {
+            lock (_sync)
+                return inner.InvokeAsync<TValue>(identifier, cancellationToken, args);
+        }
+    }
 
     private void AssertCancelInvocation(string requestId)
     {
