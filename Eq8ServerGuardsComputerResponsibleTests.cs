@@ -112,6 +112,7 @@ public sealed class Eq8ServerGuardsComputerResponsibleTests
     [Fact]
     public async Task WithdrawValidGap_ComposesAtomicSave()
     {
+        DapperColumnMapper.Initialize();
         var connection = WithdrawConnection(activeEmployeeId: 3);
 
         await CreateService(connection).WithdrawResponsibleAsync(

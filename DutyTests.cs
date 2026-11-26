@@ -1,10 +1,12 @@
 using System.Data;
 using System.Data.Common;
 using System.Security.Claims;
+using System.Text.Json;
 using Bunit;
 using Clayzor.Lib.Web.Controls.Services;
 using Kesco.App.Web.Inventory.Components.Pages.Duty;
 using Microsoft.AspNetCore.Components.Authorization;
+using Microsoft.AspNetCore.Components.Web;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using MudBlazor.Services;
@@ -119,10 +121,11 @@ public sealed class DutyTests
     [InlineData("today")]
     [InlineData("changed")]
     [InlineData("rights")]
+    [InlineData("duplicate")]
     public async Task ServerRevalidatesStateUnderLock(string reason)
     {
         using var connection = new Probe();
-        var original = Original;
+        DutyRow? original = Original;
         var draft = ClosingDraft();
         if (reason == "closed") connection.Row = original = Original with { Closed = 1 };
         if (reason == "today")
@@ -132,8 +135,22 @@ public sealed class DutyTests
         }
         if (reason == "changed") connection.Row = Original with { ChangedAt = Original.ChangedAt.AddSeconds(1) };
         if (reason == "rights") connection.CanWrite = false;
+        if (reason == "duplicate")
+        {
+            original = null;
+            draft = new DutyDraft(DutyDate, Original.PlannedId);
+        }
         using var db = Db(connection);
-        await Assert.ThrowsAsync<DutyRejectedException>(() => DutyData.SaveAsync(db, "fixture", 4, original, draft, default));
+        var rejected = await Assert.ThrowsAsync<DutyRejectedException>(() =>
+            DutyData.SaveAsync(db, "fixture", 4, original, draft, default));
+        Assert.Equal(reason switch
+        {
+            "closed" => DutyRejectionKind.Closed,
+            "changed" => DutyRejectionKind.Stale,
+            "rights" => DutyRejectionKind.AccessDenied,
+            "duplicate" => DutyRejectionKind.DateOccupied,
+            _ => DutyRejectionKind.Validation,
+        }, rejected.Kind);
         Assert.Equal(0, connection.Commits);
         Assert.Equal(0, connection.ScheduleWrites);
         Assert.Null(connection.InsertedFor);
@@ -198,7 +215,7 @@ public sealed class DutyTests
         context.Services.AddScoped<ClayDraftService>();
         context.Services.AddScoped<ClayFormWindowService>();
         context.Services.AddSingleton<IConfiguration>(new ConfigurationBuilder().Build());
-        context.Services.AddSingleton<AuthenticationStateProvider, DutyAuthentication>();
+        context.Services.AddSingleton<AuthenticationStateProvider>(new DutyAuthentication(true));
         context.Services.AddMudServices();
         context.Render<MudBlazor.MudPopoverProvider>();
         var page = context.Render<DutyPage>();
@@ -208,10 +225,195 @@ public sealed class DutyTests
         Assert.Equal(0, connection.ScheduleWrites);
     }
 
-    private sealed class DutyAuthentication : AuthenticationStateProvider
+    /// <summary>Локальный снимок остаётся доступным при закрытой, исчезнувшей и недоступной для записи карточке.</summary>
+    [Theory]
+    [InlineData("closed")]
+    [InlineData("missing")]
+    [InlineData("read-only")]
+    [InlineData("denied-read")]
+    public async Task ReadOnlyRouteDisplaysOwnDraftWithoutDml(string mode)
+    {
+        using var connection = new Probe
+        {
+            Row = mode == "missing" ? null : Original with { Closed = (byte)(mode == "closed" ? 1 : 0), ActualId = 10, ActualName = "Инженер из БД" },
+            CanWrite = mode != "read-only",
+            DenyRead = mode == "denied-read",
+        };
+        var snapshot = JsonSerializer.Serialize(new { Original, Draft = ClosingDraft() });
+        await using var context = EditorContext(connection,
+            new ClayDraftRestore("duty-recovery", true, 9, null, null, new Dictionary<string, string> { ["main"] = snapshot }));
+        var editor = context.Render<DutyEditor>(parameters => parameters.Add(component => component.RouteId, "20261121"));
+
+        editor.WaitForAssertion(() => Assert.Contains("Локальный черновик", editor.Markup));
+        Assert.Contains("29.11.2026", editor.Markup);
+        Assert.Contains("#9", editor.Markup);
+        Assert.DoesNotContain(editor.FindAll("button"),
+            button => button.TextContent.Trim() == "Сохранить" && !button.HasAttribute("disabled"));
+        Assert.Equal(0, connection.ScheduleWrites);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.saveTypedScope"]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.applyRaw"]);
+        var registration = Assert.Single(context.JSInterop.Invocations["clayDraftStore.register"]);
+        Assert.Equal(new object[] { "duty", "20261121", "4" }, registration.Arguments.Take(3));
+        if (mode == "closed") Assert.Contains("Инженер из БД", editor.Markup);
+        if (mode == "denied-read")
+        {
+            Assert.Contains("нет права прочитать актуальное дежурство", editor.Markup);
+            Assert.DoesNotContain("Инженер из БД", editor.Markup);
+        }
+    }
+
+    /// <summary>Восстановленный Unknown показывает отправленный снимок и разрешает только чтение.</summary>
+    [Fact]
+    public async Task ClosedDutyRestoresAttemptForReadOnlyComparison()
+    {
+        using var connection = new Probe { Row = Original with { Closed = 1 } };
+        var sent = JsonSerializer.Serialize(new { Original, Draft = ClosingDraft() });
+        var operation = JsonSerializer.Serialize(new
+        {
+            version = 1, attemptId = "duty-attempt-01", kind = "duty.save", status = "unknown", revision = 9,
+            data = sent, scopes = Array.Empty<object>(), acceptLegacyTyped = false, legacyTypedRevision = 0,
+        });
+        await using var context = EditorContext(connection, new ClayDraftRestore("duty-recovery", true, 9, null, operation));
+        var editor = context.Render<DutyEditor>(parameters => parameters.Add(component => component.RouteId, "20261121"));
+
+        editor.WaitForAssertion(() => Assert.Contains("duty-attempt-01", editor.Markup));
+        Assert.Contains("29.11.2026", editor.Markup);
+        Assert.DoesNotContain("Отбросить черновик", editor.Markup);
+        var compare = editor.FindAll("button").Single(button => button.TextContent.Trim() == "Сверить состояние записи");
+        await compare.ClickAsync(new MouseEventArgs());
+
+        Assert.Contains("проверка журнала", editor.Markup);
+        Assert.Equal(0, connection.ScheduleWrites);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.discard"]);
+    }
+
+    /// <summary>В закрытой карточке без черновика отсутствуют и сохранение, и durable snapshot.</summary>
+    [Fact]
+    public async Task CleanClosedViewDoesNotPersistDraft()
+    {
+        using var connection = new Probe { Row = Original with { Closed = 1 } };
+        await using var context = EditorContext(connection, new ClayDraftRestore("duty-clean", false, 0, null, null));
+        var editor = context.Render<DutyEditor>(parameters => parameters.Add(component => component.RouteId, "20261121"));
+
+        editor.WaitForAssertion(() => Assert.Contains("Закрыто", editor.Markup));
+        Assert.DoesNotContain("Локальный черновик", editor.Markup);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.saveTypedScope"]);
+        Assert.Equal(0, connection.ScheduleWrites);
+    }
+
+    /// <summary>Поиск черновика требует валидного ключа и подтверждённого текущего сотрудника.</summary>
+    [Theory]
+    [InlineData("20261121", false)]
+    [InlineData("invalid", true)]
+    public async Task UntrustedRouteOrIdentityDoesNotOpenStoredDraft(string route, bool authenticated)
+    {
+        using var connection = new Probe();
+        await using var context = EditorContext(connection, new ClayDraftRestore("private", true, 9, null, null), authenticated);
+        var editor = context.Render<DutyEditor>(parameters => parameters.Add(component => component.RouteId, route));
+        editor.WaitForAssertion(() => Assert.Contains(authenticated ? "Некорректная дата" : "Не удалось подтвердить", editor.Markup));
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.register"]);
+        Assert.Equal(0, connection.ScheduleWrites);
+    }
+
+    /// <summary>Закрытый итог показывает один из трёх результатов, факультативного работодателя и нулевую оплату.</summary>
+    [Theory]
+    [InlineData(null, 12, "Никто не дежурил")]
+    [InlineData(8, 12, "Замечаний к дежурству нет")]
+    [InlineData(9, null, "Инженер замены")]
+    [InlineData(9, 12, "Инженер замены")]
+    public async Task ClosedResultKeepsLegacyMeaning(int? actual, int? employer, string expected)
+    {
+        using var connection = new Probe
+        {
+            Row = Original with { Closed = 1, ActualId = actual, ActualName = "Инженер замены", EmployerId = employer, Payment = 0 },
+        };
+        await using var context = EditorContext(connection, new ClayDraftRestore("no-draft", false, 0, null, null));
+        var page = context.Render<DutyEditor>(parameters => parameters.Add(editor => editor.RouteId, "20261121"));
+
+        page.WaitForAssertion(() => Assert.Contains(expected, page.Markup));
+        var result = page.Find("[aria-label='Фактическая информация о дежурстве']");
+        Assert.Equal(actual == 9 && employer is not null, result.TextContent.Contains("Работодатель:", StringComparison.Ordinal));
+        Assert.Equal(actual is not null, result.TextContent.Contains("Оплата: 0,00", StringComparison.Ordinal));
+        Assert.Equal(actual is not null, result.TextContent.Contains("Дата отгула: 28.11.2026", StringComparison.Ordinal));
+        if (actual is null) Assert.NotNull(result.QuerySelector(".mud-error-text"));
+        if (actual == 9) Assert.Contains("Дежурный инженер:", result.TextContent);
+        Assert.Equal(0, connection.ScheduleWrites);
+    }
+
+    /// <summary>Смена версии или календарного дня блокирует старый Save и оставляет доступным чтение.</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task StalePlanOrMidnightEntersReadOnlyComparison(bool midnight)
+    {
+        var plan = Original with { DutyDate = Today, ActualId = null, TimeOff = null };
+        using var connection = new Probe { Row = plan };
+        await using var context = EditorContext(connection,
+            new ClayDraftRestore("conflict-test", false, 0, null, null), rawReady: true);
+        context.JSInterop.Setup<ClayDraftStorageHealth>("clayDraftStore.getHealth", _ => true)
+            .SetResult(new ClayDraftStorageHealth(true, 0, null, false, 1, 1));
+        context.JSInterop.Setup<string>("clayDraftStore.beginOperationIntent", _ => true)
+            .SetResult("""{"version":1,"attemptId":"duty-conflict","kind":"duty.save","status":"running","revision":2,"data":"{}","scopes":[],"acceptLegacyTyped":false,"legacyTypedRevision":0}""");
+        var editor = context.Render<DutyEditor>(parameters => parameters.Add(component => component.RouteId, "20261125"));
+        editor.WaitForAssertion(() => Assert.False(editor.FindAll("button").Single(b => b.TextContent.Trim() == "Сохранить").HasAttribute("disabled")));
+        if (midnight) connection.ServerToday = Today.AddDays(1);
+        else connection.Row = plan with { PlannedId = 17, ChangedAt = plan.ChangedAt.AddHours(1) };
+
+        await editor.FindAll("button").Single(b => b.TextContent.Trim() == "Сохранить").ClickAsync(new MouseEventArgs());
+
+        Assert.Contains(midnight ? "Серверный день изменился" : "Дежурство изменилось", editor.Markup);
+        Assert.Equal(0, connection.ScheduleWrites);
+        Assert.True(editor.FindAll("button").Single(b => b.TextContent.Trim() == "Сохранить").HasAttribute("disabled"));
+        Assert.Single(context.JSInterop.Invocations["clayDraftStore.rejectOperation"]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.discard"]);
+        await editor.FindAll("button").Single(b => b.TextContent.Trim() == "Сверить состояние записи").ClickAsync(new MouseEventArgs());
+
+        Assert.Contains(midnight ? "26.11.2026" : "#17", editor.Markup);
+        Assert.Contains("Локальный черновик", editor.Markup);
+        Assert.Equal(0, connection.ScheduleWrites);
+        Assert.True(editor.FindAll("button").Single(b => b.TextContent.Trim() == "Сохранить").HasAttribute("disabled"));
+        Assert.Single(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
+    }
+
+    /// <summary>Смена только отображаемых имён не является изменением версии строки.</summary>
+    [Fact]
+    public async Task DisplayNameChangesDoNotRejectMatchingBusinessVersion()
+    {
+        using var connection = new Probe
+        {
+            Row = Original with { PlannedName = "Новое имя", ActualName = "Новое имя", ChangedByName = "Уточнённое имя" },
+        };
+        using var db = Db(connection);
+
+        var result = await DutyData.SaveAsync(db, "fixture", 4, Original, ClosingDraft(), default);
+
+        Assert.Equal((byte)1, result.Closed);
+        Assert.Equal(1, connection.ScheduleWrites);
+        Assert.Equal(1, connection.Commits);
+    }
+
+    private static BunitContext EditorContext(Probe connection, ClayDraftRestore restore, bool authenticated = true, bool rawReady = false)
+    {
+        var context = new BunitContext();
+        context.JSInterop.Mode = JSRuntimeMode.Loose;
+        context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.register", _ => true).SetResult(restore);
+        context.JSInterop.Setup<ClayDraftRestoreReadiness>("clayDraftStore.getRestoreReadiness", _ => true)
+            .SetResult(new ClayDraftRestoreReadiness(rawReady, rawReady ? [] : ["main"], []));
+        context.Services.AddScoped(_ => Db(connection));
+        context.Services.AddScoped<ClayDraftService>();
+        context.Services.AddScoped<ClayFormWindowService>();
+        context.Services.AddSingleton<IConfiguration>(new ConfigurationBuilder().Build());
+        context.Services.AddSingleton<AuthenticationStateProvider>(new DutyAuthentication(authenticated));
+        context.Services.AddMudServices();
+        context.Render<MudBlazor.MudPopoverProvider>();
+        return context;
+    }
+
+    private sealed class DutyAuthentication(bool authenticated) : AuthenticationStateProvider
     {
         public override Task<AuthenticationState> GetAuthenticationStateAsync() =>
-            Task.FromResult(new AuthenticationState(new ClaimsPrincipal(new ClaimsIdentity([new Claim(ClaimTypes.Name, "fixture")], "test"))));
+            Task.FromResult(new AuthenticationState(new ClaimsPrincipal(authenticated ? new ClaimsIdentity([new Claim(ClaimTypes.Name, "fixture")], "test") : new ClaimsIdentity())));
     }
 
     private static DutyDraft ClosingDraft() => new(DutyDate, 8, DutyConfirmation.Other, 9, true, NewDay, true);
@@ -229,6 +431,8 @@ public sealed class DutyTests
         public DutyRow? Row { get; set; } = Original;
         public List<Interval> Intervals { get; set; } = [new(100, 8, OldDay)];
         public bool CanWrite { get; set; } = true;
+        public bool DenyRead { get; set; }
+        public DateTime ServerToday { get; set; } = Today;
         public bool WorkDay { get; init; }
         public string? FailProcedure { get; init; }
         public bool LoseCommitResponse { get; init; }
@@ -345,9 +549,9 @@ public sealed class DutyTests
         protected override DbDataReader ExecuteDbDataReader(CommandBehavior behavior)
         {
             if (CommandText.Contains("SUSER_SID()")) return Values(("КодСотрудника", typeof(int), 4));
-            if (CommandText.Contains("WITH Schedule AS")) return Values(("Today", typeof(DateTime), Today));
+            if (CommandText.Contains("WITH Schedule AS")) return Values(("Today", typeof(DateTime), owner.ServerToday));
             if (CommandText.Contains("CanChangeTimeOff"))
-                return Values(("Today", typeof(DateTime), Today), ("CanInsert", typeof(bool), owner.CanWrite),
+                return Values(("Today", typeof(DateTime), owner.ServerToday), ("CanInsert", typeof(bool), owner.CanWrite),
                     ("CanUpdate", typeof(bool), owner.CanWrite), ("CanChangeTimeOff", typeof(bool), owner.CanWrite));
             if (CommandText.Contains("parentLocation"))
             {
@@ -369,6 +573,8 @@ public sealed class DutyTests
             }
             if (CommandText.Contains("Дата <> @date")) return Values(("Value", typeof(bool), false));
             if (DbTransaction is not null) Assert.Contains("UPDLOCK", CommandText);
+            if (owner.DenyRead && DbTransaction is null)
+                throw SqlExceptionFactory.Create(229, "Тестовый отказ SELECT");
             var source = DbTransaction is ProbeTransaction transaction ? transaction.Row : owner.Row;
             if (source is not { } row)
             {
