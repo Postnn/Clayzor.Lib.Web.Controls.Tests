@@ -33,23 +33,28 @@ public sealed class EquipmentAccountPersistenceTests
     [Fact]
     public async Task AccountCrud_UsesEquipmentAndLoginKey()
     {
-        var connection = new ScriptedConnection(new Queue<ScriptEntry>([
-            Script.Scalar(1), Script.Scalar(1), Script.Rows(Script.Row(("ЕстьMACадрес", (byte)1))), Script.NonQuery(),
-            Script.Scalar(1), Script.Scalar(1), Script.Rows(Script.Row(("ЕстьMACадрес", (byte)1))), Script.NonQuery(),
-            Script.Scalar(1), Script.Scalar(1), Script.Rows(Script.Row(("ЕстьMACадрес", (byte)1))), Script.NonQuery(),
-        ]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
         var account = new EquipmentAccount { EquipmentId = 7, Login = "test", Password = "secret", Notes = "note" };
+        account.ExpectedVersion = account.CaptureVersion();
+        var type = Script.Rows(Script.Row((nameof(EquipmentType.MacAddressCount), (byte)1)));
+        using var connection = new ScriptedConnection(new Queue<ScriptEntry>([
+            Script.Scalar(1), Script.Scalar(1), type, Script.NonQuery(),
+            Script.Scalar(1), Script.Scalar(1), type, EquipmentAccountCasTests.SnapshotRow(account), Script.Scalar(1),
+            Script.Scalar(1), Script.Scalar(1), type, EquipmentAccountCasTests.SnapshotRow(account), Script.Scalar(1),
+        ]));
+        using var transactional = new EquipmentAccountTransactionConnection(connection);
+        using var db = new DbManager("Server=test", new FakeSqlErrorHandler(), () => transactional);
+        var service = new EquipmentFormService(db, new TestAuthenticationStateProvider());
 
         await service.AddAccountAsync(account);
         await service.UpdateAccountAsync(account);
         await service.DeleteAccountAsync(account);
 
         Assert.Contains("INSERT ОборудованиеУчётныеЗаписи", connection.CommandLog[3]);
-        Assert.Contains("UPDATE ОборудованиеУчётныеЗаписи", connection.CommandLog[7]);
-        Assert.Contains("DELETE ОборудованиеУчётныеЗаписи", connection.CommandLog[11]);
-        Assert.All(new[] { connection.CommandLog[3], connection.CommandLog[7], connection.CommandLog[11] },
+        Assert.Contains("UPDATE ОборудованиеУчётныеЗаписи", connection.CommandLog[8]);
+        Assert.Contains("DELETE ОборудованиеУчётныеЗаписи", connection.CommandLog[13]);
+        Assert.All(new[] { connection.CommandLog[3], connection.CommandLog[8], connection.CommandLog[13] },
             sql => Assert.Contains("Логин", sql));
+        Assert.Equal(["begin", "commit", "begin", "commit"], transactional.TransactionLog);
     }
 
     /// <summary>Запись учётной записи без роли 43 отклоняется до SQL.</summary>

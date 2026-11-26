@@ -1,4 +1,6 @@
 using Clayzor.Lib.DALC;
+using Clayzor.Lib.Entities;
+using static Clayzor.Lib.Web.Controls.Tests.ModelEquipmentWriteBoundaryTests;
 using Clayzor.Lib.Entities.Inventory;
 using Clayzor.Lib.Entities.MedicalTests;
 using Clayzor.Lib.Web.DBSelect.Equipment;
@@ -12,14 +14,14 @@ public sealed class EquipmentModelPersistenceTests
     [Fact]
     public async Task Insert_ReturnsCreatedId()
     {
-        var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Scalar(42)]));
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([Type(5), Script.Scalar(0), Roles(Роли.Специалист_по_инвентаризации_оборудования), Script.Scalar(42)]));
         var model = new EquipmentModel { EquipmentTypeId = 5, Name = "Created", PartNumber = "PN-1" };
 
-        var id = await model.SaveAsync(CreateDb(connection));
+        var id = await model.SaveAsync(CreateDb(connection), @"DOMAIN\fixture", 4);
 
         Assert.Equal(42, id);
         Assert.Equal(42, model.Id);
-        var sql = Assert.Single(connection.CommandLog);
+        var sql = Assert.Single(connection.CommandLog, IsWrite);
         Assert.Contains("INSERT INTO МоделиОборудования", sql);
         Assert.Contains("@EquipmentTypeId", sql);
         Assert.Contains("CAST(@@IDENTITY AS int)", sql);
@@ -29,10 +31,10 @@ public sealed class EquipmentModelPersistenceTests
     [Fact]
     public async Task InsertWithoutCreatedId_Throws()
     {
-        var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Scalar(0)]));
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([Type(5), Script.Scalar(0), Roles(Роли.Специалист_по_инвентаризации_оборудования), Script.Scalar(0)]));
         var model = new EquipmentModel { EquipmentTypeId = 5, Name = "Created", PartNumber = "PN-1" };
 
-        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => model.SaveAsync(CreateDb(connection)));
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => model.SaveAsync(CreateDb(connection), @"DOMAIN\fixture", 4));
 
         Assert.Contains("не вернула идентификатор", error.Message);
         Assert.Equal(0, model.Id);
@@ -42,13 +44,13 @@ public sealed class EquipmentModelPersistenceTests
     [Fact]
     public async Task Update_UsesParameterizedUpdate()
     {
-        var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.NonQuery()]));
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([Type(5), Model(7, 5), Script.Scalar(0), Roles(Роли.Специалист_по_инвентаризации_оборудования), Script.Scalar(1)]));
         var model = new EquipmentModel { Id = 7, EquipmentTypeId = 5, Name = "Updated", PartNumber = "PN-2" };
 
-        var id = await model.SaveAsync(CreateDb(connection));
+        var id = await model.SaveAsync(CreateDb(connection), @"DOMAIN\fixture", 4, model.CaptureWriteBaseline());
 
         Assert.Equal(7, id);
-        var sql = Assert.Single(connection.CommandLog);
+        var sql = Assert.Single(connection.CommandLog, IsWrite);
         Assert.Contains("UPDATE МоделиОборудования", sql);
         Assert.Contains("WHERE КодМоделиОборудования = @Id", sql);
         Assert.DoesNotContain("INSERT INTO МоделиОборудования", sql);
@@ -98,6 +100,9 @@ public sealed class EquipmentModelPersistenceTests
         Assert.Empty(connection.CommandLog);
     }
 
-    private static DbManager CreateDb(ScriptedConnection connection) =>
-        new("Server=test", new FakeSqlErrorHandler(), () => connection);
+    private static DbManager CreateDb(ScriptedConnection connection)
+    {
+        DapperColumnMapper.Initialize();
+        return new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection);
+    }
 }

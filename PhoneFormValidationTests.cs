@@ -1,5 +1,6 @@
 using Clayzor.Lib.DALC;
 using Clayzor.Lib.Entities.Inventory;
+using Clayzor.Lib.Entities.MedicalTests;
 using Kesco.App.Web.Inventory.Services;
 
 namespace Clayzor.Lib.Web.Controls.Tests;
@@ -167,15 +168,17 @@ public sealed class PhoneFormValidationTests
     [Fact]
     public async Task Save_FullNumberConnectivityErrorFailsClosed()
     {
+        DapperColumnMapper.Initialize();
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([
-            Script.Scalar(1),
+            Script.Rows(Script.Row(("КодСотрудника", 4))),
+            Script.Rows(Script.Row(("RoleId", (int)Clayzor.Lib.Entities.Роли.Специалист_по_инвентаризации_оборудования), ("PersonId", 0))),
             Script.Error(SqlExceptionFactory.Create(number: 53, message: "connection error")),
-        ]));
+        ]), emulateEquipmentIdentity: false);
         var service = new PhoneFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
 
-        await Assert.ThrowsAsync<Microsoft.Data.SqlClient.SqlException>(() => service.SaveAsync(ValidRequest()));
+        await Assert.ThrowsAsync<Microsoft.Data.SqlClient.SqlException>(() => service.SaveAsync(ValidRequest(), @"DOMAIN\fixture", 4));
 
-        Assert.Equal(2, connection.CommandLog.Count);
+        Assert.Equal(3, connection.CommandLog.Count);
         Assert.DoesNotContain(connection.CommandLog, sql => sql.Contains("UPDATE ") || sql.Contains("INSERT "));
     }
 

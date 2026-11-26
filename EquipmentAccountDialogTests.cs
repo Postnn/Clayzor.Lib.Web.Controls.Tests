@@ -19,11 +19,18 @@ public sealed class EquipmentAccountDialogTests
             Script.Scalar(1), Script.Error(SqlExceptionFactory.Create(53, "connection error")),
         ]));
         await using var context = CreateContext(connection);
+        var popovers = context.Render<MudPopoverProvider>();
         var provider = context.Render<MudDialogProvider>();
         var reference = await ShowAsync(context, provider);
 
         var dialog = provider.FindComponent<EquipmentAccountDialog>();
         dialog.WaitForAssertion(() => Assert.Contains("сохранение заблокировано", dialog.Markup));
+        await dialog.FindAll("input")[2].InputAsync("несохранённое примечание");
+        var readsBefore = connection.CommandLog.Count;
+        await EquipmentPeriodDialogHelpTests.CheckHelpAndChangeThemeAsync(context, provider, popovers, "EquipmentLogin_form.aspx");
+        Assert.Equal("несохранённое примечание", dialog.Instance.Notes);
+        Assert.Equal(string.Empty, dialog.Instance.Password);
+        Assert.Equal(readsBefore, connection.CommandLog.Count);
         Assert.True(dialog.FindAll("button").Single(button => button.TextContent.Trim() == "OK").HasAttribute("disabled"));
         Assert.False(reference.Result.IsCompleted);
         Assert.DoesNotContain(connection.CommandLog, sql => sql.Contains("UPDATE"));
@@ -37,7 +44,7 @@ public sealed class EquipmentAccountDialogTests
     public async Task NotesEdit_PreservesLoadedPassword()
     {
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([
-            Script.Scalar(1), Script.Rows(Script.Row(("Пароль", "test-only-secret"))),
+            Script.Scalar(1), Script.Rows(Script.Row(("Password", "test-only-secret"), ("EquipmentId", 7), ("Login", "test"))),
         ]));
         await using var context = CreateContext(connection);
         var provider = context.Render<MudDialogProvider>();
@@ -108,11 +115,59 @@ public sealed class EquipmentAccountDialogTests
         Assert.True((await reference.Result.WaitAsync(TimeSpan.FromSeconds(2))).Canceled);
     }
 
+    /// <summary>Устаревший или старый формат черновика сохраняет raw и требует явной сверки перед записью.</summary>
+    [Theory]
+    [InlineData(null)]
+    [InlineData("obsolete-opaque-version")]
+    public async Task RestoredVersionMismatch_PreservesProtectedInputAndBlocksSave(string? originalVersion)
+    {
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([
+            Script.Scalar(1), Script.Rows(Script.Row(
+                ("Password", "fixture-server-value"), ("EquipmentId", 7), ("Login", "test"), ("Notes", "server notes"))),
+        ]));
+        await using var context = CreateContext(connection);
+        var provider = context.Render<MudDialogProvider>();
+        var ready = new TaskCompletionSource<IRenderedComponent<EquipmentAccountDialog>>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var editorContext = new EquipmentEditorContext(7, 1, () => true)
+        {
+            DraftState = System.Text.Json.JsonSerializer.Serialize(new { OriginalVersion = originalVersion, Notes = "local notes" }),
+            RawRestore = async () =>
+            {
+                var editor = await ready.Task;
+                await editor.Find("input[type=password]").InputAsync("fixture-local-raw");
+            },
+        };
+        var reference = await context.Services.GetRequiredService<IDialogService>().ShowAsync<EquipmentAccountDialog>(
+            "Account", new DialogParameters<EquipmentAccountDialog>
+            {
+                { item => item.EditorContext, editorContext },
+                { item => item.EquipmentId, 7 },
+                { item => item.Login, "test" },
+                { item => item.OriginalLogin, "test" },
+            });
+        var dialog = provider.FindComponent<EquipmentAccountDialog>();
+        ready.SetResult(dialog);
+
+        dialog.WaitForAssertion(() =>
+        {
+            Assert.Contains("Сверьте актуальные данные", dialog.Markup);
+            Assert.Equal("local notes", dialog.Instance.Notes);
+            Assert.Equal("fixture-local-raw", dialog.Instance.Password);
+            Assert.True(dialog.FindAll("button").Single(button => button.TextContent.Trim() == "OK").HasAttribute("disabled"));
+        });
+        var typed = editorContext.CaptureDraftState();
+        Assert.DoesNotContain("fixture-local-raw", typed);
+        Assert.DoesNotContain("fixture-server-value", typed);
+        Assert.False(reference.Result.IsCompleted);
+        await provider.InvokeAsync(() => reference.Close(DialogResult.Cancel()));
+    }
+
     private static BunitContext CreateContext(ScriptedConnection connection)
     {
         var context = new BunitContext();
         context.JSInterop.Mode = JSRuntimeMode.Loose;
         context.Services.AddMudServices();
+        EquipmentPeriodDialogHelpTests.AddAppearance(context);
         context.Services.AddScoped<Clayzor.Lib.Web.Controls.Services.ClayDraftService>();
         context.Services.AddSingleton(new EquipmentFormService(
             new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider()));

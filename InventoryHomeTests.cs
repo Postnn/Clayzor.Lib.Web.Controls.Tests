@@ -1,5 +1,8 @@
 using Bunit;
 using Clayzor.Lib.DALC;
+using Clayzor.Lib.Web.Controls.Components.Grid;
+using Clayzor.Lib.Web.Controls.Components.Grid.Dynamic;
+using Dapper;
 using Kesco.App.Web.Inventory.Components.Pages;
 using Microsoft.AspNetCore.Components;
 using Microsoft.Extensions.Configuration;
@@ -41,6 +44,51 @@ public sealed class InventoryHomeTests
 
         cut.WaitForAssertion(() => Assert.Single(cut.FindAll("[data-clay-navigation-menu]")));
         Assert.Contains("Выберите запрос в меню", cut.Markup);
+    }
+
+    /// <summary>Только явно заданный валидный ID включает обязательный фильтр оборудования.</summary>
+    [Theory]
+    [InlineData(null, null)]
+    [InlineData("7", 7)]
+    [InlineData("invalid", null)]
+    [InlineData("", null)]
+    [InlineData("0", null)]
+    public async Task EquipmentHomeDistinguishesOrdinaryAndModelScopedQueries(string? modelId, int? expected)
+    {
+        await using var context = CreateContext();
+        context.ComponentFactories.AddStub<ClayGrid<IClayGridRow>>();
+        context.Services.GetRequiredService<NavigationManager>()
+            .NavigateTo("http://localhost/?id=1001" + (modelId is null ? "" : $"&modelId={modelId}"));
+        var page = context.Render<Home>();
+        var options = Assert.IsType<ClayGridOptions>(typeof(Home).GetField("_gridOptions",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(page.Instance));
+
+        if (modelId is not null && expected is null)
+        {
+            Assert.Empty(page.FindAll("[aria-label='Рабочая область грида']"));
+            Assert.Contains("Некорректный код модели", page.Markup);
+            return;
+        }
+
+        Assert.Single(page.FindAll("[aria-label='Рабочая область грида']"));
+        Assert.Equal(1001, options.DynamicGridId);
+        if (expected is null)
+        {
+            Assert.Null(options.DynamicContext);
+            Assert.True(options.ShowAddButton);
+            return;
+        }
+
+        var scope = Assert.IsType<ClayGridDynamicContext>(options.DynamicContext);
+        Assert.Equal(95, scope.ClientId);
+        Assert.Equal("КодМоделиОборудования", scope.Column);
+        Assert.Equal(expected.Value, scope.Value);
+        Assert.False(options.ShowAddButton);
+        var parameters = new DynamicParameters();
+        var where = ClayGrid<IClayGridRow>.BuildDynamicFilter(null, scope, parameters,
+            new HashSet<string> { scope.Column });
+        Assert.Contains(scope.Column, where);
+        Assert.Equal(expected.Value, parameters.Get<int>(Assert.Single(parameters.ParameterNames)));
     }
 
     private static BunitContext CreateContext(Queue<ScriptEntry>? queue = null)

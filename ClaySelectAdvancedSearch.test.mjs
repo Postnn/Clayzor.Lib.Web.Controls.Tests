@@ -47,8 +47,8 @@ function transport(invokeMethodAsync) {
             return child;
         },
     };
-    const open = (id, multiple = false) => {
-        parent.claySelectAdvancedSearch.open(childOrigin + '/search.aspx', id, { invokeMethodAsync }, multiple, true);
+    const open = (id, multiple = false, recovery = null) => {
+        parent.claySelectAdvancedSearch.open(childOrigin + '/search.aspx', id, { invokeMethodAsync }, multiple, true, recovery);
         return children.get(id);
     };
     const choose = (child, id, value) => {
@@ -154,3 +154,66 @@ export async function runAdvancedSearchFixture() {
 }
 
 await runAdvancedSearchFixture();
+
+export async function runCircuitReplacementFixture() {
+    const url = childOrigin + '/search.aspx';
+    const proof = '1'.repeat(32);
+    const bindingId = '2'.repeat(32);
+    const nextBinding = '3'.repeat(32);
+    for (const selection of [107, [107, 9], []]) {
+        const multiple = Array.isArray(selection);
+        const oldCalls = [];
+        const newCalls = [];
+        const fixture = transport(async method => {
+            oldCalls.push(method);
+            throw new Error('Circuit disposed');
+        });
+        const child = fixture.open(requestId, multiple, { key: proof, bindingId });
+        const bridge = fixture.parent.claySelectAdvancedSearch;
+        const successor = {
+            async invokeMethodAsync(method, id, revision, value) {
+                if (method === 'ReadyForSelectionAsync') return true;
+                newCalls.push({ method, id, revision, value });
+                return 'Accepted';
+            },
+        };
+
+        assert.equal(await fixture.choose(child, requestId, selection), false);
+        assert.deepEqual(oldCalls, ['ReadyForSelectionAsync']);
+        assert.equal(child.closed, false);
+        assert.equal(child.location.search.includes(proof), false);
+        assert.equal(await bridge.resumeUndispatched(url, secondId, proof, nextBinding, successor, multiple), false);
+        assert.equal(await bridge.resumeUndispatched(url, requestId, secondId, nextBinding, successor, multiple), false);
+        assert.equal(await bridge.resumeUndispatched(parentOrigin + '/search.aspx', requestId, proof, nextBinding, successor, multiple), false);
+        assert.equal(await bridge.resumeUndispatched(url, requestId, proof, nextBinding, successor, !multiple), false);
+        assert.equal(await bridge.resumeUndispatched(url, requestId, proof, nextBinding, successor, multiple), true);
+        bridge.detach(requestId, bindingId);
+
+        const envelope = { type: 'clay-select-return', requestId, revision: 1, receipt: requestId, value: selection };
+        await fixture.parent.message({ source: child, origin: parentOrigin, data: envelope });
+        await fixture.parent.message({ source: {}, origin: childOrigin, data: envelope });
+        await fixture.parent.message({ source: child, origin: childOrigin, data: { ...envelope, revision: 2 } });
+        await fixture.parent.message({ source: child, origin: childOrigin, data: { ...envelope, value: multiple ? [1] : 1 } });
+        assert.equal(newCalls.length, 0);
+
+        assert.equal(await fixture.choose(child, requestId, selection), true);
+        assert.deepEqual(newCalls, [{ method: 'ApplyAsync', id: requestId, revision: 1, value: selection }]);
+        assert.equal(child.closed, true);
+    }
+
+    const uncertain = transport(async method => {
+        if (method === 'ReadyForSelectionAsync') return true;
+        throw new Error('Lost callback response');
+    });
+    const existing = uncertain.open(requestId, false, { key: proof, bindingId });
+    const bridge = uncertain.parent.claySelectAdvancedSearch;
+    const never = { invokeMethodAsync() { assert.fail('Unproven receiver obtained selection'); } };
+    assert.equal(await bridge.resumeUndispatched(url, requestId, proof, nextBinding, never, false), false);
+    assert.equal(await uncertain.choose(existing, requestId, 107), false);
+    bridge.detach(requestId, bindingId);
+    assert.equal(await bridge.resumeUndispatched(url, requestId, proof, nextBinding, never, false), false);
+    assert.equal(existing.closed, false);
+    assert.equal(await uncertain.choose(existing, requestId, 108), false);
+}
+
+await runCircuitReplacementFixture();

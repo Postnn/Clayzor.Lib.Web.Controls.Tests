@@ -21,7 +21,7 @@ using NetPage = Kesco.App.Web.Inventory.Components.Pages.Net.Net;
 namespace Clayzor.Lib.Web.Controls.Tests;
 
 /// <summary>Сквозные проверки формы порта локальной сети.</summary>
-public sealed class NetFormTests
+public sealed partial class NetFormTests
 {
     /// <summary>R02/R12/R14: ссылки независимы, не меняют текст и открывают нужное оборудование через clayOpen.</summary>
     [Fact]
@@ -257,6 +257,7 @@ public sealed class NetFormTests
         Assert.Equal(120, fixture.Connection.TimeoutLog.Single());
         Assert.False(GetPrivate<bool>(page.Instance, "_poeRunning"));
         Assert.Empty(page.FindAll(".mud-alert").Where(alert => alert.TextContent.Contains("Ошибка при перезапуске PoE")));
+        AssertNetBeginBlocksOtherDrafts(Assert.Single(fixture.Context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]));
     }
 
     /// <summary>Исчезновение текущей идентичности перед записью запрещает UPDATE.</summary>
@@ -300,6 +301,7 @@ public sealed class NetFormTests
         var afterRead = fixture.Connection.CommandLog.Count;
         await Invoke(page, "SaveAsync", false);
         Assert.Equal(afterRead, fixture.Connection.CommandLog.Count);
+        Assert.Single(fixture.Context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
         Assert.Empty(fixture.Context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
         Assert.DoesNotContain(fixture.Context.JSInterop.Invocations,
             call => call.Identifier == "clayModelEquipmentForm.close");
@@ -829,7 +831,7 @@ public sealed class NetFormTests
         Assert.Contains("найдена сохранённая попытка", page.Markup);
         var count = fixture.Connection.CommandLog.Count;
 
-        await OperationJournalButton(page, "Открыть сохранённую попытку").ClickAsync();
+        await page.InvokeAsync(() => OperationJournalButton(page, "Открыть сохранённую попытку").ClickAsync());
         await TypeText(page, 1, "черновик");
         await Invoke(page, "SaveAsync", false);
         await Invoke(page, "RestartPoeAsync");
@@ -858,6 +860,7 @@ public sealed class NetFormTests
         var intent = Assert.Single(fixture.Context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
         Assert.DoesNotContain("фикстура", (string)intent.Arguments[1]!);
         Assert.Contains("Fingerprint", (string)intent.Arguments[1]!);
+        AssertNetBeginBlocksOtherDrafts(intent);
         Assert.DoesNotContain(fixture.Connection.CommandLog, sql => sql.Contains("UPDATE vwЛокальнаяСеть"));
     }
 
@@ -870,12 +873,18 @@ public sealed class NetFormTests
         WaitForLoad(page);
         var count = fixture.Connection.CommandLog.Count;
 
-        await OperationJournalButton(page, "Проверить журнал операций").ClickAsync();
+        await page.InvokeAsync(() => OperationJournalButton(page, "Проверить журнал операций").ClickAsync());
 
         Assert.Equal(count, fixture.Connection.CommandLog.Count);
         Assert.Empty(fixture.Context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
         Assert.Equal(9L, Assert.Single(fixture.Context.JSInterop.Invocations["clayDraftStore.commitOperation"]).Arguments[1]);
         Assert.Empty(page.FindAll("[data-testid='net-operation-journal']"));
+    }
+
+    private static void AssertNetBeginBlocksOtherDrafts(JSRuntimeInvocation begin)
+    {
+        using var payload = System.Text.Json.JsonDocument.Parse(Assert.IsType<string>(begin.Arguments[1]));
+        Assert.True(payload.RootElement.GetProperty("blockOtherDraftOperations").GetBoolean());
     }
 
     private static AngleSharp.Dom.IElement OperationJournalButton(IRenderedComponent<NetPage> page, string text) =>
@@ -933,6 +942,9 @@ public sealed class NetFormTests
             var acknowledgement = System.Text.Json.Nodes.JsonNode.Parse(operationJson)!;
             acknowledgement["attemptId"] = intent.RootElement.GetProperty("attemptId").GetString();
             acknowledgement["data"] = intent.RootElement.GetProperty("data").GetString();
+            if (intent.RootElement.GetProperty("acceptedScopes").GetArrayLength() > 0)
+                acknowledgement["scopes"] = System.Text.Json.Nodes.JsonNode.Parse(
+                    """[{"name":"net-input","typedRevision":3,"rawRevisions":{}}]""");
             return (T)(object)acknowledgement.ToJsonString();
         }
     }
@@ -955,12 +967,24 @@ public sealed class NetFormTests
             string? restoredOperation = null,
             ClayDraftRecoveryCandidate[]? candidates = null,
             bool failBegin = false,
-            bool mismatchedBegin = false)
+            bool mismatchedBegin = false,
+            string? restoredInput = null,
+            bool restoredRaw = false,
+            bool rawPending = false,
+            Func<bool>? hasLateRaw = null,
+            bool missingPort = false,
+            Exception? portReadError = null,
+            bool deferRaw = false)
         {
             DapperColumnMapper.Initialize();
             _entries = new Queue<ScriptEntry>();
             if (loadException is not null)
                 _entries.Enqueue(new ScriptEntry { Exception = loadException });
+            else if (missingPort || portReadError is not null)
+            {
+                _entries.Enqueue(currentUser ? Script.Rows(Script.Row(("КодСотрудника", 4), ("Сотрудник", "Тестов А."))) : Script.Rows());
+                _entries.Enqueue(portReadError is null ? Script.Rows() : Script.Error(portReadError));
+            }
             else
                 AddLoad(connected, description, poe, currentUser, linkEntry,
                     id: id, customerId: customerId, employeeId: employeeId, organizationId: organizationId);
@@ -970,13 +994,22 @@ public sealed class NetFormTests
             Context.Services.AddScoped(_ => new ClayDraftService(mismatchedBegin
                 ? Context.JSInterop.JSRuntime : new AcknowledgingJournal(Context.JSInterop.JSRuntime)));
             Context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.register", _ => true)
-                .SetResult(new ClayDraftRestore("net-fixture", restoredOperation is not null, 0, null, restoredOperation));
+                .SetResult(new ClayDraftRestore("net-fixture", restoredOperation is not null || restoredInput is not null || restoredRaw,
+                    0, null, restoredOperation, restoredInput is null ? null : new Dictionary<string, string> { ["net-input"] = restoredInput }));
+            Context.JSInterop.Setup<long>("clayDraftStore.saveTypedScope", _ => true).SetResult(3);
+            Context.JSInterop.Setup<ClayDraftEditorScopeState>("clayDraftStore.readEditorScope", _ => hasLateRaw?.Invoke() == true)
+                .SetResult(new ClayDraftEditorScopeState(4, true, restoredOperation is not null));
+            Context.JSInterop.Setup<ClayDraftEditorScopeState>("clayDraftStore.readEditorScope", _ => hasLateRaw?.Invoke() != true)
+                .SetResult(new ClayDraftEditorScopeState(3, restoredRaw, restoredOperation is not null));
+            if (!deferRaw)
+                Context.JSInterop.Setup<ClayDraftRawApplyResult>("clayDraftStore.applyRaw", _ => true)
+                    .SetResult(new ClayDraftRawApplyResult([], rawPending ? ["data:net.return-date:0"] : []));
             Context.JSInterop.Setup<ClayDraftRecoveryCandidate[]>("clayDraftStore.listRecoveryCandidates", _ => true)
                 .SetResult(candidates ?? []);
             Context.JSInterop.Setup<ClayDraftStorageHealth>("clayDraftStore.getHealth", _ => true)
                 .SetResult(new ClayDraftStorageHealth(true, 0, null, false, 1, 1));
             Context.JSInterop.Setup<ClayDraftRestoreReadiness>("clayDraftStore.getRestoreReadiness", _ => true)
-                .SetResult(new ClayDraftRestoreReadiness(true, [], []));
+                .SetResult(new ClayDraftRestoreReadiness(!rawPending, rawPending ? ["net-input"] : [], []));
             foreach (var kind in new[] { "net.save", "net.poe" })
             {
                 var begin = Context.JSInterop.Setup<string>("clayDraftStore.beginOperationIntent",
@@ -1023,14 +1056,15 @@ public sealed class NetFormTests
             int organizationId = 1,
             ScriptEntry? initialEmployeeLookup = null,
             bool includeCustomerLookup = true,
-            DateTime? changedAt = null)
+            DateTime? changedAt = null,
+            int actorId = 4, int equipmentId = 8)
         {
             _entries.Enqueue(currentUser
-                ? Script.Rows(Script.Row(("КодСотрудника", 4), ("Сотрудник", "Тестов А."),
+                ? Script.Rows(Script.Row(("КодСотрудника", actorId), ("Сотрудник", "Тестов А."),
                     ("Employee", "Test"), ("КодЛицаЗаказчика", 1)))
                 : Script.Rows());
             _entries.Enqueue(Script.Rows(Script.Row(
-                ("КодЛокальнойСети", id), ("КодОборудования", 8), ("Порт", port), ("PoE", poe),
+                ("КодЛокальнойСети", id), ("КодОборудования", equipmentId), ("Порт", port), ("PoE", poe),
                 ("КодРозетки", null), ("КодЛицаЗаказчика", customerId), ("КодСотрудника", employeeId),
                 ("Подключено", connected), ("Примечания", description), ("СрокВозврата", null),
                 ("Изменил", 4), ("Сотрудник", "Тестов А."), ("Изменено", changedAt ?? new DateTime(2026, 11, 21, 10, 0, 0)))));

@@ -1,3 +1,12 @@
+using System.Security.Claims;
+using Bunit;
+using Clayzor.Lib.Web.Settings;
+using Kesco.App.Web.Inventory.Components;
+using Kesco.App.Web.Inventory.Components.Pages.Equipment;
+using Microsoft.AspNetCore.Components.Authorization;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Configuration;
+using MudBlazor.Services;
 using Clayzor.Lib.DALC;
 using Clayzor.Lib.Entities.Inventory;
 using Clayzor.Lib.Web.Controls.Components.Filter;
@@ -22,6 +31,149 @@ public sealed class TypeEquipmentMenuTests
     {
         var type = new EquipmentType { Name = "Компьютер", NameEn = english };
         Assert.Equal(expected, type.GetMenuName(new Employee { Language = language }));
+    }
+
+    /// <summary>Устаревшие строки и ошибка не публикуются, пока следующий SQL-запрос ожидает.</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SupersededResponseDoesNotChangeTheMenuWhileLatestRequestWaits(bool fail)
+    {
+        var a = new ScriptEntry
+        {
+            Rows = MenuRows("A"),
+            Exception = fail ? new InvalidOperationException("A failed") : null,
+            Started = Signal(),
+            Release = Signal(),
+        };
+        var b = new ScriptEntry { Rows = MenuRows("B"), Started = Signal(), Release = Signal() };
+        using var connection = MenuConnection("en", new ScriptEntry { Rows = MenuRows("initial") }, a, b);
+        await using var context = CreateMenuContext(connection);
+        var menu = context.Render<TypeEquipmentMenu>();
+        menu.WaitForAssertion(() => Assert.Contains("initial", menu.Markup));
+        var grid = menu.FindComponent<ClayGrid<EquipmentType>>().Instance;
+        var older = menu.InvokeAsync(() => grid.OnQueryChanged.InvokeAsync(new ClayDataQuery()));
+        await a.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var requested = Signal();
+        var latest = menu.InvokeAsync(() =>
+        {
+            var pending = grid.OnQueryChanged.InvokeAsync(new ClayDataQuery { SearchText = "B" });
+            requested.SetResult();
+            return pending;
+        });
+        await requested.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        a.Release.SetResult();
+        await older.WaitAsync(TimeSpan.FromSeconds(5));
+        await b.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        var interim = menu.Markup;
+        b.Release.SetResult();
+        await latest.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Contains("initial", interim);
+        Assert.DoesNotContain("Не удалось применить", interim);
+        Assert.Contains(">B<", menu.Markup);
+    }
+
+    /// <summary>Название строки, фильтр, поиск, сортировка и список значений читают общую SQL-проекцию.</summary>
+    [Theory]
+    [InlineData("en", "Computer", "Computer", false)]
+    [InlineData("ru", "Computer", "Компьютер", true)]
+    [InlineData(null, "Computer", "Компьютер", true)]
+    [InlineData("en", "", "Компьютер", false)]
+    [InlineData("en", "\t\u00A0", "Компьютер", false)]
+    [InlineData("en", "A'%<b>", "A'%<b>", false)]
+    public async Task FilterSortAndDistinctUseTheNameMaterializedByTheSameProjection(
+        string? language, string english, string displayedName, bool prefersRussian)
+    {
+        const string name = "MenuName";
+        var rows = new List<Dictionary<string, object?>>
+        {
+            Script.Row(("Id", 8), ("Name", "Другой тип"), ("NameEn", english), ("MenuName", displayedName)),
+        };
+        using var connection = MenuConnection(language,
+            new ScriptEntry { Rows = rows }, new ScriptEntry { Rows = rows },
+            Script.Rows(Script.Row(("MenuValue", null)), Script.Row(("MenuValue", displayedName))));
+        await using var context = CreateMenuContext(connection);
+        var menu = context.Render<TypeEquipmentMenu>();
+        menu.WaitForAssertion(() => Assert.Equal(displayedName, menu.Find("tbody button").TextContent.Trim()));
+        Assert.Empty(menu.FindAll("tbody button b"));
+        var grid = menu.FindComponent<ClayGrid<EquipmentType>>().Instance;
+        var query = new ClayDataQuery
+        {
+            CompositeFilter = new ClayFilterGroupNode
+            {
+                Nodes =
+                [
+                    new ColumnFilter { Column = name, Operator = ColumnFilterOperator.Contains, Value = displayedName },
+                    new ColumnFilter { Column = TypeColumn, Operator = ColumnFilterOperator.Equals, Value = 8 },
+                ],
+            },
+            SortColumns = [new(name, true)],
+            SearchText = displayedName,
+        };
+
+        await menu.InvokeAsync(() => grid.OnQueryChanged.InvokeAsync(query));
+        var distinct = await menu.InvokeAsync(() => grid.DistinctValuesLoader!(name, query, 100));
+
+        Assert.Equal(displayedName, menu.Find("tbody button").TextContent.Trim());
+        Assert.Equal(displayedName, Assert.Single(distinct.Values));
+        Assert.True(distinct.HasBlanks);
+        Assert.False(distinct.Capped);
+        Assert.Equal(1, distinct.TotalDistinct);
+        Assert.All(connection.ParameterLog.Skip(1), parameters => Assert.Equal(prefersRussian, parameters["MenuPrefersRussian"]));
+        var filteredSql = connection.CommandLog[2];
+        var distinctSql = connection.CommandLog[3];
+        Assert.False(grid.Options.ShowPagination);
+        Assert.Contains("MenuName LIKE @p0", filteredSql);
+        Assert.Contains("MenuName LIKE @search", filteredSql);
+        Assert.Equal("%" + displayedName + "%", connection.ParameterLog[2]["search"]);
+        Assert.Contains("ORDER BY MenuName DESC", filteredSql);
+        Assert.Contains("CASE WHEN @MenuPrefersRussian = 0", filteredSql);
+        Assert.Contains("ELSE ТипОборудования", filteredSql);
+        var nonBlankPattern = Assert.IsType<string>(connection.ParameterLog[2]["MenuNonBlankPattern"]);
+        Assert.Contains('\u00A0', nonBlankPattern);
+        Assert.Contains('\t', nonBlankPattern);
+        Assert.Equal("%" + displayedName.Replace("%", "\\%") + "%", connection.ParameterLog[2]["p0"]);
+        Assert.DoesNotContain(displayedName, filteredSql);
+        Assert.Contains("SELECT DISTINCT TOP (@MenuLimit) NULLIF(MenuName", distinctSql);
+        Assert.DoesNotContain("MenuName LIKE @p0", distinctSql);
+        Assert.Contains("MenuName LIKE @search", distinctSql);
+        Assert.Equal(8, connection.ParameterLog[3]["p0"]);
+        Assert.Equal(102, connection.ParameterLog[3]["MenuLimit"]);
+        var source = filteredSql[filteredSql.IndexOf("FROM (", StringComparison.Ordinal)..filteredSql.IndexOf(") AS MenuTypes", StringComparison.Ordinal)];
+        Assert.Contains(source, distinctSql);
+    }
+
+    private static TaskCompletionSource Signal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    private static List<Dictionary<string, object?>> MenuRows(string name) =>
+        [Script.Row(("Id", 1), ("Name", name), ("NameEn", name), ("MenuName", name))];
+
+    private static ScriptedConnection MenuConnection(string? language, params ScriptEntry[] reads) =>
+        new(new Queue<ScriptEntry>([Script.Rows(Script.Row(("Id", 1), ("Language", language))), .. reads]),
+            emulateEquipmentIdentity: false);
+
+    private static BunitContext CreateMenuContext(ScriptedConnection connection)
+    {
+        var context = new BunitContext();
+        context.JSInterop.Mode = JSRuntimeMode.Loose;
+        context.ComponentFactories.AddStub<InventoryMainMenu>();
+        context.Services.AddMudServices();
+        context.Services.AddSingleton(new ClayAppSettings());
+        context.Services.AddSingleton<Clayzor.Lib.Web.Controls.ClayErrorService>();
+        context.Services.AddSingleton<IConfiguration>(new ConfigurationBuilder().Build());
+        context.Services.AddSingleton<Clayzor.Lib.Web.Controls.Services.ClayFormWindowService>();
+        context.Services.AddSingleton(new DbManager("Server=test", null, () => connection));
+        context.Services.AddSingleton<AuthenticationStateProvider, MenuAuthentication>();
+        return context;
+    }
+
+    private sealed class MenuAuthentication : AuthenticationStateProvider
+    {
+        public override Task<AuthenticationState> GetAuthenticationStateAsync() =>
+            Task.FromResult(new AuthenticationState(new ClaimsPrincipal(new ClaimsIdentity(
+                [new Claim(ClaimTypes.Name, @"TEST\menu")], "Negotiate"))));
     }
 
     [Fact]
@@ -123,11 +275,11 @@ public sealed class TypeEquipmentMenuTests
         var options = (ClayGridOptions)pageType.GetField("_typesOptions", flags)!.GetValue(page)!;
 
         Assert.True(options.AllowColumnReorder);
-        Assert.Equal([EquipmentType.NameColumnName], options.SearchColumns);
+        Assert.Equal([EquipmentType.MenuNameColumnName], options.SearchColumns);
         var query = new ClayDataQuery { SearchText = "Компьютер" };
         await (Task)pageType.GetMethod("OnTypesQueryChangedAsync", flags)!.Invoke(page, [query])!;
 
-        Assert.Contains("ТипОборудования LIKE @search", connection.CommandLog[0]);
+        Assert.Contains("MenuName LIKE @search", connection.CommandLog[0]);
         Assert.Equal("%Компьютер%", connection.ParameterLog[0]["search"]);
     }
 }

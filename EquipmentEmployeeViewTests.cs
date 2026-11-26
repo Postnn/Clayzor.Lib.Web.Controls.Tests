@@ -43,6 +43,7 @@ public sealed class EquipmentEmployeeViewTests
         await using var context = new BunitContext();
         context.JSInterop.Mode = JSRuntimeMode.Loose;
         context.Services.AddMudServices();
+        EquipmentPeriodDialogHelpTests.AddAppearance(context);
         context.Services.AddSingleton<IConfiguration>(new ConfigurationManager
         {
             ["URI_user_form"] = "http://localhost/Users/UserForm",

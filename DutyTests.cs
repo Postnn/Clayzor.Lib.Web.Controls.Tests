@@ -3,8 +3,10 @@ using System.Data.Common;
 using System.Security.Claims;
 using System.Text.Json;
 using Bunit;
+using Clayzor.Lib.Web.Controls.Components.Select;
 using Clayzor.Lib.Web.Controls.Services;
 using Kesco.App.Web.Inventory.Components.Pages.Duty;
+using Microsoft.AspNetCore.Components;
 using Microsoft.AspNetCore.Components.Authorization;
 using Microsoft.AspNetCore.Components.Web;
 using Microsoft.Extensions.Configuration;
@@ -18,7 +20,7 @@ using Xunit;
 namespace Clayzor.Lib.Web.Controls.Tests;
 
 /// <summary>Календарная модель и транзакция расписания с тестовым SQL-транспортом.</summary>
-public sealed class DutyTests
+public sealed partial class DutyTests
 {
     private static readonly DateOnly DutyDate = new(2026, 11, 21);
     private static readonly DateOnly OldDay = new(2026, 11, 28);
@@ -241,7 +243,8 @@ public sealed class DutyTests
         };
         var snapshot = JsonSerializer.Serialize(new { Original, Draft = ClosingDraft() });
         await using var context = EditorContext(connection,
-            new ClayDraftRestore("duty-recovery", true, 9, null, null, new Dictionary<string, string> { ["main"] = snapshot }));
+            new ClayDraftRestore("duty-recovery", true, 9, null, null, new Dictionary<string, string> { ["main"] = snapshot }),
+            rawReady: true);
         var editor = context.Render<DutyEditor>(parameters => parameters.Add(component => component.RouteId, "20261121"));
 
         editor.WaitForAssertion(() => Assert.Contains("Локальный черновик", editor.Markup));
@@ -251,15 +254,137 @@ public sealed class DutyTests
             button => button.TextContent.Trim() == "Сохранить" && !button.HasAttribute("disabled"));
         Assert.Equal(0, connection.ScheduleWrites);
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.saveTypedScope"]);
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.applyRaw"]);
+        var recovered = editor.WaitForElement("[aria-label='Восстановленный ввод']");
+        var fields = editor.WaitForElements("[aria-label='Восстановленный ввод'] input[data-draft-key][readonly]", 4);
+        string[] stableKeys = ["duty.actual", "duty.date", "duty.planned", "duty.time-off"];
+        Assert.Equal(stableKeys, fields.Select(field => field.GetAttribute("data-draft-key")).Order(StringComparer.Ordinal));
+        Assert.All(fields, field => Assert.False(field.HasAttribute("disabled")));
+        foreach (var key in stableKeys)
+            Assert.Single(editor.FindAll($"input[data-draft-key='{key}']"));
+        editor.WaitForAssertion(() => Assert.Equal("main",
+            Assert.Single(context.JSInterop.Invocations["clayDraftStore.applyRaw"]).Arguments[1]));
         var registration = Assert.Single(context.JSInterop.Invocations["clayDraftStore.register"]);
         Assert.Equal(new object[] { "duty", "20261121", "4" }, registration.Arguments.Take(3));
-        if (mode == "closed") Assert.Contains("Инженер из БД", editor.Markup);
+        var root = editor.Find(Assert.IsType<string>(registration.Arguments[4]));
+        Assert.True(root.Contains(recovered));
+        if (mode == "closed")
+        {
+            var result = editor.Find("[aria-label='Фактическая информация о дежурстве']");
+            Assert.False(root.Contains(result));
+            Assert.Contains("Инженер из БД", result.TextContent);
+            Assert.DoesNotContain("Замечаний к дежурству нет", result.TextContent);
+        }
         if (mode == "denied-read")
         {
             Assert.Contains("нет права прочитать актуальное дежурство", editor.Markup);
             Assert.DoesNotContain("Инженер из БД", editor.Markup);
         }
+
+        await context.DisposeComponentsAsync();
+        Assert.Equal("duty-recovery", Assert.Single(context.JSInterop.Invocations["clayDraftStore.unregister"]).Arguments[0]);
+    }
+
+    /// <summary>Закрытая карточка освобождает даже регистрацию, ответ которой пришёл после смены маршрута.</summary>
+    [Fact]
+    public async Task ReadOnlyRegistrationIsReleasedWhenRouteChangesBeforeItReturns()
+    {
+        using var connection = new Probe { Row = Original with { Closed = 1 } };
+        var restored = new ClayDraftRestore("old-duty", true, 9, null, null);
+        await using var context = EditorContext(connection, restored, deferRegistration: true);
+        var registration = context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.register",
+            call => Equals(call.Arguments[1], "20261121"));
+        var released = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        context.JSInterop.SetupVoid("clayDraftStore.unregister", call =>
+        {
+            if (!Equals(call.Arguments[0], "old-duty")) return false;
+            released.TrySetResult();
+            return true;
+        }).SetVoidResult();
+
+        var navigation = context.Services.GetRequiredService<NavigationManager>();
+        navigation.NavigateTo("/Duty/duty_form?id=20261121");
+        var page = context.Render<DutyPage>();
+        page.WaitForAssertion(() => Assert.Single(registration.Invocations));
+
+        try
+        {
+            await page.InvokeAsync(() => navigation.NavigateTo("/Duty/duty_form?id=invalid"));
+            page.WaitForAssertion(() => Assert.Contains("Некорректная дата", page.Markup));
+        }
+        finally { registration.SetResult(restored); }
+        await released.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.applyRaw"]);
+        Assert.Equal(0, connection.ScheduleWrites);
+    }
+
+    /// <summary>Даже без typed-снимка запись остаётся доступна для восстановления сырых полей.</summary>
+    [Fact]
+    public async Task MissingDutyWithRawOnlyDraftRendersRecoveryTargets()
+    {
+        using var connection = new Probe { Row = null };
+        await using var context = EditorContext(connection,
+            new ClayDraftRestore("duty-raw-recovery", true, 9, null, null), rawReady: true);
+        var editor = context.Render<DutyEditor>(parameters => parameters.Add(component => component.RouteId, "20261121"));
+
+        editor.WaitForElement("[aria-label='Восстановленный ввод'] input[data-draft-key='duty.time-off'][readonly]");
+        editor.WaitForAssertion(() => Assert.Single(context.JSInterop.Invocations["clayDraftStore.applyRaw"]));
+        Assert.DoesNotContain("Локальный черновик", editor.Markup);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.saveTypedScope"]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
+        Assert.Equal(0, connection.ScheduleWrites);
+    }
+
+    /// <summary>Сверка читает дату заново без замены официальной карточки, прав записи или локального ввода.</summary>
+    [Theory]
+    [InlineData("closed")]
+    [InlineData("missing")]
+    [InlineData("denied-read")]
+    [InlineData("read-only")]
+    public async Task ReadOnlyRecoveryFreshComparisonRemainsSeparate(string mode)
+    {
+        using var connection = new Probe
+        {
+            Row = mode == "missing" ? null : Original with
+            {
+                Closed = (byte)(mode == "closed" ? 1 : 0), PlannedName = "Исходный инженер",
+            },
+            CanWrite = mode != "read-only",
+            DenyRead = mode == "denied-read",
+        };
+        var snapshot = JsonSerializer.Serialize(new { Original, Draft = ClosingDraft() });
+        await using var context = EditorContext(connection,
+            new ClayDraftRestore("duty-recovery", true, 9, null, null, new Dictionary<string, string> { ["main"] = snapshot }),
+            rawReady: true);
+        var editor = context.Render<DutyEditor>(parameters => parameters.Add(component => component.RouteId, "20261121"));
+        editor.WaitForElement("[aria-label='Восстановленный ввод']");
+        editor.WaitForAssertion(() => Assert.Single(context.JSInterop.Invocations["clayDraftStore.applyRaw"]));
+        var originalClosed = editor.FindAll("[aria-label='Фактическая информация о дежурстве']").SingleOrDefault()?.TextContent;
+
+        connection.DenyRead = false;
+        connection.CanWrite = true;
+        connection.Row = Original with { Closed = 0, PlannedName = "Инженер из свежего чтения" };
+        await editor.FindAll("button").Single(button => button.TextContent.Trim() == "Сверить состояние записи")
+            .ClickAsync(new MouseEventArgs());
+
+        var comparison = editor.Find("[aria-label='Актуальные данные для сверки']");
+        Assert.Contains("Инженер из свежего чтения", comparison.TextContent);
+        Assert.Equal(originalClosed, editor.FindAll("[aria-label='Фактическая информация о дежурстве']").SingleOrDefault()?.TextContent);
+        Assert.NotNull(editor.Find("[aria-label='Локальный черновик']"));
+        Assert.Equal(4, editor.FindAll("input[data-draft-key^='duty.']").Count);
+        Assert.DoesNotContain(editor.FindAll("button"), button =>
+            button.TextContent.Trim() == "Сохранить" && !button.HasAttribute("disabled"));
+
+        connection.DenyRead = true;
+        await editor.FindAll("button").Single(button => button.TextContent.Trim() == "Сверить состояние записи")
+            .ClickAsync(new MouseEventArgs());
+        Assert.Empty(editor.FindAll("[aria-label='Актуальные данные для сверки']"));
+        Assert.Contains("Не удалось прочитать актуальную запись для сверки", editor.Markup);
+        Assert.Single(context.JSInterop.Invocations["clayDraftStore.applyRaw"]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.discard"]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.saveTypedScope"]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
+        Assert.Equal(0, connection.ScheduleWrites);
     }
 
     /// <summary>Восстановленный Unknown показывает отправленный снимок и разрешает только чтение.</summary>
@@ -376,6 +501,71 @@ public sealed class DutyTests
         Assert.Single(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
     }
 
+    /// <summary>Подтверждённый конфликт плана можно сверить и принять свежую исходную версию без повторной записи.</summary>
+    [Theory]
+    [InlineData(true, false, false)]
+    [InlineData(false, false, false)]
+    [InlineData(true, true, false)]
+    [InlineData(true, false, true)]
+    public async Task StalePlanCanExplicitlyKeepLocalEngineerWithoutWriting(bool accepted, bool hasRaw, bool changedAgain)
+    {
+        var plan = Original with { DutyDate = Today, ActualId = null, TimeOff = null };
+        using var connection = new Probe { Row = plan };
+        await using var context = EditorContext(connection,
+            new ClayDraftRestore("cas-plan", false, 0, null, null), rawReady: true);
+        context.JSInterop.Setup<ClayDraftStorageHealth>("clayDraftStore.getHealth", _ => true)
+            .SetResult(new ClayDraftStorageHealth(true, 0, null, false, 1, 1));
+        context.JSInterop.Setup<string>("clayDraftStore.beginOperationIntent", _ => true)
+            .SetResult("""{"version":1,"attemptId":"duty-conflict","kind":"duty.save","status":"running","revision":2,"data":"{}","scopes":[],"acceptLegacyTyped":false,"legacyTypedRevision":0}""");
+        context.JSInterop.Setup<ClayDraftRebaseState>("clayDraftStore.readRebaseState", _ => true)
+            .SetResult(new ClayDraftRebaseState(7, hasRaw ? ["data:duty.planned:0"] : []));
+        context.JSInterop.Setup<bool>("clayDraftStore.rebaseScope", _ => true).SetResult(accepted);
+
+        var editor = context.Render<DutyEditor>(parameters => parameters.Add(component => component.RouteId, "20261125"));
+        editor.WaitForAssertion(() => Assert.False(Button("Сохранить").HasAttribute("disabled")));
+        await editor.InvokeAsync(() => editor.FindComponent<ClaySelect<DutyEngineer, int?>>().Instance.ValueChanged.InvokeAsync(9));
+        connection.Row = plan with { PlannedId = 17, ChangedAt = plan.ChangedAt.AddHours(1) };
+
+        await Button("Сохранить").ClickAsync(new MouseEventArgs());
+        await Button("Сверить состояние записи").ClickAsync(new MouseEventArgs());
+        Assert.True(Button("Сохранить").HasAttribute("disabled"));
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.rebaseScope"]);
+        var comparison = editor.Find("[aria-label='Сравнение планового инженера']");
+        Assert.Contains("#8", comparison.TextContent);
+        Assert.Contains("#9", comparison.TextContent);
+        Assert.Contains("#17", comparison.TextContent);
+
+        if (hasRaw)
+        {
+            Assert.DoesNotContain(editor.FindAll("button"), button => button.TextContent.Contains("Оставить моего инженера"));
+            Assert.Empty(context.JSInterop.Invocations["clayDraftStore.rebaseScope"]);
+        }
+        else if (changedAgain)
+        {
+            connection.Row = plan with { PlannedId = 18, ChangedAt = plan.ChangedAt.AddHours(2) };
+            await Button("Оставить моего инженера").ClickAsync(new MouseEventArgs());
+            Assert.Contains("Данные или доступ изменились", editor.Markup);
+            Assert.True(Button("Сохранить").HasAttribute("disabled"));
+            Assert.Empty(context.JSInterop.Invocations["clayDraftStore.rebaseScope"]);
+        }
+        else
+        {
+            await Button("Оставить моего инженера").ClickAsync(new MouseEventArgs());
+            var rebase = Assert.Single(context.JSInterop.Invocations["clayDraftStore.rebaseScope"]);
+            Assert.Equal(7L, rebase.Arguments[2]);
+            using var saved = JsonDocument.Parse(Assert.IsType<string>(rebase.Arguments[3]));
+            Assert.Equal(17, saved.RootElement.GetProperty("Original").GetProperty("PlannedId").GetInt32());
+            Assert.Equal(9, saved.RootElement.GetProperty("Draft").GetProperty("PlannedId").GetInt32());
+            Assert.Empty(Assert.IsAssignableFrom<IReadOnlyList<string>>(rebase.Arguments[4]));
+            Assert.Equal(!accepted, Button("Сохранить").HasAttribute("disabled"));
+        }
+
+        Assert.Equal(0, connection.ScheduleWrites);
+        Assert.Single(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.discard"]);
+        AngleSharp.Dom.IElement Button(string text) => editor.FindAll("button").Single(b => b.TextContent.Trim() == text);
+    }
+
     /// <summary>Смена только отображаемых имён не является изменением версии строки.</summary>
     [Fact]
     public async Task DisplayNameChangesDoNotRejectMatchingBusinessVersion()
@@ -393,11 +583,15 @@ public sealed class DutyTests
         Assert.Equal(1, connection.Commits);
     }
 
-    private static BunitContext EditorContext(Probe connection, ClayDraftRestore restore, bool authenticated = true, bool rawReady = false)
+    private static BunitContext EditorContext(Probe connection, ClayDraftRestore restore, bool authenticated = true, bool rawReady = false, bool deferRegistration = false,
+        NavigationManager? navigation = null)
     {
         var context = new BunitContext();
         context.JSInterop.Mode = JSRuntimeMode.Loose;
-        context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.register", _ => true).SetResult(restore);
+        if (!deferRegistration)
+            context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.register", _ => true).SetResult(restore);
+        context.JSInterop.Setup<ClayDraftRawApplyResult>("clayDraftStore.applyRaw", _ => true)
+            .SetResult(new ClayDraftRawApplyResult(rawReady ? ["data:duty.time-off:0"] : [], rawReady ? [] : ["data:duty.time-off:0"]));
         context.JSInterop.Setup<ClayDraftRestoreReadiness>("clayDraftStore.getRestoreReadiness", _ => true)
             .SetResult(new ClayDraftRestoreReadiness(rawReady, rawReady ? [] : ["main"], []));
         context.Services.AddScoped(_ => Db(connection));
@@ -405,6 +599,7 @@ public sealed class DutyTests
         context.Services.AddScoped<ClayFormWindowService>();
         context.Services.AddSingleton<IConfiguration>(new ConfigurationBuilder().Build());
         context.Services.AddSingleton<AuthenticationStateProvider>(new DutyAuthentication(authenticated));
+        if (navigation is not null) context.Services.AddSingleton<NavigationManager>(navigation);
         context.Services.AddMudServices();
         context.Render<MudBlazor.MudPopoverProvider>();
         return context;
@@ -412,8 +607,14 @@ public sealed class DutyTests
 
     private sealed class DutyAuthentication(bool authenticated) : AuthenticationStateProvider
     {
-        public override Task<AuthenticationState> GetAuthenticationStateAsync() =>
-            Task.FromResult(new AuthenticationState(new ClaimsPrincipal(authenticated ? new ClaimsIdentity([new Claim(ClaimTypes.Name, "fixture")], "test") : new ClaimsIdentity())));
+        internal Func<Task>? BeforeRead { get; set; }
+
+        public override async Task<AuthenticationState> GetAuthenticationStateAsync()
+        {
+            if (BeforeRead is not null) await BeforeRead();
+            var identity = authenticated ? new ClaimsIdentity([new Claim(ClaimTypes.Name, "fixture")], "test") : new ClaimsIdentity();
+            return new AuthenticationState(new ClaimsPrincipal(identity));
+        }
     }
 
     private static DutyDraft ClosingDraft() => new(DutyDate, 8, DutyConfirmation.Other, 9, true, NewDay, true);
@@ -432,6 +633,8 @@ public sealed class DutyTests
         public List<Interval> Intervals { get; set; } = [new(100, 8, OldDay)];
         public bool CanWrite { get; set; } = true;
         public bool DenyRead { get; set; }
+        public int CurrentEmployeeId { get; set; } = 4;
+        public bool CalendarReadFails { get; set; }
         public DateTime ServerToday { get; set; } = Today;
         public bool WorkDay { get; init; }
         public string? FailProcedure { get; init; }
@@ -548,13 +751,14 @@ public sealed class DutyTests
 
         protected override DbDataReader ExecuteDbDataReader(CommandBehavior behavior)
         {
-            if (CommandText.Contains("SUSER_SID()")) return Values(("КодСотрудника", typeof(int), 4));
+            if (CommandText.Contains("SUSER_SID()")) return Values(("КодСотрудника", typeof(int), owner.CurrentEmployeeId));
             if (CommandText.Contains("WITH Schedule AS")) return Values(("Today", typeof(DateTime), owner.ServerToday));
             if (CommandText.Contains("CanChangeTimeOff"))
                 return Values(("Today", typeof(DateTime), owner.ServerToday), ("CanInsert", typeof(bool), owner.CanWrite),
                     ("CanUpdate", typeof(bool), owner.CanWrite), ("CanChangeTimeOff", typeof(bool), owner.CanWrite));
             if (CommandText.Contains("parentLocation"))
             {
+                if (owner.CalendarReadFails) throw new InvalidOperationException("fixture calendar failure");
                 owner.CalendarFor = Param<int>("employeeId");
                 return Values(("Value", typeof(bool), owner.WorkDay));
             }

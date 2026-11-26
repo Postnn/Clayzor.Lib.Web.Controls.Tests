@@ -32,10 +32,12 @@ public sealed class Eq8PhoneSyncRetryTests
             Script.Rows(EquipmentRow()), Script.Scalar(1), Script.Rows(PhoneRow(1, 9)));
         var service = CreateService(connection);
         var intent = await service.SaveWithPhonesAsync(Equipment(), [], [Link(1)]);
-        _ = await service.SynchronizePhoneAttemptAsync(intent);
+        var planned = await service.SynchronizePhoneAttemptAsync(intent);
+        Assert.NotNull(planned.PlanningError);
+        Assert.Empty(planned.Operations);
 
-        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => service.ExecutePhoneSyncOperationsAsync(
-            7, [], [Link(1)], [Operation(1)]));
+        var error = await Assert.ThrowsAsync<EquipmentOperationException>(() => service.RetryPhoneSyncAttemptAsync(planned));
+        Assert.Equal(EquipmentWritePhase.Rejected, error.Phase);
 
         Assert.Contains("другой сессии", error.Message);
         Assert.DoesNotContain(connection.CommandLog, sql => sql.Contains("PhoneSync", StringComparison.Ordinal));
@@ -62,12 +64,15 @@ public sealed class Eq8PhoneSyncRetryTests
         var connection = CreateConnection(
             Script.Scalar(1), Script.Rows(ModelTypeRow()), Script.NonQuery(),
             Script.Rows(EquipmentRow()), Script.Scalar(1), Script.Rows(PhoneRow(1, 8)),
-            Script.Error(SqlExceptionFactory.Create(-2, "preflight")),
+            Script.Rows(LookupRow()), Script.Scalar(1),
+            Script.Error(new InvalidOperationException("Процедура вернула код 2.")),
             Script.Rows(EquipmentRow()), Script.Scalar(1), Script.Rows(PhoneRow(1, 8)),
-            Script.Rows(LookupRow()), Script.Scalar(1), Script.NonQuery());
+            Script.Scalar(1), Script.NonQuery());
         var service = CreateService(connection);
         var intent = await service.SaveWithPhonesAsync(Equipment(), [], [Link(1)]);
-        _ = await service.SynchronizePhoneAttemptAsync(intent);
+        var planned = await service.SynchronizePhoneAttemptAsync(intent);
+        Assert.Null(planned.PlanningError);
+        Assert.Equal(PhoneSyncPhase.Failed, Assert.Single(planned.Operations).Phase);
         connection.CommandLog.Clear();
         connection.ParameterLog.Clear();
 

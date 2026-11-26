@@ -1,3 +1,4 @@
+using System.Data.Common;
 using Clayzor.Lib.DALC;
 using Clayzor.Lib.Entities.Inventory;
 using Clayzor.Lib.Entities.MedicalTests;
@@ -33,21 +34,24 @@ public sealed class Eq8ChildTypeGuardsTests
     [InlineData("account-update", "UPDATE ОборудованиеУчётныеЗаписи")]
     [InlineData("account-delete", "DELETE ОборудованиеУчётныеЗаписи")]
     [InlineData("software", "INSERT vwОборудованиеПО")]
-    [InlineData("sim-save", "UPDATE vwSIMКарты")]
+    [InlineData("sim-save", "INSERT vwSIMКарты")]
     [InlineData("sim-delete", "DELETE vwSIMКарты")]
     [InlineData("sim-service", "INSERT vwSIMКартыДопУслугиСотОператора")]
     public async Task SuitableActualType_AllowsOriginalChildDml(string operation, string dmlMarker)
     {
         var connection = WriteConnection(operation, suitableType: true, includeDml: true);
-        var service = CreateService(connection);
+        using var transactional = new EquipmentAccountTransactionConnection(connection);
+        var compareAccount = operation is "account-update" or "account-delete";
+        var service = CreateService(compareAccount ? transactional : connection);
 
         await WriteAsync(service, operation);
 
         var roleQueries = operation.StartsWith("account-", StringComparison.Ordinal) ? 2 : 1;
-        Assert.Equal(roleQueries + 2, connection.CommandLog.Count);
+        var comparesOriginal = compareAccount || operation == "sim-delete";
+        Assert.Equal(roleQueries + (comparesOriginal ? 3 : 2), connection.CommandLog.Count);
         Assert.Contains("vwОборудование E", connection.CommandLog[roleQueries]);
         Assert.Contains("КодОборудования = @EquipmentId", connection.CommandLog[roleQueries]);
-        Assert.Contains(dmlMarker, connection.CommandLog[roleQueries + 1]);
+        Assert.Contains(dmlMarker, connection.CommandLog[^1]);
     }
 
     /// <summary>Отсутствие сохранённого оборудования или модели закрывает прямую дочернюю запись.</summary>
@@ -99,7 +103,14 @@ public sealed class Eq8ChildTypeGuardsTests
             ("ЕстьХарактеристикиКомпьютера", (byte)(suitableType && operation == "software" ? 1 : 0)),
             ("ЕстьХарактеристикиSIM", (byte)(suitableType && operation.StartsWith("sim-", StringComparison.Ordinal) ? 1 : 0)))));
         if (includeDml)
-            entries.Add(Script.NonQuery());
+        {
+            if (operation is "account-update" or "account-delete")
+                entries.Add(EquipmentAccountCasTests.SnapshotRow(Account()));
+            if (operation == "sim-delete")
+                entries.Add(EquipmentSimConcurrencyTests.SnapshotRow(ValidSim()));
+            entries.Add(operation is "account-update" or "account-delete" or "sim-save" or "sim-delete"
+                ? Script.Scalar(1) : Script.NonQuery());
+        }
         return new ScriptedConnection(new Queue<ScriptEntry>(entries));
     }
 
@@ -109,19 +120,18 @@ public sealed class Eq8ChildTypeGuardsTests
         "account-update" => service.UpdateAccountAsync(Account()),
         "account-delete" => service.DeleteAccountAsync(Account()),
         "software" => service.SaveSoftwareInstallationAsync(ValidInstallation()),
-        "sim-save" => service.SaveSimAsync(ValidSim()),
-        "sim-delete" => service.DeleteSimAsync(7),
+        "sim-save" => service.SaveSimAsync(ValidSim(), EquipmentSimWriteMode.Add, null),
+        "sim-delete" => service.DeleteSimAsync(7, ValidSim().CaptureVersion()),
         "sim-service" => service.SaveSimServiceAsync(ValidSimService(), DateTime.Today),
         _ => throw new ArgumentOutOfRangeException(nameof(operation)),
     };
 
-    private static EquipmentAccount Account() => new()
+    private static EquipmentAccount Account()
     {
-        EquipmentId = 7,
-        Login = "test",
-        Password = "secret",
-        Notes = "note",
-    };
+        var account = new EquipmentAccount { EquipmentId = 7, Login = "test", Password = "secret", Notes = "note" };
+        account.ExpectedVersion = account.CaptureVersion();
+        return account;
+    }
 
     private static EquipmentSoftwareInstallation ValidInstallation() => new()
     {
@@ -160,7 +170,7 @@ public sealed class Eq8ChildTypeGuardsTests
             sql.Contains("INSERT ") || sql.Contains("UPDATE ") || sql.Contains("DELETE ") || sql.Contains("sp_"));
     }
 
-    private static EquipmentFormService CreateService(ScriptedConnection connection)
+    private static EquipmentFormService CreateService(DbConnection connection)
     {
         DapperColumnMapper.Initialize();
         return new EquipmentFormService(

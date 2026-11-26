@@ -18,6 +18,7 @@ public sealed class EquipmentUpsLinkRequiredTests
         await using var context = new BunitContext();
         context.JSInterop.Mode = JSRuntimeMode.Loose;
         context.Services.AddMudServices();
+        EquipmentPeriodDialogHelpTests.AddAppearance(context);
         context.Services.AddKeyedSingleton("ups", new UpsEquipmentSelectDataSource(
             new DbManager("Server=test", new FakeSqlErrorHandler(),
                 () => new ScriptedConnection(new Queue<ScriptEntry>())), true));

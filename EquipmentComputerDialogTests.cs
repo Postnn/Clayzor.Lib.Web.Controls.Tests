@@ -17,6 +17,7 @@ public sealed class EquipmentComputerDialogTests
         await using var context = new BunitContext();
         context.JSInterop.Mode = JSRuntimeMode.Loose;
         context.Services.AddMudServices();
+        EquipmentPeriodDialogHelpTests.AddAppearance(context);
         var provider = context.Render<MudDialogProvider>();
         var reference = await context.Services.GetRequiredService<IDialogService>().ShowAsync<EquipmentComputerDialog>(
             "Компьютер", new DialogParameters<EquipmentComputerDialog>
@@ -50,6 +51,7 @@ public sealed class EquipmentComputerDialogTests
         await using var context = new BunitContext();
         context.JSInterop.Mode = JSRuntimeMode.Loose;
         context.Services.AddMudServices();
+        EquipmentPeriodDialogHelpTests.AddAppearance(context);
         EquipmentComputerSnapshot? saved = null;
         var provider = context.Render<MudDialogProvider>();
         var reference = await context.Services.GetRequiredService<IDialogService>().ShowAsync<EquipmentComputerDialog>(
@@ -83,6 +85,7 @@ public sealed class EquipmentComputerDialogTests
         await using var context = new BunitContext();
         context.JSInterop.Mode = JSRuntimeMode.Loose;
         context.Services.AddMudServices();
+        EquipmentPeriodDialogHelpTests.AddAppearance(context);
         EquipmentComputerSnapshot? saved = null;
         var provider = context.Render<MudDialogProvider>();
         var reference = await context.Services.GetRequiredService<IDialogService>().ShowAsync<EquipmentComputerDialog>(
@@ -110,19 +113,23 @@ public sealed class EquipmentComputerDialogTests
 
     /// <summary>Неподтверждённый исход блокирует запись при получении ошибки и при новом открытии редактора.</summary>
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task UnknownOutcome_BlocksSaveWithoutManualRejection(bool restored)
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public async Task UnknownOutcomeOrInvalidLoadedConfiguration_BlocksSaveWithoutManualRejection(bool restored, bool malformed)
     {
         await using var context = new BunitContext();
         context.JSInterop.Mode = JSRuntimeMode.Loose;
         context.Services.AddMudServices();
+        EquipmentPeriodDialogHelpTests.AddAppearance(context);
+        var popovers = context.Render<MudPopoverProvider>();
         var writes = 0;
         var provider = context.Render<MudDialogProvider>();
         var reference = await context.Services.GetRequiredService<IDialogService>().ShowAsync<EquipmentComputerDialog>(
             "Компьютер", new DialogParameters<EquipmentComputerDialog>
             {
                 { component => component.HasUnresolvedComputerOperation, restored },
+                { component => component.RamDetail, malformed ? "invalid configuration" : string.Empty },
                 { component => component.Notes, "несохранённая конфигурация" },
                 { component => component.Save, _ =>
                 {
@@ -132,17 +139,22 @@ public sealed class EquipmentComputerDialogTests
             });
         var dialog = provider.FindComponent<EquipmentComputerDialog>();
 
-        if (!restored)
+        if (!restored && !malformed)
             await dialog.FindAll("button").Single(button => button.TextContent.Trim() == "OK").ClickAsync();
 
         Assert.True(dialog.FindAll("button").Single(button => button.TextContent.Trim() == "OK").HasAttribute("disabled"));
         Assert.DoesNotContain("Отклонить предыдущую команду", dialog.Markup);
-        Assert.Contains(restored ? "Повторная запись заблокирована" : "Результат предыдущей записи неизвестен", dialog.Markup);
+        if (!malformed)
+            Assert.Contains(restored ? "Повторная запись заблокирована" : "Результат предыдущей записи неизвестен", dialog.Markup);
         Assert.Equal("несохранённая конфигурация", dialog.Instance.Notes);
+        await EquipmentPeriodDialogHelpTests.CheckHelpAndChangeThemeAsync(context, provider, popovers, "Computer_form.aspx");
+        Assert.Equal("несохранённая конфигурация", dialog.Instance.Notes);
+        Assert.False(reference.Result.IsCompleted);
+        Assert.True(dialog.FindAll("button").Single(button => button.TextContent.Trim() == "OK").HasAttribute("disabled"));
 
         await dialog.FindAll("button").Single(button => button.TextContent.Trim() == "Отмена").ClickAsync();
         Assert.True((await reference.Result)!.Canceled);
-        Assert.Equal(restored ? 0 : 1, writes);
+        Assert.Equal(restored || malformed ? 0 : 1, writes);
     }
 
     /// <summary>SQL type error отображается в диалоге и не оставляет незавершённую операцию.</summary>
@@ -152,17 +164,29 @@ public sealed class EquipmentComputerDialogTests
         await using var context = new BunitContext();
         context.JSInterop.Mode = JSRuntimeMode.Loose;
         context.Services.AddMudServices();
+        EquipmentPeriodDialogHelpTests.AddAppearance(context);
+        var popovers = context.Render<MudPopoverProvider>();
+        var writes = 0;
         var provider = context.Render<MudDialogProvider>();
         var reference = await context.Services.GetRequiredService<IDialogService>().ShowAsync<EquipmentComputerDialog>(
             "Компьютер", new DialogParameters<EquipmentComputerDialog>
             {
-                { component => component.Save, _ => throw new System.Data.SqlTypes.SqlTypeException("SqlDateTime overflow") },
+                { component => component.Save, _ =>
+                    {
+                        writes++;
+                        throw new System.Data.SqlTypes.SqlTypeException("SqlDateTime overflow");
+                    }
+                },
             });
         var dialog = provider.FindComponent<EquipmentComputerDialog>();
 
         await dialog.FindAll("button").Single(button => button.TextContent.Trim() == "OK").ClickAsync();
 
         Assert.Contains("SqlDateTime overflow", dialog.Markup);
+        await EquipmentPeriodDialogHelpTests.CheckHelpAndChangeThemeAsync(context, provider, popovers, "Computer_form.aspx");
+        Assert.Contains("SqlDateTime overflow", dialog.Markup);
+        Assert.Equal(1, writes);
+        Assert.False(reference.Result.IsCompleted);
         Assert.False((bool)dialog.Instance.GetType().GetField("_saving", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(dialog.Instance)!);
         await provider.InvokeAsync(() => reference.Close(DialogResult.Cancel()));
     }

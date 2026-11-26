@@ -1,6 +1,9 @@
 using System.Data;
 using System.Data.Common;
 using System.Security.Claims;
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using Clayzor.Lib.Entities.MedicalTests;
 using Bunit;
 using Clayzor.Lib.DALC;
 using Clayzor.Lib.Web.Controls.Components.Tree;
@@ -37,10 +40,8 @@ public sealed class TerritorialEntityMoveCleanupTests
 
         var module = context.JSInterop.SetupModule("./js/territorialEntitySearch.js");
         var failCleanup = true;
-        context.JSInterop.SetupVoid("sessionStorage.removeItem", _ => failCleanup)
+        context.JSInterop.SetupVoid("clayDraftStore.commitOperation", _ => failCleanup)
             .SetException(new JSException("Очистка недоступна"));
-        module.Setup<bool>("clearMoveMarker", _ => failCleanup).SetException(new JSException("Темпоральная ошибка"));
-        module.Setup<bool>("clearMoveMarker", _ => !failCleanup).SetResult(true);
         module.Setup<bool>("refreshMetadataFrame", _ => true).SetResult(true);
 
         var moved = await form.InvokeAsync(() => tree.Options.ReparentNodeAsync!(child, destination));
@@ -56,7 +57,7 @@ public sealed class TerritorialEntityMoveCleanupTests
         database.QueueRoots();
         database.Reads.Enqueue(Script.Rows(Script.Row(("Id", 5))));
         failCleanup = false;
-        await form.FindAll("button").Single(button => button.TextContent.Trim() == "Повторить очистку").ClickAsync(new());
+        await form.InvokeAsync(() => form.FindAll("button").Single(button => button.TextContent.Trim() == "Повторить очистку").ClickAsync());
 
         Assert.DoesNotContain("Повторить очистку", form.Markup);
         Assert.Equal("Территории в Родитель после переноса", form.Find("iframe").GetAttribute("title"));
@@ -64,11 +65,10 @@ public sealed class TerritorialEntityMoveCleanupTests
         Assert.Equal(9, database.ParentId);
         Assert.Equal(1, database.Updates);
         Assert.Equal(1, database.Commits);
-        var saved = Assert.Single(context.JSInterop.Invocations, call => call.Identifier == "sessionStorage.setItem" &&
-            Equals(call.Arguments[0], "territory-move:4"));
-        var removals = context.JSInterop.Invocations.Where(call => call.Identifier == "clearMoveMarker").ToArray();
-        Assert.Equal(2, removals.Length);
-        Assert.All(removals, removal => Assert.Equal(saved.Arguments, removal.Arguments));
+        Assert.Single(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
+        Assert.Single(context.JSInterop.Invocations["clayDraftStore.recordConfirmedOperation"]);
+        Assert.Equal(2, context.JSInterop.Invocations["clayDraftStore.commitOperation"].Count);
+        Assert.All(context.JSInterop.Invocations["clayDraftStore.commitOperation"], call => Assert.Equal(11L, call.Arguments[1]));
         Assert.Empty(database.Reads);
     }
 
@@ -94,7 +94,8 @@ public sealed class TerritorialEntityMoveCleanupTests
         Assert.Equal(9, database.ParentId);
         Assert.Equal(1, database.Updates);
         Assert.Equal(1, database.Commits);
-        Assert.DoesNotContain(context.JSInterop.Invocations, call => call.Identifier == "clearMoveMarker");
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
+        Assert.Single(context.JSInterop.Invocations["clayDraftStore.unknownOperation"]);
         Assert.Empty(database.Reads);
     }
 
@@ -103,12 +104,10 @@ public sealed class TerritorialEntityMoveCleanupTests
     {
         await using var context = new BunitContext();
         var database = new MoveConnection();
-        var form = RenderSearch(context, database);
+        var form = RenderSearch(context, database, failBegin: true);
         var tree = form.FindComponent<ClayTreeView>().Instance;
         var child = ChildOf(tree.RootNodes.Single(node => node.Id == "5"));
         var destination = tree.RootNodes.Single(node => node.Id == "9");
-        context.JSInterop.SetupVoid("sessionStorage.setItem", call => Equals(call.Arguments[0], "territory-move:4"))
-            .SetException(new JSException("Хранилище недоступно"));
 
         Assert.False(await form.InvokeAsync(() => tree.Options.ReparentNodeAsync!(child, destination)));
         Assert.Contains("Запись не начата", form.Markup);
@@ -119,17 +118,126 @@ public sealed class TerritorialEntityMoveCleanupTests
         Assert.Equal(3, database.Reads.Count);
     }
 
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    [InlineData(false, false)]
+    public async Task ReopenedJournalOnlyFinishesAnExactlyMatchedKnownOutcome(bool matching, bool rejected)
+    {
+        await using var context = new BunitContext();
+        var database = new MoveConnection();
+        var id = Guid.NewGuid();
+        const long revision = 11;
+        var intent = JsonSerializer.Serialize(new
+        {
+            From = new { Id = 8, ParentId = 5, Left = 2, Right = 3 },
+            To = new { Id = 9, ParentId = (int?)null, Left = 11, Right = 14 },
+            AttemptId = id,
+        });
+        var storedOperation = JsonSerializer.Serialize(new
+        {
+            version = 1, attemptId = id.ToString("N"), kind = "territory.move", status = "confirmed", revision,
+            data = intent, scopes = Array.Empty<object>(), acceptLegacyTyped = false, legacyTypedRevision = 0,
+        });
+        var result = JsonSerializer.Serialize(new
+        {
+            AttemptId = matching ? id.ToString("N") : "other-attempt",
+            Revision = revision,
+            Rejection = rejected ? "Конкурентный перенос уже изменил строку." : null,
+        });
+        var form = RenderSearch(context, database,
+            new ClayDraftRestore("move-fixture", true, revision, null, storedOperation,
+                new Dictionary<string, string> { ["move-result"] = result }));
+        var tree = form.FindComponent<ClayTreeView>().Instance;
+        var child = ChildOf(tree.RootNodes.Single(node => node.Id == "5"));
+        var destination = tree.RootNodes.Single(node => node.Id == "9");
+
+        Assert.False(await form.InvokeAsync(() => tree.Options.ReparentNodeAsync!(child, destination)));
+        if (matching)
+        {
+            if (!rejected) database.QueueRoots();
+            await form.InvokeAsync(() => form.FindAll("button")
+                .Single(button => button.TextContent.Trim() == "Повторить очистку").ClickAsync());
+            var commit = Assert.Single(context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
+            Assert.Equal(revision, commit.Arguments[1]);
+            if (rejected) Assert.Contains("Конкурентный перенос уже изменил строку.", form.Markup);
+        }
+        else
+        {
+            Assert.Contains("Результат переноса не подтверждён", form.Markup);
+            Assert.DoesNotContain("Повторить очистку", form.Markup);
+            Assert.Empty(context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
+        }
+        Assert.Equal(0, database.Updates);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
+    }
+
+    private sealed class MoveAcknowledgement(IJSRuntime inner) : IJSRuntime
+    {
+        public ValueTask<T> InvokeAsync<T>(string identifier, object?[]? args) =>
+            InvokeAsync<T>(identifier, CancellationToken.None, args);
+
+        public async ValueTask<T> InvokeAsync<T>(string identifier, CancellationToken cancellationToken, object?[]? args)
+        {
+            var value = await inner.InvokeAsync<T>(identifier, cancellationToken, args);
+            if (identifier != "clayDraftStore.beginOperationIntent" || value is not string json) return value;
+            using var requested = JsonDocument.Parse((string)args![1]!);
+            var result = JsonNode.Parse(json)!;
+            foreach (var name in new[] { "attemptId", "kind", "data" })
+                result[name] = requested.RootElement.GetProperty(name).GetString();
+            return (T)(object)result.ToJsonString();
+        }
+    }
+
+    [Fact]
+    public async Task LegacyMarkerDoesNotPermitANewMoveOrAnOutcomeGuess()
+    {
+        await using var context = new BunitContext();
+        var database = new MoveConnection();
+        context.JSInterop.Setup<string?>("sessionStorage.getItem", invocation => Equals(invocation.Arguments[0], "territory-move:4"))
+            .SetResult("""{"From":{"Id":8,"ParentId":5,"Left":2,"Right":3},"To":{"Id":9,"ParentId":null,"Left":11,"Right":14}}""");
+        var form = RenderSearch(context, database);
+        var tree = form.FindComponent<ClayTreeView>().Instance;
+        var child = ChildOf(tree.RootNodes.Single(node => node.Id == "5"));
+        var destination = tree.RootNodes.Single(node => node.Id == "9");
+
+        Assert.False(await form.InvokeAsync(() => tree.Options.ReparentNodeAsync!(child, destination)));
+        Assert.Contains("Результат переноса не подтверждён", form.Markup);
+        Assert.DoesNotContain("Повторить очистку", form.Markup);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
+        Assert.Equal(0, database.Updates);
+    }
+
     private static ClayTreeNode ChildOf(ClayTreeNode parent) => new()
     {
         Id = "8", RawId = 8, Left = 2, Right = 3, Parent = parent,
     };
 
-    private static IRenderedComponent<TerritorialEntitySearch> RenderSearch(BunitContext context, MoveConnection database)
+    private static IRenderedComponent<TerritorialEntitySearch> RenderSearch(BunitContext context, MoveConnection database,
+        ClayDraftRestore? restore = null, bool failBegin = false)
     {
+        DapperColumnMapper.Initialize();
         database.QueueAuth();
         database.QueueRoots();
-        database.QueueAuth();
+        if (restore is null)
+        {
+            database.Reads.Enqueue(Script.Rows(Script.Row(("Id", 4))));
+            database.QueueAuth();
+        }
         context.JSInterop.Mode = JSRuntimeMode.Loose;
+        context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.register", _ => true)
+            .SetResult(restore ?? new ClayDraftRestore("move-fixture", false, 0, null, null));
+        context.JSInterop.Setup<ClayDraftRecoveryCandidate[]>("clayDraftStore.listRecoveryCandidates", _ => true)
+            .SetResult([]);
+        context.JSInterop.Setup<ClayDraftStorageHealth>("clayDraftStore.getHealth", _ => true)
+            .SetResult(new ClayDraftStorageHealth(true, 0, null, false, 1, 1));
+        var begin = context.JSInterop.Setup<string>("clayDraftStore.beginOperationIntent", _ => true);
+        if (failBegin)
+            begin.SetException(new JSException("Хранилище недоступно"));
+        else
+            begin.SetResult("""{"version":1,"attemptId":"fixture","kind":"territory.move","status":"running","revision":11,"data":"{}","scopes":[],"acceptLegacyTyped":false,"legacyTypedRevision":0}""");
+        context.Services.AddScoped(_ => new ClayDraftService(new MoveAcknowledgement(context.JSInterop.JSRuntime)));
         var errorHandler = new FakeSqlErrorHandler();
         context.Services.AddSingleton<ISqlErrorHandler>(errorHandler);
         context.Services.AddScoped(_ => new DbManager("Server=fixture", errorHandler, () => database));

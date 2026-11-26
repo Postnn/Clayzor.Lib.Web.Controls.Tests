@@ -22,6 +22,7 @@ public sealed class Eq9CalendarDialogTests
         await using var context = new BunitContext();
         context.JSInterop.Mode = JSRuntimeMode.Loose;
         context.Services.AddMudServices();
+        EquipmentPeriodDialogHelpTests.AddAppearance(context);
         var businessToday = new DateTime(2099, 2, 28);
         var value = new EquipmentSimService
         {
@@ -102,6 +103,7 @@ public sealed class Eq9CalendarDialogTests
         var context = new BunitContext();
         context.JSInterop.Mode = JSRuntimeMode.Loose;
         context.Services.AddMudServices();
+        EquipmentPeriodDialogHelpTests.AddAppearance(context);
         context.Services.AddSingleton<IConfiguration>(new ConfigurationManager());
         context.Services.AddSingleton(new EmployeeSelectDataSource(CreateDb(Script.Rows(
             Script.Row(("КодСотрудника", 4), ("Сотрудник", "Тестов А."), ("Employee", "Test A."))))));

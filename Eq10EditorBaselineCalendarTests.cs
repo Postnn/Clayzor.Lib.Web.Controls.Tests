@@ -231,6 +231,7 @@ public sealed class Eq10EditorBaselineCalendarTests
         var context = new BunitContext();
         context.JSInterop.Mode = JSRuntimeMode.Loose;
         context.Services.AddMudServices();
+        EquipmentPeriodDialogHelpTests.AddAppearance(context);
         context.Services.AddSingleton<IConfiguration>(new ConfigurationManager());
         context.Services.AddSingleton(new EmployeeSelectDataSource(CreateDb()));
         context.Services.AddSingleton(new LocationSelectDataSource(CreateDb()));

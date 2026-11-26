@@ -110,6 +110,7 @@ public sealed class Eq10EditorLifecycleTests
         var context = new BunitContext();
         context.JSInterop.Mode = JSRuntimeMode.Loose;
         context.Services.AddMudServices();
+        EquipmentPeriodDialogHelpTests.AddAppearance(context);
         return context;
     }
 
