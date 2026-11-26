@@ -92,11 +92,22 @@ public sealed partial class MaintenanceTests
         var operation = $$"""{"version":1,"attemptId":"fixture-maintenance-outcome","kind":"maintenance.complete","status":"{{state}}","revision":3,"data":"17","scopes":[],"acceptLegacyTyped":false,"legacyTypedRevision":0}""";
         await using var context = CreateContext(out var db, restoredOperation: operation, restoredConfirmation: 17);
         var page = context.Render<MaintenancePage>();
-        page.WaitForAssertion(() => Assert.Contains(state == "unknown" ? "Исход выполнения требует проверки" : "Выполнение записано", page.Markup));
+        if (state == "unknown")
+        {
+            page.WaitForAssertion(() => Assert.Contains("Исход выполнения требует проверки", page.Markup));
+            AssertNoCancellationWrite(db, context);
+        }
+        else
+        {
+            page.WaitForAssertion(() => Assert.Single(context.JSInterop.Invocations["clayDraftStore.commitOperation"]));
+            Assert.Equal(0, db.InsertCount);
+            Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
+            Assert.Empty(context.JSInterop.Invocations["clayDraftStore.discard"]);
+            Assert.Empty(context.JSInterop.Invocations["clayDraftStore.discardScope"]);
+        }
 
         Assert.DoesNotContain("Отменить вопрос", page.Markup);
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.replaceEditorScope"]);
-        AssertNoCancellationWrite(db, context);
     }
 
     [Fact]

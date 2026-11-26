@@ -98,14 +98,14 @@ public sealed class TerritorialEntityCancelTests
         Assert.Contains("AnotherName", fixture.Card.Markup);
     }
 
-    /// <summary>Перечитанная, но не принятая версия не заменяет исходное поле даже при совпадении с локальным именем.</summary>
+    /// <summary>Отмена сверки разных значений сохраняет прежнее исходное значение.</summary>
     [Fact]
     public async Task RefreshWithoutAcceptingMergePreservesDirtyName()
     {
-        await using var fixture = new Fixture(freshName: "LocalName");
+        await using var fixture = new Fixture();
         var refresh = Button(fixture.Card, "Обновить").ClickAsync(new MouseEventArgs());
-        fixture.Dialogs.WaitForAssertion(() => Assert.Contains("Объединить независимые изменения", fixture.Dialogs.Markup));
-        await Button(fixture.Dialogs, "Нет").ClickAsync(new MouseEventArgs());
+        fixture.Dialogs.WaitForAssertion(() => Assert.Contains("Для каждого поля выберите значение", fixture.Dialogs.Markup));
+        await Button(fixture.Dialogs, "Отмена").ClickAsync(new MouseEventArgs());
         await refresh.WaitAsync(TimeSpan.FromSeconds(5));
 
         Assert.Single(fixture.Card.FindAll("[data-clay-field-changed]"));

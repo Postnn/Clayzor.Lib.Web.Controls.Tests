@@ -37,9 +37,10 @@ public sealed class EquipmentRemainingRawRestoreTests
         var writes = 0;
         var dateReads = 0;
         var pending = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var retry = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var editor = new EquipmentEditorContext(7, 1, () => true)
         {
-            RawRestore = () => ++attempts == 1 ? pending.Task : Task.CompletedTask,
+            RawRestore = () => ++attempts == 1 ? pending.Task : retry.Task,
         };
         Task<EquipmentEditorSaveResult> Save()
         {
@@ -94,10 +95,11 @@ public sealed class EquipmentRemainingRawRestoreTests
             Assert.Equal(0, dateReads);
             pending.SetException(new InvalidOperationException("Ввод ещё не восстановлен."));
 
-            dialogs.WaitForAssertion(() => Assert.NotNull(Button("Повторить восстановление")));
+            dialogs.WaitForAssertion(() => Assert.Equal(2, attempts));
+            Assert.DoesNotContain(dialogs.FindAll("button"), button => button.TextContent.Trim() == "Повторить восстановление");
             Assert.True(Button(applyText).HasAttribute("disabled"));
             Assert.False(reference.Result.IsCompleted);
-            await Button("Повторить восстановление").ClickAsync();
+            retry.SetResult();
             dialogs.WaitForAssertion(() => Assert.False(Button(applyText).HasAttribute("disabled")));
             Assert.Equal(2, attempts);
             Assert.Equal(0, writes);
@@ -106,7 +108,7 @@ public sealed class EquipmentRemainingRawRestoreTests
             Assert.Equal(1, writes);
             Assert.Equal(kind == "sim-service" ? 1 : 0, dateReads);
         }
-        finally { pending.TrySetResult(); }
+        finally { pending.TrySetResult(); retry.TrySetResult(); }
     }
 
     [Fact]
@@ -136,7 +138,8 @@ public sealed class EquipmentRemainingRawRestoreTests
                 { dialog => dialog.TelDraft, session },
                 { dialog => dialog.Notes, original.Notes },
             });
-        dialogs.WaitForAssertion(() => Assert.Contains("Повторите восстановление.", dialogs.Markup));
+        dialogs.WaitForAssertion(() => Assert.True(session.NeedsRawRestore));
+        Assert.DoesNotContain(dialogs.FindAll("button"), button => button.TextContent.Trim() == "Повторить восстановление ввода");
         Assert.True(dialogs.FindAll("button").Single(button => button.TextContent.Trim() == "OK").HasAttribute("disabled"));
         Assert.Single(context.JSInterop.Invocations["clayDraftStore.applyRaw"]);
         Assert.DoesNotContain("Не все поля восстановлены. Сохранение заблокировано.", dialogs.Markup);

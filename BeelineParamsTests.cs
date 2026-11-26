@@ -216,7 +216,7 @@ public sealed class BeelineParamsTests
         var card = context.Render<BeelineParamsForm>();
         card.WaitForAssertion(() => Assert.Contains("local@example.test", card.Markup));
 
-        await Button(card, "Повторить чтение договора").ClickAsync(new MouseEventArgs());
+        await Button(card, "Обновить").ClickAsync(new MouseEventArgs());
         Assert.Contains("Договор Билайн не найден или недоступен", card.Markup);
 
         sql.Row = Original with { EmailManager = "fresh@example.test" };
@@ -225,7 +225,7 @@ public sealed class BeelineParamsTests
 
         Assert.Contains("fresh@example.test", card.Markup);
         sql.CanRead = false;
-        await Button(card, "Повторить чтение договора").ClickAsync(new MouseEventArgs());
+        await Button(card, "Обновить").ClickAsync(new MouseEventArgs());
         Assert.DoesNotContain("fresh@example.test", card.Markup);
         Assert.Contains("Нет доступа к параметрам договора Билайн", card.Markup);
         Assert.Contains("local@example.test", card.Markup);
@@ -402,12 +402,11 @@ public sealed class BeelineParamsTests
         Assert.Equal(0, sql.Updates);
     }
 
-    /// <summary>В readonly recovery все решения оставляют сырой ввод и прежний Unknown.</summary>
+    /// <summary>Закрытие просмотра сохраняет восстановленный ввод и прежний Unknown.</summary>
     [Theory]
-    [InlineData("Продолжить редактирование", false)]
-    [InlineData("Закрыть без сохранения", true)]
-    [InlineData("Отменить мои изменения и загрузить из БД", true)]
-    public async Task RecoveryCancel_PreservesRawAndPendingOperation(string choice, bool unknown)
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RecoveryCancel_PreservesRawAndPendingOperation(bool unknown)
     {
         using var sql = new Probe { Row = null };
         var snapshot = RecoverySnapshot("local@example.test");
@@ -423,17 +422,12 @@ public sealed class BeelineParamsTests
         card.WaitForAssertion(() => Assert.Contains("local@example.test", card.Markup));
         card.WaitForAssertion(() => Assert.Single(context.JSInterop.Invocations["clayDraftStore.getRestoreReadiness"]));
 
-        var cancel = PressCancelAsync(card);
-        dialogs.WaitForAssertion(() => Assert.Single(dialogs.FindComponents<ClayEditorCancelDialog>()));
-        sql.Row = Original with { EmailManager = "fresh@example.test" };
-        await ChooseCancelAsync(dialogs, choice);
-        await cancel.WaitAsync(TimeSpan.FromSeconds(3));
+        await PressCancelAsync(card).WaitAsync(TimeSpan.FromSeconds(3));
 
-        if (choice == "Отменить мои изменения и загрузить из БД")
-            Assert.Contains("fresh@example.test", card.Markup);
+        Assert.Empty(dialogs.FindComponents<ClayEditorCancelDialog>());
         Assert.Contains("local@example.test", card.Markup);
         Assert.True(card.Find("input[data-draft-key='beeline.email']").HasAttribute("readonly"));
-        Assert.Equal(choice == "Закрыть без сохранения" ? 1 : 0, context.JSInterop.Invocations["clayModelEquipmentForm.close"].Count);
+        Assert.Single(context.JSInterop.Invocations["clayModelEquipmentForm.close"]);
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.replaceEditorScope"]);
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.discard"]);
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.commitOperation"]);

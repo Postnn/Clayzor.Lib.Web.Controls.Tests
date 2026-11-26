@@ -70,7 +70,7 @@ public sealed partial class SlBlEditorRestoreTests
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.discard"]);
 
         ready = true;
-        await form.InvokeAsync(() => Button(form, "Повторить восстановление").ClickAsync(new MouseEventArgs()));
+        await form.InvokeAsync(() => Button(form, "Обновить").ClickAsync(new MouseEventArgs()));
         Assert.Single(context.JSInterop.Invocations["clayDraftStore.applyPendingRaw"]);
         Assert.Single(context.JSInterop.Invocations["clayDraftStore.applyRaw"]);
         form.WaitForAssertion(() => Assert.False(Button(form, "Сохранить").HasAttribute("disabled")));

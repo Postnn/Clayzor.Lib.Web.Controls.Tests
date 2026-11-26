@@ -108,10 +108,10 @@ public sealed partial class NetFormTests
             call => Equals(call.Arguments[1], "net-input")));
 
         page.WaitForAssertion(() => Assert.False(page.FindAll("button")
-            .Single(button => button.TextContent.Trim() == "Сверить черновик с БД").HasAttribute("disabled")));
+            .Single(button => button.TextContent.Trim() == "Сверить данные порта").HasAttribute("disabled")));
         ReadNetReviewFixture(fixture, "Чужая правка", initial);
         await page.InvokeAsync(() => page.FindAll("button")
-            .Single(button => button.TextContent.Trim() == "Сверить черновик с БД").ClickAsync());
+            .Single(button => button.TextContent.Trim() == "Сверить данные порта").ClickAsync());
 
         Assert.Null(GetPrivate<string>(page.Instance, "_validationMessage"));
         var review = page.Find("[data-testid='net-input-review']");
@@ -126,7 +126,7 @@ public sealed partial class NetFormTests
         if (!freshChangedAgain && storageAccepts)
             fixture.Enqueue(Script.Rows(Script.Row(("КодЛица", 1), ("Кличка", "Тестовая организация"))));
         await page.InvokeAsync(() => page.FindAll("button")
-            .Single(button => button.TextContent.Trim() == "Принять сверку черновика").ClickAsync());
+            .Single(button => button.TextContent.Trim() == "Применить результаты сверки").ClickAsync());
 
         Assert.DoesNotContain(fixture.Connection.CommandLog, sql => sql.Contains("UPDATE vwЛокальнаяСеть", StringComparison.Ordinal));
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);

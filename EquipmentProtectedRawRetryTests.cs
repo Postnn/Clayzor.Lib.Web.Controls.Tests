@@ -77,9 +77,8 @@ public sealed class EquipmentProtectedRawRetryTests
             await InvokeAsync(provider, child, "Apply");
             Assert.Equal(0, writes);
             hold.SetException(new InvalidOperationException("Pending"));
-            provider.WaitForAssertion(() => Assert.NotNull(Button(provider, "Повторить")));
+            provider.WaitForAssertion(() => Assert.Equal(2, backend.Reads));
             Assert.True(Button(provider, "OK").HasAttribute("disabled"));
-            var retrying = Button(provider, "Повторить").ClickAsync();
             if (!denyOnRetry)
             {
                 provider.WaitForAssertion(() => Assert.Equal(1, retryCalls));
@@ -89,7 +88,8 @@ public sealed class EquipmentProtectedRawRetryTests
                 Assert.True(Button(provider, "OK").HasAttribute("disabled"));
                 retryHold.SetResult();
             }
-            await retrying;
+            provider.WaitForAssertion(() =>
+                Assert.Equal(denyOnRetry ? EquipmentEditorReadiness.Failed : EquipmentEditorReadiness.Ready, readiness[^1]));
             Assert.Equal(2, backend.Reads);
             Assert.Equal(1, initialCalls);
             Assert.Equal(denyOnRetry ? 0 : 1, retryCalls);
@@ -127,14 +127,12 @@ public sealed class EquipmentProtectedRawRetryTests
             Assert.Equal(0, checks);
             Assert.False(reference.Result.IsCompleted);
             hold.SetResult(false);
-            provider.WaitForAssertion(() => Assert.NotNull(Button(provider, "Повторить восстановление")));
-            var retrying = Button(provider, "Повторить восстановление").ClickAsync();
             provider.WaitForAssertion(() => Assert.Equal(2, calls));
+            Assert.DoesNotContain(provider.FindAll("button"), button => button.TextContent.Trim() == "Повторить восстановление");
             await InvokeAsync(provider, dialog.Instance, "RetryRawAsync");
             Assert.Equal(2, calls);
             retry.SetResult(true);
-            await retrying;
-            Assert.False(Button(provider, "OK").HasAttribute("disabled"));
+            provider.WaitForAssertion(() => Assert.False(Button(provider, "OK").HasAttribute("disabled")));
             await Button(provider, "OK").ClickAsync();
             Assert.False((await reference.Result.WaitAsync(TimeSpan.FromSeconds(2)))!.Canceled);
             Assert.Equal(1, checks);

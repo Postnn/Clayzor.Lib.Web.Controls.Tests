@@ -35,7 +35,7 @@ public sealed partial class NetFormTests
     [InlineData("applied")]
     [InlineData("failure")]
     [InlineData("pending")]
-    public async Task NetExplicitRetryAppliesOnlyPendingFieldsAndKeepsLiveInput(string outcome)
+    public async Task NetAutomaticRetryAppliesOnlyPendingFieldsAndKeepsLiveInput(string outcome)
     {
         using var fixture = new NetFixture(poe: 1, restoredInput: NetReadinessSnapshot(), restoredRaw: true);
         var context = fixture.Context;
@@ -44,16 +44,19 @@ public sealed partial class NetFormTests
             .SetResult(new(["data:net.connected:0"], ["data:net.description:0"]));
         var retry = context.JSInterop.Setup<ClayDraftRawApplyResult>("clayDraftStore.applyPendingRaw", _ => true);
         if (outcome == "failure") retry.SetException(new JSException("fixture failed scope"));
-        else retry.SetResult(outcome == "pending" ? new([], ["data:net.description:0"]) : new(["data:net.description:0"], []));
+
         var page = context.Render<NetPage>();
         WaitForLoad(page);
         page.WaitForAssertion(() => Assert.Single(context.JSInterop.Invocations["clayDraftStore.applyRaw"]));
         await page.Find("textarea[data-draft-key='net.connected']").InputAsync("Текущий текст уже восстановленного поля");
         SetNetReadiness(context, new(true, [], []));
 
-        await page.InvokeAsync(() => NetReadinessButton(page, "Повторить восстановление ввода").ClickAsync());
+        if (outcome != "failure")
+            retry.SetResult(outcome == "pending" ? new([], ["data:net.description:0"]) : new(["data:net.description:0"], []));
+        page.WaitForAssertion(() => Assert.Equal(outcome != "applied", NetReadinessButton(page, "Перезапустить PoE").HasAttribute("disabled")));
+        Assert.DoesNotContain("Повторить восстановление ввода", page.Markup);
 
-        Assert.Equal("net-input", Assert.Single(retry.Invocations).Arguments[1]);
+        page.WaitForAssertion(() => Assert.Equal("net-input", Assert.Single(retry.Invocations).Arguments[1]));
         Assert.Single(context.JSInterop.Invocations["clayDraftStore.applyRaw"]);
         Assert.Equal("Текущий текст уже восстановленного поля", Model(page.Instance).Connected);
         Assert.Equal(outcome != "applied", NetReadinessButton(page, "Перезапустить PoE").HasAttribute("disabled"));

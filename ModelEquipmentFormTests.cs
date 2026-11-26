@@ -384,7 +384,7 @@ public sealed partial class ModelEquipmentFormTests
         page.WaitForAssertion(() => Assert.Contains("Результат сохранения модели неизвестен", page.Markup));
         await page.InvokeAsync(() => page.FindComponents<ClayTextBox>()[0].Find("input").Input("Local"));
         fixture.Enqueue(ModelRow(new EquipmentModel { Id = 7, EquipmentTypeId = 5, Name = "Local" }));
-        await page.InvokeAsync(() => FindButton(page, "Прочитать состояние модели").Click());
+        await page.InvokeAsync(() => FindButton(page, "Обновить").Click());
         Assert.Contains("Состояние строки не доказывает исход", page.Markup);
         await page.InvokeAsync(() => InvokeSave(page.Instance, false));
 
@@ -409,7 +409,7 @@ public sealed partial class ModelEquipmentFormTests
         var page = fixture.Context.Render<ModelEquipmentForm>();
         page.WaitForAssertion(() => Assert.Contains("Сохранение подтверждено", page.Markup));
 
-        await page.InvokeAsync(() => FindButton(page, "Проверить журнал сохранения").Click());
+        await page.InvokeAsync(() => FindButton(page, "Обновить").Click());
 
         Assert.Equal(0, fixture.WriteCount);
         Assert.Equal(9L, Assert.Single(fixture.Context.JSInterop.Invocations["clayDraftStore.commitOperation"]).Arguments[1]);
@@ -619,15 +619,14 @@ public sealed partial class ModelEquipmentFormTests
         context.JSInterop.Setup<ClayDraftRestoreReadiness>("clayDraftStore.getRestoreReadiness", _ => true)
             .SetResult(new ClayDraftRestoreReadiness(false, [], ["model-input"]));
         var page = context.Render<ModelEquipmentForm>();
-        page.WaitForAssertion(() => Assert.Contains("Повторить восстановление ввода", page.Markup));
+        page.WaitForAssertion(() => Assert.Contains("Часть ввода ещё не восстановлена", page.Markup));
         fixture.Enqueue(Roles(authorized ? Роли.Специалист_по_инвентаризации_оборудования : Роли.Дежурный_инженер));
         context.JSInterop.Setup<ClayDraftRawApplyResult>("clayDraftStore.applyPendingRaw", _ => true)
             .SetResult(new ClayDraftRawApplyResult([], []));
         context.JSInterop.Setup<ClayDraftRestoreReadiness>("clayDraftStore.getRestoreReadiness", _ => true)
             .SetResult(new ClayDraftRestoreReadiness(false, [], ["other-editor"]));
 
-        await page.InvokeAsync(() => page.FindAll("button")
-            .Single(button => button.TextContent.Trim() == "Повторить восстановление ввода").ClickAsync());
+        await page.InvokeAsync(() => FindButton(page, "Обновить").ClickAsync());
 
         if (authorized)
         {
@@ -659,7 +658,7 @@ public sealed partial class ModelEquipmentFormTests
 
         await page.InvokeAsync(() => InvokeSave(page.Instance, false));
 
-        Assert.Contains("Повторить восстановление ввода", page.Markup);
+        Assert.Contains("Ввод модели ещё не восстановлен", page.Markup);
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
         Assert.Equal(0, fixture.WriteCount);
     }
@@ -680,14 +679,13 @@ public sealed partial class ModelEquipmentFormTests
         context.JSInterop.Setup<ClayDraftRestoreReadiness>("clayDraftStore.getRestoreReadiness", _ => true)
             .SetResult(new ClayDraftRestoreReadiness(false, [], ["model-input"]));
         var page = context.Render<ModelEquipmentForm>();
-        page.WaitForAssertion(() => Assert.Contains("Повторить восстановление ввода", page.Markup));
+        page.WaitForAssertion(() => Assert.Contains("Часть исходного ввода осталась", page.Markup));
         context.JSInterop.Setup<ClayDraftRawApplyResult>("clayDraftStore.applyPendingRaw", _ => true)
             .SetResult(new ClayDraftRawApplyResult([], []));
         context.JSInterop.Setup<ClayDraftRestoreReadiness>("clayDraftStore.getRestoreReadiness", _ => true)
             .SetResult(new ClayDraftRestoreReadiness(true, [], []));
 
-        await page.InvokeAsync(() => page.FindAll("button")
-            .Single(button => button.TextContent.Trim() == "Повторить восстановление ввода").ClickAsync());
+        await page.InvokeAsync(() => FindButton(page, "Обновить").ClickAsync());
 
         Assert.Equal("model-input", Assert.Single(context.JSInterop.Invocations["clayDraftStore.applyPendingRaw"]).Arguments[1]);
         Assert.Contains("незавершённая попытка", page.Markup);

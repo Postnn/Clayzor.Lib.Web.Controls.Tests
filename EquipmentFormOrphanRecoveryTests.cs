@@ -16,7 +16,8 @@ public sealed partial class EquipmentFormTests
     {
         var fixture = CreateFixture(phoneConfig: true);
         await using var context = fixture.Context;
-        context.JSInterop.Setup<ClayDraftRecoveryCandidate[]>("clayDraftStore.listRecoveryCandidates", _ => true).SetResult([OrphanFixture]);
+        context.JSInterop.Setup<ClayDraftRecoveryCandidate[]>("clayDraftStore.listRecoveryCandidates", _ => true)
+            .SetResult([OrphanFixture with { CanRecover = false }]);
         var page = context.Render<EquipmentForm>();
         page.WaitForAssertion(() => Assert.Contains("незавершённая операция", page.Find("[data-testid=equipment-recovery]").TextContent));
 
@@ -28,23 +29,65 @@ public sealed partial class EquipmentFormTests
         Assert.Equal(0, fixture.Service.SyncCalls);
     }
 
-    /// <summary>Сохранённая попытка открывается явным выбором без повторной бизнес-команды.</summary>
+    /// <summary>Несколько сохранённых версий не порождают команды управления и не выбираются автоматически.</summary>
     [Fact]
-    public async Task OrphanRecovery_ExplicitAdoptionOpensUnknownWithoutReplay()
+    public async Task OrphanRecovery_MultipleSavedInputsDoNotCreateControlsOrChooseOne()
     {
         var fixture = CreateFixture();
         await using var context = fixture.Context;
-        var candidates = new[] { OrphanFixture };
+        context.JSInterop.Setup<ClayDraftRecoveryCandidate[]>("clayDraftStore.listRecoveryCandidates", _ => true)
+            .SetResult([OrphanFixture with { HasOperation = false },
+                OrphanFixture with { DraftId = "other-draft", HasOperation = false }]);
+
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        page.WaitForAssertion(() => Assert.True(PrivateBool(page.Instance, "_recoveryScanReady")));
+
+        Assert.Empty(page.FindAll("[data-testid=equipment-recovery]"));
+        Assert.DoesNotContain("Сохранённый ввод", page.Markup);
+        Assert.DoesNotContain("Открыть черновик", page.Markup);
+        Assert.DoesNotContain("Проверить сохранённые черновики", page.Markup);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.recoverListedDraft"]);
+    }
+
+    /// <summary>Единственная незавершённая попытка восстанавливается без команды записи.</summary>
+    [Fact]
+    public async Task OrphanRecovery_InitialLoadRestoresSingleUnknownWithoutCommands()
+    {
+        var fixture = CreateFixture();
+        await using var context = fixture.Context;
+        context.JSInterop.Setup<ClayDraftRecoveryCandidate[]>("clayDraftStore.listRecoveryCandidates", _ => true)
+            .SetResult([OrphanFixture]);
+        var adoption = context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.recoverListedDraft", _ => true)
+            .SetResult(OrphanRestore(null));
+
+        var page = context.Render<EquipmentForm>();
+        page.WaitForAssertion(() => Assert.True(PrivateBool(page.Instance, "_draftOperationUnresolved")));
+
+        Assert.Equal("orphan-draft", Assert.Single(adoption.Invocations).Arguments[1]);
+        Assert.DoesNotContain("Открыть черновик", page.Markup);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
+        Assert.Equal(0, fixture.Service.UpdateCalls);
+    }
+
+    /// <summary>Обычное обновление автоматически восстанавливает единственную попытку.</summary>
+    [Fact]
+    public async Task OrphanRecovery_RefreshAdoptsOnlyUnknownWithoutReplay()
+    {
+        var fixture = CreateFixture();
+        await using var context = fixture.Context;
+        ClayDraftRecoveryCandidate[] candidates = [];
         context.JSInterop.Setup<ClayDraftRecoveryCandidate[]>("clayDraftStore.listRecoveryCandidates", _ => candidates.Length > 0)
             .SetResult([OrphanFixture]);
         var page = context.Render<EquipmentForm>();
-        page.WaitForAssertion(() => Assert.NotEmpty(page.FindAll("[data-testid=equipment-recovery]")));
+        page.WaitForAssertion(() => Assert.True(PrivateBool(page.Instance, "_recoveryScanReady")));
         var input = OrphanState(page.Instance);
         input["Model"]!["DocumentWriteOffId"] = 91;
         var adoption = context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.recoverListedDraft", _ => true)
             .SetResult(OrphanRestore(input.ToJsonString()));
 
-        await page.InvokeAsync(() => page.FindAll("[data-testid=equipment-recovery] button").Single(button => button.TextContent.Trim() == "Открыть черновик").ClickAsync());
+        candidates = [OrphanFixture];
+        await InvokeHandler(page, "RefreshAsync");
         candidates = [];
         Assert.Equal("orphan-draft", Assert.Single(adoption.Invocations).Arguments[1]);
         Assert.True(PrivateBool(page.Instance, "_draftOperationUnresolved"));
@@ -60,13 +103,15 @@ public sealed partial class EquipmentFormTests
     {
         var fixture = CreateFixture();
         await using var context = fixture.Context;
-        context.JSInterop.Setup<ClayDraftRecoveryCandidate[]>("clayDraftStore.listRecoveryCandidates", _ => true).SetResult([OrphanFixture]);
+        var showCandidate = false;
+        context.JSInterop.Setup<ClayDraftRecoveryCandidate[]>("clayDraftStore.listRecoveryCandidates", _ => showCandidate).SetResult([OrphanFixture]);
         var page = context.Render<EquipmentForm>();
-        page.WaitForAssertion(() => Assert.NotEmpty(page.FindAll("[data-testid=equipment-recovery]")));
+        page.WaitForAssertion(() => Assert.True(PrivateBool(page.Instance, "_recoveryScanReady")));
+        showCandidate = true;
         var input = OrphanState(page.Instance);
         input["Model"]!["DocumentWriteOffId"] = 91;
         var adoption = context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.recoverListedDraft", _ => true);
-        var opening = InvokeHandler(page, "OpenEquipmentRecoveryAsync", OrphanFixture);
+        var opening = InvokeHandler(page, "RefreshAsync");
         try
         {
             page.WaitForAssertion(() => Assert.Single(adoption.Invocations));
@@ -89,34 +134,38 @@ public sealed partial class EquipmentFormTests
     {
         var fixture = CreateFixture();
         await using var context = fixture.Context;
-        context.JSInterop.Setup<ClayDraftRecoveryCandidate[]>("clayDraftStore.listRecoveryCandidates", _ => true).SetResult([OrphanFixture]);
+        var showCandidate = false;
+        context.JSInterop.Setup<ClayDraftRecoveryCandidate[]>("clayDraftStore.listRecoveryCandidates", _ => showCandidate).SetResult([OrphanFixture]);
         var page = context.Render<EquipmentForm>();
-        page.WaitForAssertion(() => Assert.NotEmpty(page.FindAll("[data-testid=equipment-recovery]")));
+        page.WaitForAssertion(() => Assert.True(PrivateBool(page.Instance, "_recoveryScanReady")));
+        showCandidate = true;
         fixture.Service.Roles.Remove(43);
 
-        await InvokeHandler(page, "OpenEquipmentRecoveryAsync", OrphanFixture);
+        await InvokeHandler(page, "RefreshAsync");
 
         Assert.Contains("Не удалось подтвердить сотрудника", page.Markup);
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.recoverListedDraft"]);
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
     }
 
-    /// <summary>Явное открытие устаревшей исходной версии сохраняет попытку без слияния.</summary>
+    /// <summary>Автоматическое восстановление не смешивает ввод при устаревшей исходной версии.</summary>
     [Fact]
     public async Task OrphanRecovery_StaleOriginalIsNotMerged()
     {
         var fixture = CreateFixture();
         await using var context = fixture.Context;
-        context.JSInterop.Setup<ClayDraftRecoveryCandidate[]>("clayDraftStore.listRecoveryCandidates", _ => true).SetResult([OrphanFixture]);
+        var showCandidate = false;
+        context.JSInterop.Setup<ClayDraftRecoveryCandidate[]>("clayDraftStore.listRecoveryCandidates", _ => showCandidate).SetResult([OrphanFixture]);
         var page = context.Render<EquipmentForm>();
-        page.WaitForAssertion(() => Assert.NotEmpty(page.FindAll("[data-testid=equipment-recovery]")));
+        page.WaitForAssertion(() => Assert.True(PrivateBool(page.Instance, "_recoveryScanReady")));
+        showCandidate = true;
         var input = OrphanState(page.Instance);
         input["OriginalSnapshot"] = "different-fixture-version";
         input["Model"]!["DocumentWriteOffId"] = 91;
         context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.recoverListedDraft", _ => true)
             .SetResult(OrphanRestore(input.ToJsonString()));
 
-        await InvokeHandler(page, "OpenEquipmentRecoveryAsync", OrphanFixture);
+        await InvokeHandler(page, "RefreshAsync");
 
         Assert.NotEqual(91, CurrentModel(page.Instance).DocumentWriteOffId);
         Assert.True(PrivateBool(page.Instance, "_draftOperationUnresolved"));
@@ -149,6 +198,6 @@ public sealed partial class EquipmentFormTests
         return JsonNode.Parse((string)capture.Invoke(form, null)!)!.AsObject();
     }
 
-    private static ClayDraftRestore OrphanRestore(string state) => new("test-registration", true, 42, state,
+    private static ClayDraftRestore OrphanRestore(string? state) => new("test-registration", true, 42, state,
         """{"version":1,"attemptId":"orphan-attempt","kind":"equipment-save","status":"unknown","revision":42,"data":"{}","scopes":[],"acceptLegacyTyped":true,"legacyTypedRevision":0}""");
 }

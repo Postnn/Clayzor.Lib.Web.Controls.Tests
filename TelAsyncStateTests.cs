@@ -1127,7 +1127,7 @@ public sealed class TelAsyncStateTests
         Assert.Empty(fixture.Context.JSInterop.Invocations["clayDraftStore.retryStorage"]);
     }
 
-    /// <summary>Другой сотрудник не может применить сохранённый ввод через кнопку восстановления.</summary>
+    /// <summary>Другой сотрудник не может применить сохранённый ввод при обновлении формы.</summary>
     [Fact]
     public async Task TelRawRetry_WhenActorChangedDoesNotApplyPending()
     {
@@ -1177,7 +1177,7 @@ public sealed class TelAsyncStateTests
         Assert.Empty(fixture.Context.JSInterop.Invocations["clayDraftStore.applyPendingRaw"]);
     }
 
-    /// <summary>Недоступная или ожидающая область блокирует Begin и показывает действие восстановления.</summary>
+    /// <summary>Недоступная или ожидающая область блокирует Begin и показывает сообщение о блокировке.</summary>
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -1396,6 +1396,7 @@ public sealed class TelAsyncStateTests
         var dialog = fixture.Invoke("EditEquipmentReturnAsync", Assert.Single(fixture.Get<PhoneRelationsSnapshot>("_relations").Equipment));
         var editor = fixture.WaitForChild<EquipmentPhoneDialog>();
         Assert.Equal("Child draft", editor.Instance.Notes);
+        Assert.DoesNotContain(editor.FindAll("button"), button => button.TextContent.Trim() == "Повторить восстановление ввода");
         Assert.True(editor.FindAll("button").Single(button => button.TextContent.Trim() == "OK").HasAttribute("disabled"));
         await fixture.RespondToChildAsync(editor, "Отмена");
         await dialog.WaitAsync(TimeSpan.FromSeconds(3));
@@ -1708,10 +1709,13 @@ public sealed class TelAsyncStateTests
         internal void SetupEmptyEditorRegistration() => ConfigureTelJournal(_context);
 
         internal void WaitForRawRetry() => _page.WaitForAssertion(() =>
-            Assert.Contains(_page.FindAll("button"), button => button.TextContent.Trim() == "Повторить восстановление ввода"));
+        {
+            Assert.True(Get<bool>("_telRawPending"));
+            Assert.DoesNotContain(_page.FindAll("button"), button => button.TextContent.Trim() == "Повторить восстановление ввода");
+        });
 
         internal Task ClickRawRetryAsync() => _page.InvokeAsync(() =>
-            _page.FindAll("button").Single(button => button.TextContent.Trim() == "Повторить восстановление ввода").ClickAsync());
+            _page.FindAll("button").Single(button => button.TextContent.Trim() == "Обновить").ClickAsync());
 
         internal void SetupEditorRestore(string json, bool hasRaw, bool rawPending, string? markerStatus = null)
         {
