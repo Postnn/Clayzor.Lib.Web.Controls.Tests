@@ -1,6 +1,7 @@
 using System.Data;
 using System.Data.Common;
 using System.Security.Claims;
+using System.Text.Json;
 using Bunit;
 using Clayzor.Lib.DALC;
 using Clayzor.Lib.Entities;
@@ -193,6 +194,100 @@ public sealed class PhonePoolAttributeTests
         Assert.Equal(original, connection.Row);
     }
 
+    /// <summary>Собственный черновик виден при исчезновении родителей или отказе свежего чтения.</summary>
+    [Theory]
+    [InlineData("pool")]
+    [InlineData("type")]
+    [InlineData("denied")]
+    public async Task InaccessibleParentShowsOwnDraftWithoutRestoringWriteAccess(string failure)
+    {
+        using var sql = new Probe { PoolExists = failure != "pool", TypeExists = failure != "type", DenyRead = failure == "denied" };
+        const string localValue = "Моё сохранённое значение";
+        var snapshot = RecoverySnapshot(localValue);
+        await using var context = CreateContext(sql, new ClayDraftRestore("recovery", true, 7, null, null,
+            new Dictionary<string, string> { ["main"] = snapshot }), hasPendingRaw: true);
+        var page = context.Render<PhonePoolAttributeForm>();
+
+        page.WaitForAssertion(() => Assert.Contains(localValue, page.Markup));
+        Assert.Contains(Key.PoolId.ToString(), page.Markup);
+        Assert.Contains(Key.Type, page.Markup);
+        Assert.Empty(page.FindAll("[data-draft-key='pool-attribute.value']"));
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.discard"]);
+        Assert.DoesNotContain("Тестовый пул", page.Markup);
+        Assert.True(Button(page, "Применить").HasAttribute("disabled"));
+        Assert.True(Button(page, "OK").HasAttribute("disabled"));
+        Assert.DoesNotContain(page.FindAll("button"), button => button.TextContent.Trim() == "Удалить");
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.saveTypedScope"]);
+        var registration = Assert.Single(context.JSInterop.Invocations["clayDraftStore.register"]);
+        Assert.Equal(new object[] { "phone-pool-attribute", Key.RouteId, "4" }, registration.Arguments.Take(3));
+        Assert.Empty(sql.Writes);
+    }
+
+    /// <summary>Сверка Unknown использует неизменный ключ из URL и сохраняет маркер.</summary>
+    [Fact]
+    public async Task UnresolvedOperationStaysBlockedWhenParentsReturn()
+    {
+        using var sql = new Probe { TypeExists = false };
+        var snapshot = RecoverySnapshot("Значение из попытки");
+        var operation = JsonSerializer.Serialize(new
+        {
+            version = 1, attemptId = "ppa-attempt", kind = "phone-pool-attribute.update", status = "unknown", revision = 8,
+            data = snapshot, scopes = Array.Empty<object>(), acceptLegacyTyped = false, legacyTypedRevision = 0,
+        });
+        await using var context = CreateContext(sql, new ClayDraftRestore("recovery", true, 8, null, operation,
+            new Dictionary<string, string> { ["main"] = snapshot }));
+        var page = context.Render<PhonePoolAttributeForm>();
+
+        page.WaitForAssertion(() => Assert.Contains("Обнаружена незавершённая операция", page.Markup));
+        Assert.True(Button(page, "Применить").HasAttribute("disabled"));
+        sql.TypeExists = true;
+        sql.Row = Value("Значение из попытки");
+        await Button(page, "Обновить").ClickAsync(new MouseEventArgs());
+
+        Assert.Contains("Данные в базе совпадают с отправленными", page.Markup);
+        Assert.Contains("ppa-attempt", page.Markup);
+        Assert.True(Button(page, "Применить").HasAttribute("disabled"));
+        Assert.Empty(sql.Writes);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.discard"]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
+    }
+
+    /// <summary>Восстановление доступа не заменяет исходный снимок актуальной версией без сверки.</summary>
+    [Fact]
+    public async Task ReturnOfAccessWithChangedRowPreservesLocalDraftAndBlocksWrite()
+    {
+        using var sql = new Probe { Row = Value("Новое значение в БД") };
+        await using var context = CreateContext(sql, new ClayDraftRestore("recovery", true, 7, null, null,
+            new Dictionary<string, string> { ["main"] = RecoverySnapshot("Моё сохранённое значение") }));
+        var page = context.Render<PhonePoolAttributeForm>();
+
+        page.WaitForAssertion(() => Assert.Contains("Карточка изменилась", page.Markup));
+        Assert.Contains("Моё сохранённое значение", page.Markup);
+        Assert.True(Button(page, "Применить").HasAttribute("disabled"));
+        Assert.Empty(sql.Writes);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.saveTypedScope"]);
+    }
+
+    /// <summary>Доступ к черновику требует валидной пары и доверенной идентичности.</summary>
+    [Theory]
+    [InlineData("invalid", true)]
+    [InlineData(null, false)]
+    public async Task InvalidKeyOrIdentityDoesNotRegisterDraft(string? id, bool authenticated)
+    {
+        using var sql = new Probe();
+        await using var context = CreateContext(sql, id: id, authenticated: authenticated);
+        var page = context.Render<PhonePoolAttributeForm>();
+        page.WaitForAssertion(() => Assert.Contains(authenticated ? "Не удалось установить идентификатор" : "Не удалось подтвердить текущего сотрудника", page.Markup));
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.register"]);
+        Assert.Empty(sql.Writes);
+    }
+
+    private static string RecoverySnapshot(string value) => JsonSerializer.Serialize(new
+    {
+        Original = new PhonePoolAttributeForm.FormState("Исходное значение"),
+        Current = new PhonePoolAttributeForm.FormState(value),
+    });
+
     private static AngleSharp.Dom.IElement Button(IRenderedComponent<PhonePoolAttributeForm> page, string name) =>
         page.FindAll("button").Single(button => button.TextContent.Trim() == name);
 
@@ -204,14 +299,17 @@ public sealed class PhonePoolAttributeTests
 
     private static PhonePoolAttributeValue Value(string value) => new(value, 4, new DateTime(2026, 11, 25, 10, 0, 0, DateTimeKind.Utc), "Инженер");
 
-    private static BunitContext CreateContext(Probe connection)
+    private static BunitContext CreateContext(Probe connection, ClayDraftRestore? restore = null, string? id = null,
+        bool hasPendingRaw = false, bool authenticated = true)
     {
         var context = new BunitContext();
         context.JSInterop.Mode = JSRuntimeMode.Loose;
         context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.register", _ => true)
-            .SetResult(new ClayDraftRestore("phone-pool-fixture", false, 0, null, null));
+            .SetResult(restore ?? new ClayDraftRestore("phone-pool-fixture", false, 0, null, null));
+        context.JSInterop.Setup<ClayDraftRawApplyResult>("clayDraftStore.applyRaw", _ => true)
+            .SetResult(new ClayDraftRawApplyResult([], hasPendingRaw ? ["data:pool-attribute.value"] : []));
         context.JSInterop.Setup<ClayDraftRestoreReadiness>("clayDraftStore.getRestoreReadiness", _ => true)
-            .SetResult(new ClayDraftRestoreReadiness(true, [], []));
+            .SetResult(new ClayDraftRestoreReadiness(!hasPendingRaw, hasPendingRaw ? ["main"] : [], []));
         context.JSInterop.Setup<ClayDraftStorageHealth>("clayDraftStore.getHealth", _ => true)
             .SetResult(new ClayDraftStorageHealth(true, 0, null, false, 0, 0));
         context.JSInterop.Setup<string>("clayDraftStore.beginOperationIntent", _ => true)
@@ -219,25 +317,27 @@ public sealed class PhonePoolAttributeTests
         context.Services.AddScoped(_ => Db(connection));
         context.Services.AddScoped<ClayDraftService>();
         context.Services.AddSingleton<IConfiguration>(new ConfigurationBuilder().Build());
-        context.Services.AddSingleton<AuthenticationStateProvider, FixtureAuthentication>();
+        context.Services.AddSingleton<AuthenticationStateProvider>(new FixtureAuthentication(authenticated));
         context.Services.AddMudServices();
         context.Services.AddMudExtensions();
         context.Render<MudPopoverProvider>();
         var navigation = context.Services.GetRequiredService<NavigationManager>();
-        navigation.NavigateTo("/Equipment/PhonePoolAtribute_form?id=" + Uri.EscapeDataString(Key.RouteId));
+        navigation.NavigateTo("/Equipment/PhonePoolAtribute_form?id=" + Uri.EscapeDataString(id ?? Key.RouteId));
         return context;
     }
 
-    private sealed class FixtureAuthentication : AuthenticationStateProvider
+    private sealed class FixtureAuthentication(bool authenticated) : AuthenticationStateProvider
     {
         public override Task<AuthenticationState> GetAuthenticationStateAsync() =>
-            Task.FromResult(new AuthenticationState(new ClaimsPrincipal(new ClaimsIdentity([new Claim(ClaimTypes.Name, "fixture")], "test"))));
+            Task.FromResult(new AuthenticationState(new ClaimsPrincipal(authenticated ? new ClaimsIdentity([new Claim(ClaimTypes.Name, "fixture")], "test") : new ClaimsIdentity())));
     }
 
     private sealed class Probe : DbConnection
     {
         public bool Allowed { get; set; } = true;
-        public bool TypeExists { get; init; } = true;
+        public bool PoolExists { get; init; } = true;
+        public bool TypeExists { get; set; } = true;
+        public bool DenyRead { get; init; }
         public bool LoseCommit { get; init; }
         public int Affected { get; init; } = 1;
         public int Commits { get; set; }
@@ -310,10 +410,11 @@ public sealed class PhonePoolAttributeTests
                 return Rows([("Affected", typeof(int))], [owner.Affected]).CreateDataReader();
             }
 
+            if (owner.DenyRead && DbTransaction is null) throw SqlExceptionFactory.Create(229, "Тестовый отказ SELECT");
             var row = DbTransaction is ProbeTransaction tx ? tx.Row : owner.Row;
             if (DbTransaction is not null) Assert.Contains("UPDLOCK", CommandText);
             return new DataTableReader([
-                Rows([("ПулТелефона", typeof(string))], ["Тестовый пул"]),
+                Rows([("ПулТелефона", typeof(string))], owner.PoolExists ? ["Тестовый пул"] : null),
                 Rows([("Type", typeof(string)), ("Description", typeof(string))], owner.TypeExists ? [Key.Type, "Описание"] : null),
                 Rows([("Value", typeof(string)), ("ChangedBy", typeof(int)), ("ChangedAt", typeof(DateTime)), ("ChangedByName", typeof(string))],
                     row is null ? null : [row.Value, row.ChangedBy, row.ChangedAt, row.ChangedByName]),

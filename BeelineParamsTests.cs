@@ -1,6 +1,7 @@
 using System.Data;
 using System.Data.Common;
 using System.Security.Claims;
+using System.Text.Json;
 using Bunit;
 using Clayzor.Lib.DALC;
 using Clayzor.Lib.Entities;
@@ -168,6 +169,117 @@ public sealed class BeelineParamsTests
         Assert.Equal(0, sql.Updates);
     }
 
+    /// <summary>Черновик двух параметров остаётся видимым при недоступном исходном договоре.</summary>
+    [Theory]
+    [InlineData("missing")]
+    [InlineData("sql229")]
+    [InlineData("policy")]
+    public async Task MissingOrDeniedContractShowsOnlyOwnedDraft(string failure)
+    {
+        using var sql = new Probe
+        {
+            Row = failure == "missing" ? null : Original,
+            CanRead = failure != "policy",
+            DenyRead = failure == "sql229",
+        };
+        var snapshot = RecoverySnapshot("local@example.test");
+        await using var context = Configure(sql, restore: new ClayDraftRestore("beeline-recovery", true, 4, null, null,
+            new Dictionary<string, string> { ["main"] = snapshot }), pendingRaw: true);
+        var card = context.Render<BeelineParamsForm>();
+
+        card.WaitForAssertion(() => Assert.Contains("local@example.test", card.Markup));
+        Assert.Contains(Number, card.Markup);
+        Assert.Contains(Zones[1], card.Markup);
+        Assert.DoesNotContain("Тестовая компания", card.Markup);
+        Assert.Empty(card.FindAll("[data-draft-key='beeline.email']"));
+        Assert.True(Button(card, "Сохранить").HasAttribute("disabled"));
+        Assert.True(Button(card, "OK").HasAttribute("disabled"));
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.discard"]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.saveTypedScope"]);
+        Assert.Equal(new object[] { "beeline-parameters", Number, "4" },
+            Assert.Single(context.JSInterop.Invocations["clayDraftStore.register"]).Arguments.Take(3));
+        Assert.Equal(0, sql.Updates);
+    }
+
+    /// <summary>Совпадение возвращённого договора с попыткой допускает только сверку.</summary>
+    [Fact]
+    public async Task UnknownIsPreservedWhenContractReturns()
+    {
+        using var sql = new Probe { Row = null };
+        var snapshot = RecoverySnapshot("attempt@example.test");
+        var operation = JsonSerializer.Serialize(new
+        {
+            version = 1, attemptId = "beeline-attempt", kind = "beeline.update", status = "unknown", revision = 7,
+            data = snapshot, scopes = Array.Empty<object>(), acceptLegacyTyped = false, legacyTypedRevision = 0,
+        });
+        await using var context = Configure(sql, restore: new ClayDraftRestore("beeline-recovery", true, 7, null, operation,
+            new Dictionary<string, string> { ["main"] = snapshot }));
+        var card = context.Render<BeelineParamsForm>();
+        card.WaitForAssertion(() => Assert.Contains("Обнаружена незавершённая операция", card.Markup));
+
+        sql.Row = Original with { TimeZone = Zones[1], EmailManager = "attempt@example.test" };
+        await Button(card, "Обновить").ClickAsync(new MouseEventArgs());
+
+        Assert.Contains("Данные в базе совпадают с отправленными", card.Markup);
+        Assert.Contains("beeline-attempt", card.Markup);
+        Assert.True(Button(card, "Сохранить").HasAttribute("disabled"));
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.discard"]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
+        Assert.Equal(0, sql.Updates);
+    }
+
+    /// <summary>Сохранённый снимок недоступен по невалидному номеру или без сотрудника.</summary>
+    [Theory]
+    [InlineData(" ", true)]
+    [InlineData(Number, false)]
+    public async Task InvalidNumberOrIdentityDoesNotOpenDraft(string id, bool authenticated)
+    {
+        using var sql = new Probe();
+        await using var context = Configure(sql, id: id, authenticated: authenticated);
+        var card = context.Render<BeelineParamsForm>();
+        card.WaitForAssertion(() => Assert.Contains(authenticated ? "Некорректный номер договора" : "Не удалось подтвердить текущего сотрудника", card.Markup));
+
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.register"]);
+        Assert.Equal(0, sql.Updates);
+    }
+
+    /// <summary>Ошибки подготовки завершают конкретный marker, отправленный UPDATE при потере ответа остаётся Unknown.</summary>
+    [Theory]
+    [InlineData("open", false)]
+    [InlineData("begin", false)]
+    [InlineData("access", false)]
+    [InlineData("locked", false)]
+    [InlineData("dispatch", true)]
+    [InlineData("commit", true)]
+    public async Task SaveClassifiesFailureByDispatchBoundary(string fault, bool unknown)
+    {
+        using var sql = new Probe { LoseCommit = fault == "commit" };
+        await using var context = Configure(sql);
+        var card = context.Render<BeelineParamsForm>();
+        card.WaitForAssertion(() => Assert.Contains("initial@example.test", card.Markup));
+        await card.FindAll("input").Last().InputAsync(new ChangeEventArgs { Value = "edited@example.test" });
+        sql.FaultAfterLoad = fault;
+        await Button(card, "Сохранить").ClickAsync(new MouseEventArgs());
+
+        Assert.Contains(unknown ? "Исход операции требует сверки" : "Запись не начата", card.Markup);
+        Assert.Contains("edited@example.test", card.Markup);
+        Assert.Equal(unknown ? 1 : 0, sql.Updates);
+        Assert.Equal(unknown, Button(card, "Сохранить").HasAttribute("disabled"));
+        Assert.Single(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
+        var marker = unknown ? "clayDraftStore.unknownOperation" : "clayDraftStore.rejectOperation";
+        var other = unknown ? "clayDraftStore.rejectOperation" : "clayDraftStore.unknownOperation";
+        Assert.Equal(2L, Assert.Single(context.JSInterop.Invocations[marker]).Arguments[1]);
+        Assert.Empty(context.JSInterop.Invocations[other]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.discard"]);
+    }
+
+    private static string RecoverySnapshot(string email) => JsonSerializer.Serialize(new
+    {
+        Original = new BeelineDraft(Original.TimeZone, Original.EmailManager),
+        Current = new BeelineDraft(Zones[1], email),
+    });
+
     private static AngleSharp.Dom.IElement Button(IRenderedComponent<BeelineParamsForm> card, string label) =>
         card.FindAll("button").Single(button => button.TextContent.Trim() == label);
 
@@ -177,14 +289,17 @@ public sealed class BeelineParamsTests
         return new DbManager("Server=fixture", new FakeSqlErrorHandler(), () => connection);
     }
 
-    private static BunitContext Configure(Probe sql, bool includeZones = true)
+    private static BunitContext Configure(Probe sql, bool includeZones = true, ClayDraftRestore? restore = null,
+        bool pendingRaw = false, string id = Number, bool authenticated = true)
     {
         var context = new BunitContext();
         context.JSInterop.Mode = JSRuntimeMode.Loose;
         context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.register", _ => true)
-            .SetResult(new ClayDraftRestore("beeline-fixture", false, 0, null, null));
+            .SetResult(restore ?? new ClayDraftRestore("beeline-fixture", false, 0, null, null));
+        context.JSInterop.Setup<ClayDraftRawApplyResult>("clayDraftStore.applyRaw", _ => true)
+            .SetResult(new ClayDraftRawApplyResult([], pendingRaw ? ["data:beeline.email"] : []));
         context.JSInterop.Setup<ClayDraftRestoreReadiness>("clayDraftStore.getRestoreReadiness", _ => true)
-            .SetResult(new ClayDraftRestoreReadiness(true, [], []));
+            .SetResult(new ClayDraftRestoreReadiness(!pendingRaw, pendingRaw ? ["main"] : [], []));
         context.JSInterop.Setup<ClayDraftStorageHealth>("clayDraftStore.getHealth", _ => true)
             .SetResult(new ClayDraftStorageHealth(true, 0, null, false, 0, 0));
         context.JSInterop.Setup<string>("clayDraftStore.beginOperationIntent", _ => true)
@@ -197,18 +312,18 @@ public sealed class BeelineParamsTests
             settings.AddInMemoryCollection(Zones.Select((zone, index) =>
                 new KeyValuePair<string, string?>($"BeelineTimeZones:{index}", zone)));
         context.Services.AddSingleton<IConfiguration>(settings.Build());
-        context.Services.AddSingleton<AuthenticationStateProvider, FixtureAuthentication>();
+        context.Services.AddSingleton<AuthenticationStateProvider>(new FixtureAuthentication(authenticated));
         context.Services.AddMudServices();
         context.Services.AddMudExtensions();
         context.Render<MudPopoverProvider>();
-        context.Services.GetRequiredService<NavigationManager>().NavigateTo("/Telefon/BeelineParams?id=" + Number);
+        context.Services.GetRequiredService<NavigationManager>().NavigateTo("/Telefon/BeelineParams?id=" + Uri.EscapeDataString(id));
         return context;
     }
 
-    private sealed class FixtureAuthentication : AuthenticationStateProvider
+    private sealed class FixtureAuthentication(bool authenticated) : AuthenticationStateProvider
     {
         public override Task<AuthenticationState> GetAuthenticationStateAsync() =>
-            Task.FromResult(new AuthenticationState(new ClaimsPrincipal(new ClaimsIdentity([new Claim(ClaimTypes.Name, "fixture")], "test"))));
+            Task.FromResult(new AuthenticationState(new ClaimsPrincipal(authenticated ? new ClaimsIdentity([new Claim(ClaimTypes.Name, "fixture")], "test") : new ClaimsIdentity())));
     }
 
     private sealed class Probe : DbConnection
@@ -218,6 +333,9 @@ public sealed class BeelineParamsTests
         public int Affected { get; init; } = 1;
         public bool OverrideParameters { get; init; }
         public bool LoseCommit { get; init; }
+        public bool CanRead { get; init; } = true;
+        public bool DenyRead { get; init; }
+        public string? FaultAfterLoad { get; set; }
         public int Commits { get; set; }
         public int Updates { get; set; }
         public BeelineContract? Row { get; set; } = Original;
@@ -225,13 +343,17 @@ public sealed class BeelineParamsTests
         public override string Database => "fixture";
         public override string DataSource => "fixture";
         public override string ServerVersion => "1";
-        public override ConnectionState State => ConnectionState.Open;
-        public override void Open() { }
+        public override ConnectionState State => FaultAfterLoad == "open" ? ConnectionState.Closed : ConnectionState.Open;
+        public override void Open()
+        {
+            if (FaultAfterLoad == "open") throw new TimeoutException("Тестовый сбой открытия соединения");
+        }
         public override void Close() { }
         public override void ChangeDatabase(string databaseName) => throw new NotSupportedException();
         protected override DbTransaction BeginDbTransaction(IsolationLevel level)
         {
             Assert.Equal(IsolationLevel.Serializable, level);
+            if (FaultAfterLoad == "begin") throw new TimeoutException("Тестовый сбой начала транзакции");
             return new ProbeTransaction(this);
         }
         protected override DbCommand CreateDbCommand() => new Command(this);
@@ -274,8 +396,12 @@ public sealed class BeelineParamsTests
             if (CommandText.Contains("fn_ТекущиеРоли"))
                 return Rows([("RoleId", typeof(int)), ("PersonId", typeof(int))], [(int)owner.Role, owner.PersonScope]).CreateDataReader();
             if (CommandText.Contains("HAS_PERMS_BY_NAME"))
+            {
+                if (DbTransaction is not null && owner.FaultAfterLoad == "access")
+                    throw SqlExceptionFactory.Create(-2, "Тестовый таймаут проверки разрешений");
                 return Rows([("CanRead", typeof(bool)), ("CanUpdate", typeof(bool)), ("NamedWriter", typeof(bool))],
-                    [true, true, false]).CreateDataReader();
+                    [owner.CanRead, true, false]).CreateDataReader();
+            }
 
             var id = Parameter("id");
             Assert.Equal(Number, id.Value);
@@ -286,14 +412,22 @@ public sealed class BeelineParamsTests
                 var tx = Assert.IsType<ProbeTransaction>(DbTransaction);
                 Assert.Equal(new[] { "email", "id", "timeZone" }, Parameters.Cast<DbParameter>().Select(p => p.ParameterName).Order().ToArray());
                 owner.Updates++;
+                if (owner.FaultAfterLoad == "dispatch")
+                    throw SqlExceptionFactory.Create(-2, "Тестовая потеря ответа UPDATE");
                 if (owner.Affected > 0 && !owner.OverrideParameters)
                     tx.Row = tx.Row! with { TimeZone = (string)Parameter("timeZone").Value!,
                         EmailManager = (string)Parameter("email").Value!, ChangedAt = tx.Row!.ChangedAt.AddSeconds(1) };
                 return Rows([("Affected", typeof(int))], [owner.Affected]).CreateDataReader();
             }
 
+            if (owner.DenyRead && DbTransaction is null) throw SqlExceptionFactory.Create(229, "Тестовый отказ SELECT");
             Assert.Equal((int)Лица.Билайн, Parameter("beeline").Value);
-            if (DbTransaction is not null) Assert.Contains("UPDLOCK", CommandText);
+            if (DbTransaction is not null)
+            {
+                Assert.Contains("UPDLOCK", CommandText);
+                if (owner.FaultAfterLoad == "locked")
+                    throw SqlExceptionFactory.Create(-2, "Тестовый таймаут чтения под блокировкой");
+            }
             var row = DbTransaction is ProbeTransaction transaction ? transaction.Row : owner.Row;
             return Rows([
                 ("Number", typeof(string)), ("BaseNumber", typeof(string)), ("BudgetNumber", typeof(string)),
