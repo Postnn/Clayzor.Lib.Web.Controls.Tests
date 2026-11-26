@@ -8,6 +8,7 @@ using Clayzor.Lib.Entities.Inventory;
 using Clayzor.Lib.Entities.MedicalTests;
 using Clayzor.Lib.Web.Controls.Components;
 using Clayzor.Lib.Web.Controls.Components.Form;
+using Clayzor.Lib.Web.Controls.Components.Select;
 using Clayzor.Lib.Web.Controls.Services;
 using Clayzor.Lib.Web.DBSelect.Employees;
 using Clayzor.Lib.Web.DBSelect.Locations;
@@ -163,6 +164,83 @@ public sealed class LocationFactRecoveryTests
         Assert.Equal(0, db.Inserts);
     }
 
+    /// <summary>Контекст рабочего места переживает отмену. Временный null и явная очистка различаются.</summary>
+    [Fact]
+    public async Task WorkplaceContextSurvivesCancelAndChangesOnlyOnExplicitClear()
+    {
+        using var db = new FactConnection();
+        var workplace = JsonSerializer.Serialize(new { SiteId = 10, ResponsibleId = 4, ItOnly = true, Scanner = true });
+        await using var context = Configure(db, workplaceJson: workplace);
+        var dialogs = context.Render<MudDialogProvider>();
+        var page = context.Render<LocationFact>();
+        WaitForButton(page, dialogs, "Подтвердить");
+
+        Assert.True(page.FindComponents<ClayCheckbox>().Single(c => c.Instance.Label == "IT-оборудование").Instance.State);
+        Assert.True(page.FindComponents<ClayCheckbox>().Single(c => c.Instance.Label == "Режим ввода - сканер").Instance.State);
+        Assert.Equal(4, db.ResponsibleOnLastList);
+        await WaitForButton(page, dialogs, "Отмена").ClickAsync(new MouseEventArgs());
+        var discard = Assert.Single(context.JSInterop.Invocations["clayDraftStore.discardScope"]);
+        Assert.Equal("main", discard.Arguments[1]);
+
+        var location = page.FindComponent<ClaySelect<LocationLookup, int?>>();
+        await page.InvokeAsync(() => location.Instance.ValueChanged.InvokeAsync((int?)null));
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.saveTypedScope"].Where(call => Equals(call.Arguments[1], "workplace")));
+        Assert.False(WaitForButton(page, dialogs, "Тестовое устройство").HasAttribute("disabled"));
+
+        await page.InvokeAsync(() => location.Instance.Cleared.InvokeAsync());
+        var saved = Assert.Single(context.JSInterop.Invocations["clayDraftStore.saveTypedScope"],
+            call => Equals(call.Arguments[1], "workplace"));
+        using var snapshot = JsonDocument.Parse((string)saved.Arguments[2]!);
+        Assert.Equal(JsonValueKind.Null, snapshot.RootElement.GetProperty("SiteId").ValueKind);
+        Assert.Equal(JsonValueKind.Null, snapshot.RootElement.GetProperty("ResponsibleId").ValueKind);
+        Assert.True(snapshot.RootElement.GetProperty("ItOnly").GetBoolean());
+        Assert.True(snapshot.RootElement.GetProperty("Scanner").GetBoolean());
+        Assert.Equal(0, db.Inserts);
+    }
+
+    /// <summary>Сырой поиск без FactDraft ожидает доступного поля и восстанавливается без открытия подтверждения.</summary>
+    [Fact]
+    public async Task RawOnlyWorkplaceWaitsForSearchFieldWithoutDispatch()
+    {
+        using var db = new FactConnection();
+        var searchReady = false;
+        await using var context = Configure(db, includeEditor: false, searchReady: () => searchReady);
+        var page = context.Render<LocationFact>();
+        page.WaitForAssertion(() => Assert.Single(context.JSInterop.Invocations["clayDraftStore.applyRaw"],
+            call => Equals(call.Arguments[1], "workplace")));
+        Assert.Contains("Повторить восстановление поиска", page.Markup);
+
+        searchReady = true;
+        var location = page.FindComponent<ClaySelect<LocationLookup, int?>>();
+        await page.InvokeAsync(() => location.Instance.ValueChanged.InvokeAsync((int?)10));
+        page.WaitForAssertion(() => Assert.Equal(2, context.JSInterop.Invocations["clayDraftStore.applyRaw"].Count(
+            call => Equals(call.Arguments[1], "workplace"))));
+        Assert.DoesNotContain("Повторить восстановление поиска", page.Markup);
+
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.openScope"]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.discardScope"]);
+        Assert.Equal(0, db.Inserts);
+    }
+
+    /// <summary>Старый raw без снимка оборудования сохраняется, а новый факт блокируется до миграции.</summary>
+    [Fact]
+    public async Task LegacyOrphanRawRemainsProtected()
+    {
+        using var db = new FactConnection();
+        await using var context = Configure(db, includeEditor: false, legacyRaw: true);
+        var page = context.Render<LocationFact>();
+        page.WaitForAssertion(() => Assert.Contains("Черновик прежней версии", page.Markup));
+
+        var location = page.FindComponent<ClaySelect<LocationLookup, int?>>();
+        await page.InvokeAsync(() => location.Instance.ValueChanged.InvokeAsync((int?)10));
+        Assert.Contains("Черновик прежней версии", page.Markup);
+        Assert.DoesNotContain(page.FindAll("button"), button => button.TextContent.Trim() == "Тестовое устройство");
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.discardScope"]);
+        Assert.Equal(0, db.Inserts);
+    }
+
     private static ClayCheckbox BrokenControl(IRenderedComponent<LocationFact> page, IRenderedComponent<MudDialogProvider> dialogs) =>
         page.FindComponents<ClayCheckbox>().Concat(dialogs.FindComponents<ClayCheckbox>())
             .First(component => component.Instance.Label == "Сломано, ремонту не подлежит").Instance;
@@ -180,17 +258,26 @@ public sealed class LocationFactRecoveryTests
         return Matching().First();
     }
 
-    private static BunitContext Configure(FactConnection connection, bool failBegin = false)
+    private static BunitContext Configure(FactConnection connection, bool failBegin = false,
+        bool includeEditor = true, string? workplaceJson = null, Func<bool>? searchReady = null, bool legacyRaw = false)
     {
         var context = new BunitContext();
         context.JSInterop.Mode = JSRuntimeMode.Loose;
         var restored = JsonSerializer.Serialize(new { Snapshot, Notes, Broken = true, Scanner = false, Conflict = false });
+        var scopes = new Dictionary<string, string>();
+        if (includeEditor) scopes["main"] = restored;
+        if (workplaceJson is not null) scopes["workplace"] = workplaceJson;
         context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.register", _ => true)
-            .SetResult(new ClayDraftRestore("fact-test", true, 5, null, null, new Dictionary<string, string> { ["main"] = restored }));
-        context.JSInterop.Setup<ClayDraftRawApplyResult>("clayDraftStore.applyRaw", _ => true)
+            .SetResult(new ClayDraftRestore("fact-test", true, 5, null, null, scopes));
+        bool SearchPending() => searchReady?.Invoke() == false;
+        context.JSInterop.Setup<ClayDraftRawApplyResult>("clayDraftStore.applyRaw", call => SearchPending() && Equals(call.Arguments[1], "workplace"))
+            .SetResult(new ClayDraftRawApplyResult([], ["data:fact.search"]));
+        context.JSInterop.Setup<ClayDraftRawApplyResult>("clayDraftStore.applyRaw", call => !SearchPending() || !Equals(call.Arguments[1], "workplace"))
             .SetResult(new ClayDraftRawApplyResult([], []));
-        context.JSInterop.Setup<ClayDraftRestoreReadiness>("clayDraftStore.getRestoreReadiness", _ => true)
-            .SetResult(new ClayDraftRestoreReadiness(true, [], []));
+        context.JSInterop.Setup<ClayDraftRestoreReadiness>("clayDraftStore.getRestoreReadiness", _ => SearchPending())
+            .SetResult(new ClayDraftRestoreReadiness(false, ["workplace"], []));
+        context.JSInterop.Setup<ClayDraftRestoreReadiness>("clayDraftStore.getRestoreReadiness", _ => !SearchPending())
+            .SetResult(new ClayDraftRestoreReadiness(!legacyRaw, legacyRaw ? ["main"] : [], []));
         context.JSInterop.Setup<ClayDraftStorageHealth>("clayDraftStore.getHealth", _ => true)
             .SetResult(new ClayDraftStorageHealth(true, 0, null, false, 5, 5));
         var begin = context.JSInterop.Setup<string>("clayDraftStore.beginOperationIntent", _ => true);
@@ -225,6 +312,7 @@ public sealed class LocationFactRecoveryTests
         internal int Commits { get; private set; }
         internal string? SentNotes { get; private set; }
         internal int SentBroken { get; private set; }
+        internal int? ResponsibleOnLastList { get; private set; }
         public override string ConnectionString { get; set; } = "";
         public override string Database => "fixture";
         public override string DataSource => "fixture";
@@ -278,8 +366,13 @@ public sealed class LocationFactRecoveryTests
                     return Row(("Count", 1));
                 }
                 if (CommandText.Contains("WITH Booked AS"))
+                {
+                    owner.ResponsibleOnLastList = Param("ResponsibleId") is int responsible ? responsible : null;
                     return Row(("Id", 17), ("Name", Snapshot.Equipment.FactName), ("CheckedAt", (DateTime?)null),
                         ("LocationId", 10), ("LocationName", Snapshot.Site.Name), ("Broken", false), ("Notes", ""));
+                }
+                if (CommandText.Contains("КодСотрудника") && CommandText.Contains("@Id"))
+                    return Row(("КодСотрудника", 4), ("Сотрудник", "Проверяющий"));
                 if (CommandText.Contains("AS BookedLocationName"))
                     return Row(("EquipmentId", 17), ("OwnerId", 4), ("OwnerName", Snapshot.Equipment.OwnerName),
                         ("FactName", Snapshot.Equipment.FactName), ("InventoryNumber", ""), ("BookedLocationId", 10),
