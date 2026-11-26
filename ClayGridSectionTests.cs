@@ -78,6 +78,30 @@ public sealed class ClayGridSectionTests
         Assert.Single(cut.FindAll(".filter-tray"));
     }
 
+    /// <summary>Container-height скрывает фильтр без резервирования места и не меняет высоту грида.</summary>
+    [Fact]
+    public async Task FillHeight_FilterToggleDoesNotChangeGridHeight()
+    {
+        await using var ctx = CreateContext();
+        var options = Options();
+        options.ShowToolbar = true;
+        options.FilterTrayExpandedByDefault = true;
+        options.FillAvailableHeight = true;
+        var cut = ctx.Render<ClayGrid<string>>(parameters => parameters
+            .Add(component => component.Items, ["101"])
+            .Add(component => component.Options, options)
+            .Add(component => component.ColumnDefs, ColumnDefs())
+            .Add(component => component.Columns, Columns()));
+        var gridStyle = cut.Find(".mud-data-grid").GetAttribute("style");
+
+        cut.Find(".filter-toggle-btn").Click();
+        Assert.Empty(cut.FindAll(".filter-tray"));
+        Assert.Equal(gridStyle, cut.Find(".mud-data-grid").GetAttribute("style"));
+        cut.Find(".filter-toggle-btn").Click();
+        Assert.Single(cut.FindAll(".filter-tray"));
+        Assert.Equal(gridStyle, cut.Find(".mud-data-grid").GetAttribute("style"));
+    }
+
     /// <summary>Container-height включает отдельный класс, а hidetitle скрывает только текст заголовка.</summary>
     [Fact]
     public async Task SectionGrid_FillHeightAndHiddenTitlePreserveToolbar()

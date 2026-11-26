@@ -149,7 +149,7 @@ public sealed class ClayFormControlsTests
             .Add(component => component.ChildContent, "<div id='body'>Поля</div>")
             .Add(component => component.Footer, "<div id='footer'>Изменения</div>"));
 
-        Assert.NotNull(cut.Find(".clay-entity-form > #toolbar"));
+        Assert.NotNull(cut.Find(".clay-entity-form > .clay-entity-form-toolbar > #toolbar"));
         Assert.NotNull(cut.Find(".clay-entity-form-content > #body"));
         Assert.NotNull(cut.Find(".clay-entity-form-layout > .clay-entity-form-footer > #footer"));
         Assert.DoesNotContain("toolbar", cut.Find(".clay-entity-form-content").InnerHtml);
