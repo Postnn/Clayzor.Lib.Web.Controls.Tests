@@ -125,20 +125,35 @@ public sealed class EquipmentInsTests
         page.WaitForAssertion(() => Assert.Single(page.FindAll("textarea")), TimeSpan.FromSeconds(3));
         Assert.All(page.FindAll(".clay-select-input"), input =>
             Assert.False(string.IsNullOrWhiteSpace(input.GetAttribute("placeholder"))));
-        page.Find("textarea").Input("CLAY_TEST_Description");
 
-        await InvokeSave(page, true);
+        await FindButton(page, "OK").ClickAsync();
 
         page.WaitForAssertion(() => Assert.Equal(1, fixture.Service.CreateCalls), TimeSpan.FromSeconds(3));
         Assert.Equal(103, fixture.Service.Created!.EquipmentTypeId);
         Assert.Equal(945, fixture.Service.Created.ModelId);
         Assert.Equal(1, fixture.Service.Created.OwnerId);
         Assert.Equal(1, fixture.Service.Created.LocationId);
-        Assert.Equal("CLAY_TEST_Description", fixture.Service.Created.Description);
+        Assert.Equal("Copy7", fixture.Service.Created.Description);
         Assert.Equal(DateTimeKind.Utc, fixture.Service.Created.ReceivedAtUtc.Kind);
         Assert.Contains(context.JSInterop.Invocations,
             call => call.Identifier == "clayGridTimeZone.localDateTimeToUtcMilliseconds");
         Assert.Contains(context.JSInterop.Invocations, call => call.Identifier == "clayModelEquipmentForm.refreshOpener");
+        Assert.Contains(context.JSInterop.Invocations, call => call.Identifier == "clayModelEquipmentForm.close");
+    }
+
+    /// <summary>Незаполненная форма без источника копирования закрывается без попытки записи.</summary>
+    [Fact]
+    public async Task UntouchedNewForm_ClosesWithoutCreatingEquipment()
+    {
+        var fixture = CreateFixture("http://localhost/Equipment/EquipmentIns");
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentIns>();
+        page.WaitForAssertion(() => Assert.Single(page.FindAll("textarea")), TimeSpan.FromSeconds(3));
+
+        Assert.True(FindButton(page, "Применить").HasAttribute("disabled"));
+        await FindButton(page, "OK").ClickAsync();
+
+        Assert.Equal(0, fixture.Service.CreateCalls);
         Assert.Contains(context.JSInterop.Invocations, call => call.Identifier == "clayModelEquipmentForm.close");
     }
 
@@ -185,8 +200,8 @@ public sealed class EquipmentInsTests
         await using var context = fixture.Context;
         var page = context.Render<EquipmentIns>();
         page.WaitForAssertion(() => Assert.Single(page.FindAll("textarea")), TimeSpan.FromSeconds(3));
-        page.Find("textarea").Input("Changed");
-        await InvokeSave(page, false);
+        Assert.False(FindButton(page, "Применить").HasAttribute("disabled"));
+        await FindButton(page, "Применить").ClickAsync();
         Assert.Equal(1, fixture.Service.CreateCalls);
         Assert.EndsWith("/Equipment/EquipmentForm?id=123", fixture.Navigation.Uri);
         await InvokeSave(page, true);

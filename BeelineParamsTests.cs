@@ -191,13 +191,49 @@ public sealed class BeelineParamsTests
         Assert.Contains(Number, card.Markup);
         Assert.Contains(Zones[1], card.Markup);
         Assert.DoesNotContain("Тестовая компания", card.Markup);
-        Assert.Empty(card.FindAll("[data-draft-key='beeline.email']"));
+        var email = card.Find("section[data-draft-scope=main] input[data-draft-key='beeline.email']");
+        Assert.True(email.HasAttribute("readonly"));
+        Assert.False(email.HasAttribute("disabled"));
+        Assert.Equal("local@example.test", email.GetAttribute("value"));
+        Assert.Contains(context.JSInterop.Invocations["clayDraftStore.applyRaw"], call => Equals(call.Arguments[1], "main"));
+        Assert.True(card.Find("section[data-draft-scope=main] input[data-draft-key='beeline.zone']").HasAttribute("readonly"));
         Assert.True(Button(card, "Сохранить").HasAttribute("disabled"));
         Assert.True(Button(card, "OK").HasAttribute("disabled"));
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.discard"]);
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.saveTypedScope"]);
         Assert.Equal(new object[] { "beeline-parameters", Number, "4" },
             Assert.Single(context.JSInterop.Invocations["clayDraftStore.register"]).Arguments.Take(3));
+        Assert.Equal(0, sql.Updates);
+    }
+
+    /// <summary>Повторное чтение в открытой карточке показывает свежую версию рядом с собственным черновиком.</summary>
+    [Fact]
+    public async Task MissingContractCanBeRetriedWithoutReplacingOwnDraft()
+    {
+        using var sql = new Probe { Row = null };
+        await using var context = Configure(sql, restore: new ClayDraftRestore("beeline-recovery", true, 4, null, null,
+            new Dictionary<string, string> { ["main"] = RecoverySnapshot("local@example.test") }));
+        var card = context.Render<BeelineParamsForm>();
+        card.WaitForAssertion(() => Assert.Contains("local@example.test", card.Markup));
+
+        await Button(card, "Повторить чтение договора").ClickAsync(new MouseEventArgs());
+        Assert.Contains("Договор Билайн не найден или недоступен", card.Markup);
+
+        sql.Row = Original with { EmailManager = "fresh@example.test" };
+        Assert.False(Button(card, "Обновить").HasAttribute("disabled"));
+        await Button(card, "Обновить").ClickAsync(new MouseEventArgs());
+
+        Assert.Contains("fresh@example.test", card.Markup);
+        sql.CanRead = false;
+        await Button(card, "Повторить чтение договора").ClickAsync(new MouseEventArgs());
+        Assert.DoesNotContain("fresh@example.test", card.Markup);
+        Assert.Contains("Нет доступа к параметрам договора Билайн", card.Markup);
+        Assert.Contains("local@example.test", card.Markup);
+        Assert.True(card.Find("input[data-draft-key='beeline.email']").HasAttribute("readonly"));
+        Assert.True(Button(card, "Сохранить").HasAttribute("disabled"));
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.discard"]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.saveTypedScope"]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
         Assert.Equal(0, sql.Updates);
     }
 
@@ -333,7 +369,7 @@ public sealed class BeelineParamsTests
         public int Affected { get; init; } = 1;
         public bool OverrideParameters { get; init; }
         public bool LoseCommit { get; init; }
-        public bool CanRead { get; init; } = true;
+        public bool CanRead { get; set; } = true;
         public bool DenyRead { get; init; }
         public string? FaultAfterLoad { get; set; }
         public int Commits { get; set; }
