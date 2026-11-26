@@ -8,6 +8,8 @@ using Clayzor.Lib.Entities;
 using Clayzor.Lib.Entities.Inventory;
 using Clayzor.Lib.Entities.MedicalTests;
 using Clayzor.Lib.Web.Controls.Components;
+using Clayzor.Lib.Web.Controls.Components.Filter;
+using Clayzor.Lib.Web.Controls.Components.Grid;
 using Clayzor.Lib.Web.Controls.Services;
 using Kesco.App.Web.Inventory.Components;
 using Kesco.App.Web.Inventory.Components.Pages.Maintenance;
@@ -213,6 +215,178 @@ public sealed class MaintenanceTests
     private static AngleSharp.Dom.IElement RecoveryButton(IRenderedComponent<MaintenancePage> page, string text) =>
         page.FindAll("button").Single(button => button.TextContent.Trim() == text);
 
+    /// <summary>Выдача и черновик используют последний запрос, даже если предыдущий ещё читает SQL.</summary>
+    [Theory]
+    [InlineData("B")]
+    [InlineData(null)]
+    public async Task LatestFilterOrClearWinsWhileReading(string? last)
+    {
+        await using var context = CreateContext(out var connection);
+        var page = context.Render<MaintenancePage>();
+        page.WaitForAssertion(() => Assert.False(Action(page).Instance.Disabled));
+        var gate = connection.DeferredListRead = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        var first = ChangeFilterAsync(page, QueryFor("A"));
+        try
+        {
+            await connection.DeferredListStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await ChangeFilterAsync(page, QueryFor("obsolete"));
+            var accepted = QueryFor(last);
+            await ChangeFilterAsync(page, accepted);
+            accepted.CompositeFilter?.Nodes.Clear();
+        }
+        finally { gate.TrySetResult(); }
+        await first;
+
+        Assert.Equal(new string?[] { null, "A", last }, connection.ListFilters);
+        AssertSavedFilter(context, last);
+        Assert.Contains(last is null ? "Работа &lt;test&gt;" : $"Фильтр {last}", page.Markup);
+        Assert.DoesNotContain("Фильтр A", page.Markup);
+    }
+
+    /// <summary>Фильтр, принятый во время INSERT, применяется после завершения записи.</summary>
+    [Fact]
+    public async Task FilterSelectedDuringConfirmationIsAppliedAfterWrite()
+    {
+        await using var context = CreateContext(out var connection);
+        var provider = context.Render<MudDialogProvider>();
+        var page = context.Render<MaintenancePage>();
+        var click = ClickConfirmation(page);
+        var gate = connection.InsertGate = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        var yes = WaitForYes(provider).ClickAsync(new MouseEventArgs());
+        try
+        {
+            await connection.InsertStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await ChangeFilterAsync(page, QueryFor("during"));
+        }
+        finally { gate.TrySetResult(); }
+        await Task.WhenAll(click, yes);
+
+        Assert.Equal(1, connection.InsertCount);
+        Assert.Equal("during", connection.ListFilters.Last());
+        AssertSavedFilter(context, "during");
+        Assert.Contains("Фильтр during", page.Markup);
+    }
+
+    /// <summary>Освобождение формы отменяет текущий запрос и отбрасывает ожидающий фильтр.</summary>
+    [Fact]
+    public async Task DisposalDoesNotPublishOrPersistQueuedFilter()
+    {
+        await using var context = CreateContext(out var connection);
+        var page = context.Render<MaintenancePage>();
+        page.WaitForAssertion(() => Assert.False(Action(page).Instance.Disabled));
+        var gate = connection.DeferredListRead = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        var first = ChangeFilterAsync(page, QueryFor("A"));
+        try
+        {
+            await connection.DeferredListStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await ChangeFilterAsync(page, QueryFor("B"));
+            await context.DisposeComponentsAsync();
+        }
+        finally { gate.TrySetResult(); }
+        await first;
+
+        Assert.Equal(new string?[] { null }, connection.ListFilters);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.saveTypedScope"]);
+    }
+
+    private static ClayDataQuery QueryFor(string? value) => new()
+    {
+        CompositeFilter = value is null ? null : new ClayFilterGroupNode
+        {
+            Nodes = [new ColumnFilter { Column = MaintenanceColumns.Name, Operator = ColumnFilterOperator.Equals, Value = value }],
+        },
+    };
+
+    private static Task ChangeFilterAsync(IRenderedComponent<MaintenancePage> page, ClayDataQuery query) =>
+        page.InvokeAsync(() => page.FindComponent<ClayGrid<MaintenanceWork>>().Instance.OnQueryChanged.InvokeAsync(query));
+
+    private static void AssertSavedFilter(BunitContext context, string? expected)
+    {
+        var save = Assert.Single(context.JSInterop.Invocations["clayDraftStore.saveTypedScope"],
+            call => Equals(call.Arguments[1], "InvMaintenanceFilter"));
+        var root = JsonSerializer.Deserialize<IClayFilterNode>((string)save.Arguments[2]!);
+        if (expected is null)
+            Assert.Null(root);
+        else
+            Assert.Equal(expected, Assert.IsType<ColumnFilter>(Assert.Single(Assert.IsType<ClayFilterGroupNode>(root).Nodes)).Value);
+    }
+
+    /// <summary>Срок отображается по смещению на дату записи и попадает в фильтр выбранного дня браузера.</summary>
+    [Theory]
+    [InlineData(2026, 1, 21)]
+    [InlineData(2010, 7, 20)]
+    public async Task BrowserDayFiltersSourceWallClockUsingHistoricalOffset(int year, int month, int utcHour)
+    {
+        var sourceDate = new DateTime(year, month, 2, 0, 30, 0);
+        var browserDay = sourceDate.Date.AddDays(-1);
+        var expectedUtc = new DateTime(year, month, 1, utcHour, 30, 0, DateTimeKind.Utc);
+        await using var context = CreateContext(out var connection, sourceZone: "Russian Standard Time");
+        connection.WallClock = sourceDate;
+        context.JSInterop.Setup<int>("clayGridTimeZone.getOffsetMinutes", _ => true).SetResult(0);
+        SetupBrowserMidnight(context, browserDay);
+        SetupBrowserMidnight(context, browserDay.AddDays(1));
+        var page = context.Render<MaintenancePage>();
+        page.WaitForAssertion(() => Assert.Equal(
+            Enumerable.Repeat(expectedUtc.ToString("O"), 2),
+            page.FindAll("time").Select(time => time.GetAttribute("datetime"))));
+
+        var query = new ClayDataQuery
+        {
+            CompositeFilter = new ClayFilterGroupNode
+            {
+                Nodes = [new ColumnFilter
+                {
+                    Column = MaintenanceColumns.Deadline,
+                    Operator = ColumnFilterOperator.Equals,
+                    Value = browserDay,
+                }],
+            },
+        };
+        await ChangeFilterAsync(page, query);
+
+        var offset = TimeSpan.FromHours(24 - utcHour);
+        Assert.Equal(new[] { browserDay + offset, browserDay.AddDays(1) + offset }, connection.LastDateParameters);
+        Assert.Contains("ВыполнитьДо >= @p0 AND ВыполнитьДо < @p1", connection.LastListQuery);
+        Assert.Contains("Работа &lt;test&gt;", page.Markup);
+
+        var distinct = await page.FindComponent<ClayGrid<MaintenanceWork>>().Instance.DistinctValuesLoader!(
+            MaintenanceColumns.LastCompleted, new ClayDataQuery(), 20);
+        var value = Assert.IsType<string>(Assert.Single(distinct.Values));
+        Assert.Contains(expectedUtc.ToString("dd.MM.yyyy HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture), value);
+        await ChangeFilterAsync(page, new ClayDataQuery
+        {
+            CompositeFilter = new ClayFilterGroupNode
+            {
+                Nodes = [new ValueFilter { Column = MaintenanceColumns.LastCompleted, Values = [value] }],
+            },
+        });
+        Assert.Equal(new[] { sourceDate }, connection.LastDateParameters);
+        Assert.Contains("ПоследнееВыполнение IN (@p0)", connection.LastListQuery);
+        Assert.Contains("Работа &lt;test&gt;", page.Markup);
+    }
+
+    /// <summary>Без часового пояса форма показывает работы, а дата не получает предполагаемого смещения.</summary>
+    [Fact]
+    public async Task MissingSourceZoneKeepsListAndDisablesDateFilters()
+    {
+        await using var context = CreateContext(out var connection);
+        connection.WallClock = new DateTime(2026, 1, 2, 0, 30, 0);
+        var page = context.Render<MaintenancePage>();
+        page.WaitForAssertion(() => Assert.False(Action(page).Instance.Disabled));
+        Assert.Empty(page.FindAll("time"));
+        Assert.Contains("часовой пояс источника", page.Markup);
+        Assert.False(page.FindComponents<ClayColumnDef>().Single(column => column.Instance.SqlName == MaintenanceColumns.Deadline).Instance.Filterable);
+    }
+
+    private static void SetupBrowserMidnight(BunitContext context, DateTime date)
+    {
+        var milliseconds = new DateTimeOffset(date, TimeSpan.Zero).ToUnixTimeMilliseconds();
+        context.JSInterop.Setup<long>("clayGridTimeZone.localDateTimeToUtcMilliseconds",
+            call => Equals(call.Arguments[0], date.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture)) &&
+                Equals(call.Arguments[1], "00:00:00"))
+            .SetResult(milliseconds);
+    }
+
     /// <summary>Сортировка заголовком формирует SQL ORDER BY по разрешённой колонке.</summary>
     [Fact]
     public async Task HeaderSortUsesSqlOrderBy()
@@ -231,7 +405,7 @@ public sealed class MaintenanceTests
         await header.ClickAsync(new MouseEventArgs());
         page.WaitForAssertion(() => Assert.Contains("ORDER BY РегламентнаяРабота DESC", connection.LastListQuery));
         Assert.Contains("GETUTCDATE()", connection.LastListQuery);
-        Assert.Contains("DATEDIFF(MINUTE, GETDATE(), GETUTCDATE())", connection.LastListQuery);
+        Assert.DoesNotContain("DATEDIFF(MINUTE, GETDATE(), GETUTCDATE())", connection.LastListQuery);
     }
 
     private static Task ClickConfirmation(IRenderedComponent<MaintenancePage> page)
@@ -249,7 +423,7 @@ public sealed class MaintenanceTests
         return provider.FindAll("button").Single(x => x.TextContent.Trim() == "Да");
     }
 
-    private static BunitContext CreateContext(out MaintenanceConnection connection, bool failBegin = false)
+    private static BunitContext CreateContext(out MaintenanceConnection connection, bool failBegin = false, string? sourceZone = null)
     {
         var db = connection = new MaintenanceConnection();
         var context = new BunitContext();
@@ -270,7 +444,9 @@ public sealed class MaintenanceTests
         context.Services.AddSingleton(new Clayzor.Lib.Web.Settings.ClayAppSettings());
         context.Services.AddScoped<ClayErrorService>();
         context.Services.AddSingleton<AuthenticationStateProvider, MaintenanceAuthentication>();
-        context.Services.AddSingleton<IConfiguration>(new ConfigurationBuilder().Build());
+        context.Services.AddSingleton<IConfiguration>(new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["Maintenance:SourceTimeZoneId"] = sourceZone })
+            .Build());
         context.Services.AddMudServices();
         context.Services.AddMudExtensions();
         context.Render<MudPopoverProvider>();
@@ -292,6 +468,11 @@ public sealed class MaintenanceTests
         public int InsertCount { get; private set; }
         public int? CompletedId { get; private set; }
         public string LastListQuery { get; private set; } = "";
+        public List<string?> ListFilters { get; } = [];
+        public DateTime? WallClock { get; set; }
+        public DateTime[] LastDateParameters { get; private set; } = [];
+        public TaskCompletionSource? DeferredListRead { get; set; }
+        public TaskCompletionSource DeferredListStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource? InsertGate { get; set; }
         public TaskCompletionSource InsertStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public override string ConnectionString { get; set; } = "";
@@ -334,6 +515,17 @@ public sealed class MaintenanceTests
                 return 1;
             }
 
+            protected override async Task<DbDataReader> ExecuteDbDataReaderAsync(CommandBehavior behavior, CancellationToken ct)
+            {
+                if (CommandText.Contains("SELECT GETUTCDATE()") && owner.DeferredListRead is { } gate)
+                {
+                    owner.DeferredListRead = null;
+                    owner.DeferredListStarted.TrySetResult();
+                    await gate.Task.WaitAsync(ct);
+                }
+                return ExecuteDbDataReader(behavior);
+            }
+
             protected override DbDataReader ExecuteDbDataReader(CommandBehavior behavior)
             {
                 if (CommandText.Contains("SUSER_SID()"))
@@ -349,12 +541,27 @@ public sealed class MaintenanceTests
                 if (CommandText.Contains("WHERE КодРегламентныхРабот = @id"))
                     return Table(("Value", owner.WorkAvailable)).CreateDataReader();
                 Assert.Contains("FROM dbo.vwРегламентныеРаботы", CommandText);
+                if (CommandText.Contains("SELECT DISTINCT TOP") && owner.WallClock is { } distinct)
+                    return Table(("Value", distinct)).CreateDataReader();
                 owner.LastListQuery = CommandText;
+                owner.LastDateParameters = Parameters.Cast<DbParameter>().Select(parameter => parameter.Value)
+                    .OfType<DateTime>().ToArray();
+                var filter = Parameters.Cast<DbParameter>().FirstOrDefault(parameter => parameter.ParameterName == "p0")?.Value as string;
+                owner.ListFilters.Add(filter);
                 if (owner.FailReadAfterInsert && owner.InsertCount > 0) throw new InvalidOperationException("test read failure");
-                return new DataTableReader([
-                    Table(("Now", new DateTime(2026, 11, 25, 15, 0, 0))),
-                    Table(("Id", 17), ("Name", "Работа <test>"), ("Responsible", "Дежурный"), ("Instruction", "")),
-                ]);
+                var rows = Table(("Id", 17), ("Name", filter is null ? "Работа <test>" : $"Фильтр {filter}"),
+                    ("Responsible", "Дежурный"), ("Instruction", ""));
+                if (owner.WallClock is { } wallClock)
+                {
+                    rows.Columns.Add("Deadline", typeof(DateTime));
+                    rows.Columns.Add("LastCompleted", typeof(DateTime));
+                    rows.Rows[0]["Deadline"] = wallClock;
+                    rows.Rows[0]["LastCompleted"] = wallClock;
+                    if (owner.LastDateParameters is [var low, var high] && (wallClock < low || wallClock >= high) ||
+                        owner.LastDateParameters is [var exact] && wallClock != exact)
+                        rows.Rows.Clear();
+                }
+                return new DataTableReader([Table(("Now", new DateTime(2026, 11, 25, 15, 0, 0))), rows]);
             }
 
             private static DataTable Table(params (string Name, object Value)[] values)
