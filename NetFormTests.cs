@@ -4,6 +4,7 @@ using Clayzor.Lib.DALC;
 using Clayzor.Lib.Entities.Inventory;
 using Clayzor.Lib.Entities.MedicalTests;
 using Clayzor.Lib.Web.Controls.Components;
+using Clayzor.Lib.Web.Controls.Components.Form;
 using Clayzor.Lib.Web.Controls.Services;
 using Clayzor.Lib.Web.DBSelect.Locations;
 using Clayzor.Lib.Web.DBSelect.Phones;
@@ -11,6 +12,7 @@ using Microsoft.AspNetCore.Components;
 using Microsoft.AspNetCore.Components.Authorization;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.JSInterop;
 using MudBlazor;
 using MudBlazor.Extensions;
 using MudBlazor.Services;
@@ -249,6 +251,9 @@ public sealed class NetFormTests
         await page.InvokeAsync(() => provider.FindAll("button").Single(button => button.TextContent.Trim() == "Да").Click());
         await pending;
 
+        var journalCalls = fixture.Context.JSInterop.Invocations.Select(call => call.Identifier)
+            .Where(identifier => identifier is "clayDraftStore.recordConfirmedOperation" or "clayDraftStore.commitOperation");
+        Assert.Equal(["clayDraftStore.recordConfirmedOperation", "clayDraftStore.commitOperation"], journalCalls);
         Assert.Equal(120, fixture.Connection.TimeoutLog.Single());
         Assert.False(GetPrivate<bool>(page.Instance, "_poeRunning"));
         Assert.Empty(page.FindAll(".mud-alert").Where(alert => alert.TextContent.Contains("Ошибка при перезапуске PoE")));
@@ -285,7 +290,17 @@ public sealed class NetFormTests
         await Invoke(page, "SaveAsync", false);
 
         Assert.Equal("unsaved draft", Model(page.Instance).Description);
-        Assert.Contains("Результат сохранения локальной сети неизвестен", page.Markup);
+        Assert.Contains("Результат команды «Сохранить» неизвестен", page.Markup);
+        Assert.Single(fixture.Context.JSInterop.Invocations["clayDraftStore.unknownOperation"]);
+        fixture.Enqueue(Script.Rows(Script.Row(("КодСотрудника", 4), ("КодЛицаЗаказчика", 1))));
+        fixture.Enqueue(Script.Rows(Script.Row(("КодЛокальнойСети", 10), ("Изменено", new DateTime(2026, 11, 21, 11, 0, 0)),
+            ("Примечания", "unsaved draft"))));
+        await OperationJournalButton(page, "Прочитать состояние порта").ClickAsync();
+        Assert.Contains("Чтение записи не подтверждает", page.Markup);
+        var afterRead = fixture.Connection.CommandLog.Count;
+        await Invoke(page, "SaveAsync", false);
+        Assert.Equal(afterRead, fixture.Connection.CommandLog.Count);
+        Assert.Empty(fixture.Context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
         Assert.DoesNotContain(fixture.Context.JSInterop.Invocations,
             call => call.Identifier == "clayModelEquipmentForm.close");
     }
@@ -307,7 +322,12 @@ public sealed class NetFormTests
         await page.InvokeAsync(() => provider.FindAll("button").Single(button => button.TextContent.Trim() == "Да").Click());
         await pending;
 
-        Assert.Contains("Ошибка при перезапуске PoE", page.Markup);
+        Assert.Contains("Результат команды «Перезапустить PoE» неизвестен", page.Markup);
+        Assert.Single(fixture.Context.JSInterop.Invocations["clayDraftStore.unknownOperation"]);
+        var count = fixture.Connection.CommandLog.Count;
+        await Invoke(page, "RestartPoeAsync");
+        await Invoke(page, "SaveAsync", false);
+        Assert.Equal(count, fixture.Connection.CommandLog.Count);
         Assert.False(GetPrivate<bool>(page.Instance, "_poeRunning"));
     }
 
@@ -326,7 +346,7 @@ public sealed class NetFormTests
         var page = fixture.Context.Render<NetPage>();
         await started.Task.WaitAsync(TimeSpan.FromSeconds(3));
 
-        page.Instance.Dispose();
+        await page.Instance.DisposeAsync();
         release.SetResult();
         await Task.Delay(100);
 
@@ -626,6 +646,241 @@ public sealed class NetFormTests
         Assert.Equal("Организация 2", GetPrivate<string>(page.Instance, "_employeeOrganizationName"));
     }
 
+    /// <summary>Выбор по отдельным полям разрешает только той версии сверки, которую видел пользователь.</summary>
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public async Task ConfirmedSave_ReconcilesFieldsWithoutReplayingWrite(bool serverChanged, bool localChanged)
+    {
+        using var fixture = new NetFixture();
+        var page = fixture.Context.Render<NetPage>();
+        WaitForLoad(page);
+        var writeStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseWrite = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.Enqueue(Script.Rows(Script.Row(("КодСотрудника", 4), ("КодЛицаЗаказчика", 1))));
+        fixture.Enqueue(new ScriptEntry { Scalar = 0, Started = writeStarted, Release = releaseWrite });
+        var reviewedVersion = new DateTime(2026, 11, 21, 11, 0, 0);
+        fixture.AddLoad(connected: "общая запись", description: "запись из БД",
+            changedAt: reviewedVersion, includeCustomerLookup: false);
+
+        await TypeText(page, 0, "подключено на момент отправки");
+        await TypeText(page, 1, "отправленное примечание");
+        var save = Invoke(page, "SaveAsync", false);
+        try
+        {
+            await writeStarted.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            await TypeText(page, 0, "поздняя связь");
+            await TypeText(page, 1, "позднее примечание");
+        }
+        finally
+        {
+            releaseWrite.TrySetResult();
+        }
+        await save;
+
+        var review = page.Find("[data-testid='net-reconciliation']");
+        Assert.Contains("отправленное примечание", review.TextContent);
+        Assert.Contains("позднее примечание", review.TextContent);
+        Assert.Contains("запись из БД", review.TextContent);
+        const string acceptText = "Принять результаты сверки";
+        Assert.True(ReconciliationButton(page, acceptText).HasAttribute("disabled"));
+        var choices = page.FindComponents<ClayRadioGroup<bool?>>();
+        Assert.Equal(2, choices.Count);
+        await page.InvokeAsync(() => choices[0].Instance.ValueChanged.InvokeAsync(true));
+        await page.InvokeAsync(() => choices[1].Instance.ValueChanged.InvokeAsync(false));
+        Assert.False(ReconciliationButton(page, acceptText).HasAttribute("disabled"));
+
+        fixture.AddLoad(connected: "общая запись", description: serverChanged ? "новый ответ БД" : "запись из БД",
+            changedAt: serverChanged ? reviewedVersion.AddMinutes(1) : reviewedVersion, includeCustomerLookup: false);
+        if (localChanged)
+        {
+            var readStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseRead = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var authentication = (FakeAuthenticationStateProvider)fixture.Context.Services.GetRequiredService<AuthenticationStateProvider>();
+            authentication.BeforeRead = async () =>
+            {
+                readStarted.TrySetResult();
+                await releaseRead.Task;
+            };
+            var confirm = ReconciliationButton(page, acceptText).ClickAsync();
+            try
+            {
+                await readStarted.Task.WaitAsync(TimeSpan.FromSeconds(3));
+                await TypeText(page, 1, "ещё более поздний ввод");
+            }
+            finally
+            {
+                releaseRead.TrySetResult();
+            }
+            await confirm;
+        }
+        else
+        {
+            await ReconciliationButton(page, acceptText).ClickAsync();
+        }
+
+        var model = Model(page.Instance);
+        Assert.Equal("поздняя связь", model.Connected);
+        if (serverChanged || localChanged)
+        {
+            Assert.Equal(localChanged ? "ещё более поздний ввод" : "позднее примечание", model.Description);
+            Assert.NotEqual(reviewedVersion, model.ChangedAtUtc);
+            Assert.True(ReconciliationButton(page, acceptText).HasAttribute("disabled"));
+            Assert.Contains(serverChanged ? "новый ответ БД" : "ещё более поздний ввод",
+                page.Find("[data-testid='net-reconciliation']").TextContent);
+        }
+        else
+        {
+            Assert.Equal("запись из БД", model.Description);
+            Assert.Equal(reviewedVersion, model.ChangedAtUtc);
+            Assert.Empty(page.FindAll("[data-testid='net-reconciliation']"));
+            Assert.True(IsModified(page.Instance));
+        }
+        Assert.Single(fixture.Connection.ParameterLog, args => args.ContainsKey("ExpectedChangedAt"));
+    }
+
+    /// <summary>Повтор чтения после сбоя не повторяет подтверждённую запись и оставляет поздний текст.</summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ConfirmedSave_RetriesReadWithoutReplayingWrite(bool confirmedEmployee)
+    {
+        using var fixture = new NetFixture();
+        var page = fixture.Context.Render<NetPage>();
+        WaitForLoad(page);
+        var writeStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseWrite = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.Enqueue(Script.Rows(Script.Row(("КодСотрудника", 4), ("КодЛицаЗаказчика", 1))));
+        fixture.Enqueue(new ScriptEntry { Scalar = 0, Started = writeStarted, Release = releaseWrite });
+        fixture.Enqueue(new ScriptEntry { Exception = SqlExceptionFactory.Create(208, "fixture read failure") });
+
+        await TypeText(page, 1, "отправленное примечание");
+        var save = Invoke(page, "SaveAsync", false);
+        try
+        {
+            await writeStarted.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            await TypeText(page, 1, "позднее примечание");
+        }
+        finally
+        {
+            releaseWrite.TrySetResult();
+        }
+        await save;
+        Assert.Contains("перечитать порт не удалось", page.Markup);
+        var freshVersion = new DateTime(2026, 11, 21, 11, 0, 0);
+        var originalVersion = Model(page.Instance).ChangedAtUtc;
+        var previousReads = fixture.Connection.CommandLog.Count;
+        if (confirmedEmployee)
+            fixture.AddLoad(description: "отправленное примечание", changedAt: freshVersion, includeCustomerLookup: false);
+        else
+            fixture.Enqueue(Script.Rows());
+        await ReconciliationButton(page, "Сверить с БД").ClickAsync();
+
+        Assert.Equal(confirmedEmployee ? freshVersion : originalVersion, Model(page.Instance).ChangedAtUtc);
+        if (!confirmedEmployee)
+        {
+            Assert.Equal(previousReads + 1, fixture.Connection.CommandLog.Count);
+            Assert.Contains("текущий пользователь не подтверждён", page.Markup);
+        }
+        Assert.Equal("позднее примечание", Model(page.Instance).Description);
+        Assert.True(IsModified(page.Instance));
+        Assert.Equal(confirmedEmployee ? 0 : 1, page.FindAll("[data-testid='net-reconciliation']").Count);
+        Assert.Single(fixture.Connection.ParameterLog, args => args.ContainsKey("ExpectedChangedAt"));
+    }
+
+    private static Task TypeText(IRenderedComponent<NetPage> page, int index, string value) =>
+        page.FindAll("textarea")[index].InputAsync(new ChangeEventArgs { Value = value });
+
+    private static AngleSharp.Dom.IElement ReconciliationButton(IRenderedComponent<NetPage> page, string text) =>
+        page.FindAll("[data-testid='net-reconciliation'] button").Single(button => button.TextContent.Trim() == text);
+
+    /// <summary>Открытие карточки с сохранённой попыткой блокирует обе команды независимо от статуса отправки.</summary>
+    [Theory]
+    [InlineData("running")]
+    [InlineData("unknown")]
+    public async Task RestoredOperation_BlocksSaveAndPoe(string status)
+    {
+        using var fixture = new NetFixture(poe: 1, restoredOperation: OperationJson("net.poe", status));
+        var page = fixture.Context.Render<NetPage>();
+        WaitForLoad(page);
+        await TypeText(page, 1, "локальный ввод");
+        Assert.Contains("Результат команды «Перезапустить PoE» неизвестен", page.Markup);
+        var count = fixture.Connection.CommandLog.Count;
+
+        await Invoke(page, "SaveAsync", false);
+        await Invoke(page, "RestartPoeAsync");
+
+        Assert.Equal(count, fixture.Connection.CommandLog.Count);
+        Assert.Empty(fixture.Context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
+        Assert.Empty(fixture.Context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
+    }
+
+    /// <summary>При потере указателя сессии найденная попытка блокирует запись и открывается без replay.</summary>
+    [Fact]
+    public async Task RecoveryCandidate_BlocksCommandsAndAdoptsPersistedAttempt()
+    {
+        var candidate = new ClayDraftRecoveryCandidate("old-tab", 9, true, true);
+        using var fixture = new NetFixture(poe: 1, candidates: [candidate]);
+        fixture.Context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.recoverListedDraft", _ => true)
+            .SetResult(new ClayDraftRestore("net-fixture", true, 9, null, OperationJson("net.save", "unknown")));
+        var page = fixture.Context.Render<NetPage>();
+        WaitForLoad(page);
+        Assert.Contains("найдена сохранённая попытка", page.Markup);
+        var count = fixture.Connection.CommandLog.Count;
+
+        await OperationJournalButton(page, "Открыть сохранённую попытку").ClickAsync();
+        await TypeText(page, 1, "черновик");
+        await Invoke(page, "SaveAsync", false);
+        await Invoke(page, "RestartPoeAsync");
+
+        Assert.Contains("Результат команды «Сохранить» неизвестен", page.Markup);
+        Assert.Equal(count, fixture.Connection.CommandLog.Count);
+        Assert.Single(fixture.Context.JSInterop.Invocations["clayDraftStore.recoverListedDraft"]);
+        Assert.Empty(fixture.Context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
+    }
+
+    /// <summary>Без подтверждённого Begin SQL не отправляется.</summary>
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public async Task Save_MissingJournalAcknowledgementDoesNotDispatch(bool failBegin, bool mismatchedBegin)
+    {
+        using var fixture = new NetFixture(failBegin: failBegin, mismatchedBegin: mismatchedBegin);
+        fixture.Enqueue(Script.Rows(Script.Row(("КодСотрудника", 4), ("КодЛицаЗаказчика", 1))));
+        var page = fixture.Context.Render<NetPage>();
+        WaitForLoad(page);
+        await TypeText(page, 1, "фикстура не должна попасть в журнал открытым текстом");
+
+        await Invoke(page, "SaveAsync", false);
+
+        Assert.Contains("Команда не отправлена", page.Markup);
+        var intent = Assert.Single(fixture.Context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
+        Assert.DoesNotContain("фикстура", (string)intent.Arguments[1]!);
+        Assert.Contains("Fingerprint", (string)intent.Arguments[1]!);
+        Assert.DoesNotContain(fixture.Connection.CommandLog, sql => sql.Contains("UPDATE vwЛокальнаяСеть"));
+    }
+
+    /// <summary>Durable receipt завершает только журнал, даже после нового открытия формы.</summary>
+    [Fact]
+    public async Task RestoredConfirmedReceipt_CleansJournalWithoutDispatch()
+    {
+        using var fixture = new NetFixture(poe: 1, restoredOperation: OperationJson("net.poe", "confirmed"));
+        var page = fixture.Context.Render<NetPage>();
+        WaitForLoad(page);
+        var count = fixture.Connection.CommandLog.Count;
+
+        await OperationJournalButton(page, "Проверить журнал операций").ClickAsync();
+
+        Assert.Equal(count, fixture.Connection.CommandLog.Count);
+        Assert.Empty(fixture.Context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
+        Assert.Equal(9L, Assert.Single(fixture.Context.JSInterop.Invocations["clayDraftStore.commitOperation"]).Arguments[1]);
+        Assert.Empty(page.FindAll("[data-testid='net-operation-journal']"));
+    }
+
+    private static AngleSharp.Dom.IElement OperationJournalButton(IRenderedComponent<NetPage> page, string text) =>
+        page.FindAll("[data-testid='net-operation-journal'] button").Single(button => button.TextContent.Trim() == text);
+
     private static void Render(IRenderedComponent<NetPage> page) => page.InvokeAsync(() =>
         typeof(NetPage).GetMethod("StateHasChanged",
             System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
@@ -661,6 +916,27 @@ public sealed class NetFormTests
                 await task;
         });
 
+    private static string OperationJson(string kind, string status) =>
+        $$"""{"version":1,"attemptId":"net-fixture-attempt","kind":"{{kind}}","status":"{{status}}","revision":9,"data":"fixture","scopes":[],"acceptLegacyTyped":false,"legacyTypedRevision":0}""";
+
+    private sealed class AcknowledgingJournal(IJSRuntime inner) : IJSRuntime
+    {
+        public ValueTask<T> InvokeAsync<T>(string identifier, object?[]? args) =>
+            InvokeAsync<T>(identifier, CancellationToken.None, args);
+
+        public async ValueTask<T> InvokeAsync<T>(string identifier, CancellationToken cancellationToken, object?[]? args)
+        {
+            var result = await inner.InvokeAsync<T>(identifier, cancellationToken, args);
+            if (identifier != "clayDraftStore.beginOperationIntent" || result is not string operationJson)
+                return result;
+            using var intent = System.Text.Json.JsonDocument.Parse((string)args![1]!);
+            var acknowledgement = System.Text.Json.Nodes.JsonNode.Parse(operationJson)!;
+            acknowledgement["attemptId"] = intent.RootElement.GetProperty("attemptId").GetString();
+            acknowledgement["data"] = intent.RootElement.GetProperty("data").GetString();
+            return (T)(object)acknowledgement.ToJsonString();
+        }
+    }
+
     private sealed class NetFixture : IDisposable
     {
         private readonly Queue<ScriptEntry> _entries;
@@ -675,7 +951,11 @@ public sealed class NetFormTests
             int customerId = 1,
             int? employeeId = null,
             int organizationId = 1,
-            Exception? loadException = null)
+            Exception? loadException = null,
+            string? restoredOperation = null,
+            ClayDraftRecoveryCandidate[]? candidates = null,
+            bool failBegin = false,
+            bool mismatchedBegin = false)
         {
             DapperColumnMapper.Initialize();
             _entries = new Queue<ScriptEntry>();
@@ -687,6 +967,25 @@ public sealed class NetFormTests
             Connection = new ScriptedConnection(_entries, emulateEquipmentIdentity: false);
             Context = new BunitContext();
             Context.JSInterop.Mode = JSRuntimeMode.Loose;
+            Context.Services.AddScoped(_ => new ClayDraftService(mismatchedBegin
+                ? Context.JSInterop.JSRuntime : new AcknowledgingJournal(Context.JSInterop.JSRuntime)));
+            Context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.register", _ => true)
+                .SetResult(new ClayDraftRestore("net-fixture", restoredOperation is not null, 0, null, restoredOperation));
+            Context.JSInterop.Setup<ClayDraftRecoveryCandidate[]>("clayDraftStore.listRecoveryCandidates", _ => true)
+                .SetResult(candidates ?? []);
+            Context.JSInterop.Setup<ClayDraftStorageHealth>("clayDraftStore.getHealth", _ => true)
+                .SetResult(new ClayDraftStorageHealth(true, 0, null, false, 1, 1));
+            Context.JSInterop.Setup<ClayDraftRestoreReadiness>("clayDraftStore.getRestoreReadiness", _ => true)
+                .SetResult(new ClayDraftRestoreReadiness(true, [], []));
+            foreach (var kind in new[] { "net.save", "net.poe" })
+            {
+                var begin = Context.JSInterop.Setup<string>("clayDraftStore.beginOperationIntent",
+                        args => ((string)args.Arguments[1]!).Contains($"\"kind\":\"{kind}\"", StringComparison.Ordinal));
+                if (failBegin)
+                    begin.SetException(new Microsoft.JSInterop.JSException("fixture lost begin"));
+                else
+                    begin.SetResult(OperationJson(kind, "running"));
+            }
             Context.Services.AddMudServices();
             Context.Services.AddMudExtensions();
             var db = new DbManager("Server=test", new FakeSqlErrorHandler(), () => Connection);
