@@ -3,7 +3,6 @@ using Clayzor.Lib.DALC;
 using Clayzor.Lib.Entities.Inventory;
 using Clayzor.Lib.Entities.MedicalTests;
 using Clayzor.Lib.Web.Controls.Services;
-using Clayzor.Lib.Web.Settings;
 using Kesco.App.Web.Inventory.Components.Pages.Equipment.Details;
 using Microsoft.AspNetCore.Components;
 using Microsoft.Extensions.Configuration;
@@ -130,7 +129,7 @@ public sealed class EquipmentUpsTestDialogTests
         var context = new BunitContext();
         context.JSInterop.Mode = JSRuntimeMode.Loose;
         context.Services.AddMudServices();
-        context.Services.AddSingleton(new ClayAppSettings());
+        EquipmentPeriodDialogHelpTests.AddAppearance(context);
         context.Services.AddScoped<ClayErrorService>();
         context.Services.AddScoped<DbManager>(_ => new DbManager("Server=test"));
         context.Services.AddSingleton<IConfiguration>(new ConfigurationBuilder().Build());

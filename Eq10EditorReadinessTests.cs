@@ -118,6 +118,7 @@ public sealed class Eq10EditorReadinessTests
         {
             EquipmentId = 7,
             HasExisting = true,
+            OriginalVersion = "fixture-sim-version",
             PhoneNumber = "79000000001",
             ContractId = 11,
             PersonalDataPersonId = 99,
@@ -269,6 +270,7 @@ public sealed class Eq10EditorReadinessTests
         var context = new BunitContext();
         context.JSInterop.Mode = JSRuntimeMode.Loose;
         context.Services.AddMudServices();
+        EquipmentPeriodDialogHelpTests.AddAppearance(context);
         context.Services.AddSingleton<IConfiguration>(new ConfigurationManager());
         context.Services.AddSingleton<EquipmentFormService>(service);
         context.Services.AddSingleton(new MobileContractSelectDataSource(contractConnection is null
@@ -302,17 +304,24 @@ public sealed class Eq10EditorReadinessTests
         internal TaskCompletionSource<int?>? EmployeePerson { get; init; }
         internal TaskCompletionSource FillStarted { get; } = NewRead();
 
-        public override Task<string> GetAccountPasswordAsync(int equipmentId, string login)
+        public override async Task<EquipmentAccount> GetAccountEditSnapshotAsync(int equipmentId, string login)
         {
             AccountEquipmentIds.Add(equipmentId);
             AccountStarted.TrySetResult();
-            return AccountReads.Dequeue().Task;
+            return new EquipmentAccount
+            {
+                EquipmentId = equipmentId, Login = login,
+                Password = await AccountReads.Dequeue().Task, ExpectedVersion = "fixture-version",
+            };
         }
 
-        public override Task<EquipmentSimSecrets> GetSimSecretsAsync(int equipmentId)
+        public override async Task<EquipmentSimCard?> GetSimEditorSnapshotAsync(int equipmentId)
         {
             SimStarted.TrySetResult();
-            return SimRead.Task;
+            return new EquipmentSimCard
+            {
+                EquipmentId = equipmentId, Secrets = await SimRead.Task, EditorVersion = "fixture-sim-version",
+            };
         }
 
         public override Task<(bool IsEligible, string Message)> GetPersonalDataAdvisoryAsync(

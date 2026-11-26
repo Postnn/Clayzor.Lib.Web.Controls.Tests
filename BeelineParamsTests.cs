@@ -310,6 +310,144 @@ public sealed class BeelineParamsTests
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.discard"]);
     }
 
+    /// <summary>Продолжение, сброс и закрытие используют только точную родительскую ревизию.</summary>
+    [Theory]
+    [InlineData("Продолжить редактирование")]
+    [InlineData("Закрыть без сохранения")]
+    [InlineData("Отменить мои изменения и загрузить из БД")]
+    public async Task EditableCancel_DoesNotDiscardTheRegistration(string choice)
+    {
+        using var sql = new Probe();
+        await using var context = Configure(sql);
+        var dialogs = context.Render<MudDialogProvider>();
+        context.JSInterop.Setup<ClayDraftEditorScopeState>("clayDraftStore.readEditorScope", _ => true)
+            .SetResult(new ClayDraftEditorScopeState(31, true, false));
+        context.JSInterop.Setup<bool>("clayDraftStore.replaceEditorScope", _ => true).SetResult(true);
+        var card = context.Render<BeelineParamsForm>();
+        card.WaitForAssertion(() => Assert.Contains(Original.EmailManager, card.Markup));
+        await card.InvokeAsync(() => card.Find("input[data-draft-key='beeline.email']")
+            .InputAsync(new ChangeEventArgs { Value = "local@example.test" }));
+
+        var cancel = PressCancelAsync(card);
+        dialogs.WaitForAssertion(() => Assert.Single(dialogs.FindComponents<ClayEditorCancelDialog>()));
+        var fresh = Original with { EmailManager = "fresh@example.test", ChangedAt = Original.ChangedAt.AddSeconds(1) };
+        sql.Row = fresh;
+        await ChooseCancelAsync(dialogs, choice);
+        await cancel.WaitAsync(TimeSpan.FromSeconds(3));
+
+        var calls = context.JSInterop.Invocations["clayDraftStore.replaceEditorScope"];
+        if (choice == "Продолжить редактирование")
+        {
+            Assert.Empty(calls);
+            Assert.Contains("local@example.test", card.Markup);
+            Assert.Empty(context.JSInterop.Invocations["clayModelEquipmentForm.close"]);
+        }
+        else
+        {
+            var replacement = Assert.Single(calls);
+            Assert.Equal("main", replacement.Arguments[1]);
+            Assert.Equal(31L, replacement.Arguments[2]);
+            if (choice == "Закрыть без сохранения")
+            {
+                Assert.Null(replacement.Arguments[3]);
+                Assert.Single(context.JSInterop.Invocations["clayModelEquipmentForm.close"]);
+            }
+            else
+            {
+                using var snapshot = JsonDocument.Parse(Assert.IsType<string>(replacement.Arguments[3]));
+                Assert.Equal(Number, snapshot.RootElement.GetProperty("Version").GetProperty("Key").GetString());
+                Assert.Equal(fresh.ChangedAt, snapshot.RootElement.GetProperty("Version").GetProperty("ChangedAt").GetDateTime());
+                Assert.Contains("fresh@example.test", card.Markup);
+                Assert.Empty(context.JSInterop.Invocations["clayModelEquipmentForm.close"]);
+            }
+        }
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.discard"]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
+        Assert.Equal(0, sql.Updates);
+    }
+
+    /// <summary>Недостаточные права, другой актор, пропавший или иной договор и поздний raw защищают ввод.</summary>
+    [Theory]
+    [InlineData("actor")]
+    [InlineData("rights")]
+    [InlineData("missing")]
+    [InlineData("number")]
+    [InlineData("late")]
+    public async Task EditableReset_FailedFreshReadOrScopeVersionKeepsInput(string failure)
+    {
+        using var sql = new Probe();
+        await using var context = Configure(sql);
+        var dialogs = context.Render<MudDialogProvider>();
+        context.JSInterop.Setup<ClayDraftEditorScopeState>("clayDraftStore.readEditorScope", _ => true)
+            .SetResult(new ClayDraftEditorScopeState(31, true, false));
+        context.JSInterop.Setup<bool>("clayDraftStore.replaceEditorScope", _ => true).SetResult(false);
+        var card = context.Render<BeelineParamsForm>();
+        card.WaitForAssertion(() => Assert.Contains(Original.EmailManager, card.Markup));
+        await card.InvokeAsync(() => card.Find("input[data-draft-key='beeline.email']")
+            .InputAsync(new ChangeEventArgs { Value = "local@example.test" }));
+
+        var cancel = PressCancelAsync(card);
+        dialogs.WaitForAssertion(() => Assert.Single(dialogs.FindComponents<ClayEditorCancelDialog>()));
+        if (failure == "actor") sql.ActorId = 8;
+        if (failure == "rights") sql.Role = Роли.Наблюдатель_услуг_связи;
+        if (failure == "missing") sql.Row = null;
+        if (failure == "number") sql.Row = Original with { Number = "DIFFERENT" };
+        await ChooseCancelAsync(dialogs, "Отменить мои изменения и загрузить из БД");
+        await cancel.WaitAsync(TimeSpan.FromSeconds(3));
+
+        Assert.Contains("local@example.test", card.Markup);
+        Assert.Equal(failure == "late" ? 1 : 0, context.JSInterop.Invocations["clayDraftStore.replaceEditorScope"].Count);
+        Assert.Empty(context.JSInterop.Invocations["clayModelEquipmentForm.close"]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.discard"]);
+        Assert.Equal(0, sql.Updates);
+    }
+
+    /// <summary>В readonly recovery все решения оставляют сырой ввод и прежний Unknown.</summary>
+    [Theory]
+    [InlineData("Продолжить редактирование", false)]
+    [InlineData("Закрыть без сохранения", true)]
+    [InlineData("Отменить мои изменения и загрузить из БД", true)]
+    public async Task RecoveryCancel_PreservesRawAndPendingOperation(string choice, bool unknown)
+    {
+        using var sql = new Probe { Row = null };
+        var snapshot = RecoverySnapshot("local@example.test");
+        var operation = unknown ? JsonSerializer.Serialize(new
+        {
+            version = 1, attemptId = "beeline-attempt", kind = "beeline.update", status = "unknown", revision = 7,
+            data = snapshot, scopes = Array.Empty<object>(), acceptLegacyTyped = false, legacyTypedRevision = 0,
+        }) : null;
+        await using var context = Configure(sql, pendingRaw: true, restore: new ClayDraftRestore(
+            "beeline-recovery", true, 7, null, operation, new Dictionary<string, string> { ["main"] = snapshot }));
+        var dialogs = context.Render<MudDialogProvider>();
+        var card = context.Render<BeelineParamsForm>();
+        card.WaitForAssertion(() => Assert.Contains("local@example.test", card.Markup));
+        card.WaitForAssertion(() => Assert.Single(context.JSInterop.Invocations["clayDraftStore.getRestoreReadiness"]));
+
+        var cancel = PressCancelAsync(card);
+        dialogs.WaitForAssertion(() => Assert.Single(dialogs.FindComponents<ClayEditorCancelDialog>()));
+        sql.Row = Original with { EmailManager = "fresh@example.test" };
+        await ChooseCancelAsync(dialogs, choice);
+        await cancel.WaitAsync(TimeSpan.FromSeconds(3));
+
+        if (choice == "Отменить мои изменения и загрузить из БД")
+            Assert.Contains("fresh@example.test", card.Markup);
+        Assert.Contains("local@example.test", card.Markup);
+        Assert.True(card.Find("input[data-draft-key='beeline.email']").HasAttribute("readonly"));
+        Assert.Equal(choice == "Закрыть без сохранения" ? 1 : 0, context.JSInterop.Invocations["clayModelEquipmentForm.close"].Count);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.replaceEditorScope"]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.discard"]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
+        Assert.Equal(0, sql.Updates);
+    }
+
+    private static Task PressCancelAsync(IRenderedComponent<BeelineParamsForm> card) =>
+        card.InvokeAsync(() => Button(card, "Отмена").ClickAsync(new MouseEventArgs()));
+
+    private static Task ChooseCancelAsync(IRenderedComponent<MudDialogProvider> dialogs, string choice) =>
+        dialogs.InvokeAsync(() => dialogs.FindComponent<ClayEditorCancelDialog>().FindAll("button")
+            .Single(button => button.TextContent.Trim() == choice).ClickAsync(new MouseEventArgs()));
+
     private static string RecoverySnapshot(string email) => JsonSerializer.Serialize(new
     {
         Original = new BeelineDraft(Original.TimeZone, Original.EmailManager),
@@ -364,6 +502,7 @@ public sealed class BeelineParamsTests
 
     private sealed class Probe : DbConnection
     {
+        public int ActorId { get; set; } = 4;
         public Роли Role { get; set; } = Роли.Администратор_тарифов_связи;
         public int PersonScope { get; set; }
         public int Affected { get; init; } = 1;
@@ -428,7 +567,7 @@ public sealed class BeelineParamsTests
         protected override DbDataReader ExecuteDbDataReader(CommandBehavior behavior)
         {
             if (CommandText.Contains("SUSER_SID()"))
-                return Rows([("КодСотрудника", typeof(int))], [4]).CreateDataReader();
+                return Rows([("КодСотрудника", typeof(int))], [owner.ActorId]).CreateDataReader();
             if (CommandText.Contains("fn_ТекущиеРоли"))
                 return Rows([("RoleId", typeof(int)), ("PersonId", typeof(int))], [(int)owner.Role, owner.PersonScope]).CreateDataReader();
             if (CommandText.Contains("HAS_PERMS_BY_NAME"))

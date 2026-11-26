@@ -173,6 +173,78 @@ public sealed class ClaySelectAdvancedSearchServiceTests : IDisposable
         Assert.False(await pending);
     }
 
+    /// <summary>Сначала записывается ключ запроса, а отсоединение circuit оставляет исходное окно.</summary>
+    [Fact]
+    public async Task RecoverableOpen_PersistsRequestBeforeOpeningAndDisposesOnlyBinding()
+    {
+        await using var service = new ClaySelectAdvancedSearchService(_ctx.JSInterop.JSRuntime);
+        var started = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var durable = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var request = service.OpenRecoverableAsync("https://directory.example/search", false, Guid.NewGuid().ToString("N"),
+            _ => Task.FromResult(true),
+            (id, _) => { started.TrySetResult(id); return durable.Task; },
+            (_, _) => throw new InvalidOperationException("Selection dispatched prematurely"));
+        var id = await started.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        Assert.Empty(_ctx.JSInterop.Invocations["claySelectAdvancedSearch.open"]);
+        durable.SetResult();
+        await service.DisposeAsync();
+        Assert.False(await request);
+        Assert.DoesNotContain(_ctx.JSInterop.Invocations, call => call.Identifier == "claySelectAdvancedSearch.cancel");
+        Assert.Contains(_ctx.JSInterop.Invocations["claySelectAdvancedSearch.detach"], call => Equals(call.Arguments[0], id));
+    }
+
+    /// <summary>Перепривязка проверяет текущий получатель и сохраняет ACK принятой точной ревизии.</summary>
+    [Theory]
+    [InlineData("107", false)]
+    [InlineData("[107,9]", true)]
+    [InlineData("[]", true)]
+    public async Task ResumeUndispatched_UsesOriginalIdAndDeduplicatesAck(string json, bool multiple)
+    {
+        await using var service = new ClaySelectAdvancedSearchService(_ctx.JSInterop.JSRuntime);
+        _ctx.JSInterop.Setup<bool>("claySelectAdvancedSearch.resumeUndispatched", _ => true).SetResult(true);
+        var id = Guid.NewGuid().ToString("N");
+        var proof = Guid.NewGuid().ToString("N");
+        var receiverReady = false;
+        var applications = 0;
+        var pending = service.ResumeUndispatchedAsync("https://directory.example/search", multiple, id, proof,
+            _ => Task.FromResult(receiverReady), (value, _) =>
+            {
+                Assert.Equal(json, value.GetRawText());
+                applications++;
+                receiverReady = false;
+                return Task.FromResult(ClaySelectReturnDecision.Accepted);
+            });
+        var bind = Assert.Single(_ctx.JSInterop.Invocations["claySelectAdvancedSearch.resumeUndispatched"]);
+        Assert.Equal(id, bind.Arguments[1]);
+        Assert.Equal(proof, bind.Arguments[2]);
+        Assert.Empty(_ctx.JSInterop.Invocations["claySelectAdvancedSearch.open"]);
+        Assert.False(await service.ReadyForSelectionAsync(id, 1));
+        receiverReady = true;
+        Assert.True(await service.ReadyForSelectionAsync(id, 1));
+        using var value = JsonDocument.Parse(json);
+        Assert.Equal("Accepted", await service.ApplyAsync(id, 1, value.RootElement));
+        Assert.True(await pending);
+        Assert.True(await service.ReadyForSelectionAsync(id, 1));
+        Assert.False(await service.ReadyForSelectionAsync(id, 2));
+        Assert.Equal("Accepted", await service.ApplyAsync(id, 1, value.RootElement));
+        Assert.Equal(1, applications);
+    }
+
+    /// <summary>Неподтверждённое окно не открывается заново и не создаёт получателя результата.</summary>
+    [Fact]
+    public async Task ResumeRefused_DoesNotOpenOrApplySelection()
+    {
+        await using var service = new ClaySelectAdvancedSearchService(_ctx.JSInterop.JSRuntime);
+        _ctx.JSInterop.Setup<bool>("claySelectAdvancedSearch.resumeUndispatched", _ => true).SetResult(false);
+        var id = Guid.NewGuid().ToString("N");
+
+        Assert.False(await service.ResumeUndispatchedAsync("https://directory.example/search", false, id, Guid.NewGuid().ToString("N"),
+            _ => Task.FromResult(true), (_, _) => throw new InvalidOperationException("Unproven receiver")));
+        Assert.False(await service.ReadyForSelectionAsync(id, 1));
+        Assert.Equal("Stale", await service.ApplyAsync(id, 1, JsonSerializer.SerializeToElement(107)));
+        Assert.Empty(_ctx.JSInterop.Invocations["claySelectAdvancedSearch.open"]);
+    }
+
     private string LastRequestId() =>
         (string)_ctx.JSInterop.Invocations.Last(item => item.Identifier == "claySelectAdvancedSearch.open").Arguments[1]!;
 

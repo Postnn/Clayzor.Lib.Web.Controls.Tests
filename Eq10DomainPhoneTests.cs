@@ -7,7 +7,7 @@ using Kesco.App.Web.Inventory.Services;
 namespace Clayzor.Lib.Web.Controls.Tests;
 
 /// <summary>Проверки trusted phone diff, Configure scope и per-operation retry EQ10.</summary>
-public sealed class Eq10DomainPhoneTests
+public sealed partial class Eq10DomainPhoneTests
 {
     /// <summary>Caller original без Save не создаёт старый CCM recipient.</summary>
     [Fact]
@@ -134,6 +134,53 @@ public sealed class Eq10DomainPhoneTests
         Assert.Single(connection.CommandLog, sql => sql.Contains("sp_Xorcom_PhoneNumberSync", StringComparison.Ordinal));
         Assert.DoesNotContain(connection.CommandLog, sql => sql.Contains("sp_CCM_PhoneSync", StringComparison.Ordinal));
     }
+
+    /// <summary>При ошибке определения маршрута повтор сначала читает станции, сохраняя приоритет Xorcom.</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PlanningReadFailure_RetriesFromTrustedDiffWithoutFabricatedOperation(bool secondIsXorcom)
+    {
+        var entries = new List<ScriptEntry>
+        {
+            Script.Scalar(1), Script.Rows(ModelTypeRow()), Script.NonQuery(),
+            Script.Rows(EquipmentRow()), Script.Scalar(1), Script.Rows(PhoneRow(1, 8), PhoneRow(2, 8)),
+            Script.Rows(LookupRow(1, 0, "")), Script.Error(SqlExceptionFactory.Create(-2, "fixture lookup failure")),
+            Script.Rows(EquipmentRow()), Script.Scalar(1), Script.Rows(PhoneRow(1, 8), PhoneRow(2, 8)),
+            Script.Rows(LookupRow(1, 0, "")), Script.Rows(LookupRow(2, secondIsXorcom ? 1 : 0, secondIsXorcom ? "xorcom" : "")),
+        };
+        if (secondIsXorcom)
+            entries.Add(Script.Scalar(1));
+        entries.Add(Script.NonQuery());
+
+        using var connection = Connection(entries.ToArray());
+        var service = Service(connection);
+        var intent = await service.SaveWithPhonesAsync(Equipment(), [], [Link(1, 8), Link(2, 8)]);
+        var initial = await service.SynchronizePhoneAttemptAsync(intent);
+
+        Assert.Empty(initial.Operations);
+        Assert.Contains("Команды АТС не отправлены", initial.PlanningError);
+        Assert.DoesNotContain(connection.CommandLog, IsAtsDispatch);
+        var restored = JsonSerializer.Deserialize<PhoneSyncAttempt>(JsonSerializer.Serialize(initial))!;
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.RetryPhoneSyncAttemptAsync(restored with { PlanningError = null }));
+        var retry = await service.RetryPhoneSyncAttemptAsync(restored);
+
+        Assert.Equal(intent.AttemptId, retry.AttemptId);
+        Assert.Null(retry.PlanningError);
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.RetryPhoneSyncAttemptAsync(restored));
+        var operation = Assert.Single(retry.Operations);
+        Assert.Equal(PhoneSyncPhase.Succeeded, operation.Phase);
+        Assert.Equal(secondIsXorcom ? PhoneSyncKind.Xorcom : PhoneSyncKind.Ccm, operation.Operation.Kind);
+        Assert.Equal(secondIsXorcom ? "2" : "8", operation.Operation.Key);
+        Assert.Single(connection.CommandLog, IsAtsDispatch);
+        var equipmentWrite = connection.CommandLog[2];
+        Assert.Contains("ОжидаемоеКоличествоСвязей", equipmentWrite);
+        Assert.Single(connection.CommandLog, sql => sql == equipmentWrite);
+    }
+
+    private static bool IsAtsDispatch(string sql) =>
+        sql.Contains("sp_Xorcom_PhoneNumberSync", StringComparison.Ordinal) ||
+        sql.Contains("sp_CCM_PhoneSync", StringComparison.Ordinal);
 
     /// <summary>Отзыв owner43 запрещает explicit Configure retry даже при наличии общей ANY43 семантики main.</summary>
     [Fact]

@@ -203,6 +203,7 @@ public sealed class TerritorialEntitySearchRefreshTests
         context.Services.AddScoped(_ => new DbManager("Server=fixture", errorHandler, () => connection));
         context.Services.AddSingleton<AuthenticationStateProvider, SearchAuthentication>();
         context.Services.AddScoped<ClayFormWindowService>();
+        context.Services.AddScoped<ClayDraftService>();
         context.Services.AddMudServices();
         context.Services.AddClayTree(new ConfigurationBuilder().Build());
         context.ComponentFactories.AddStub<InventoryMainMenu>();

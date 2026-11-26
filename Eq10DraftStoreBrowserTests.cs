@@ -16,6 +16,8 @@ public sealed class Eq10DraftStoreBrowserTests
     [InlineData("unknown")]
     [InlineData("accepted")]
     [InlineData("readiness")]
+    [InlineData("pendingRetry")]
+    [InlineData("exclusiveCreation")]
     public async Task ProductionStore_PreservesEq10Contracts(string scenario)
     {
         var result = await RunBrowserAsync(scenario);
@@ -144,6 +146,68 @@ public sealed class Eq10DraftStoreBrowserTests
                     assert(document.getElementById('main').value === 'PARENT', 'Parent raw was discarded.');
                     assert(document.getElementById('child').value === 'N+1', 'Late raw N+1 was discarded.');
                 },
+                async exclusiveCreation() {
+                    mount(`
+                        <div class="equipment-form" data-owner="first"><input data-draft-key="main.serial"></div>
+                        <div class="equipment-form" data-owner="second"><input data-draft-key="main.serial"></div>`);
+                    const open = owner => store.register('equipment-ins', '7:0', '42', 1, `[data-owner='${owner}']`);
+                    const first = await open('first');
+                    sessionStorage.removeItem('clay-draft:42:equipment-ins:7:0');
+                    const second = await open('second');
+                    const start = reg => store.beginOperationIntent(reg.registrationId, JSON.stringify({
+                        ...JSON.parse(intent('equipment.create')), blockOtherDraftOperations: true
+                    }));
+                    const results = await Promise.allSettled([start(first), start(second)]);
+                    assert(results.filter(result => result.status === 'fulfilled').length === 1, 'Both registrations could dispatch.');
+                    const winner = results[0].status === 'fulfilled' ? first : second;
+                    const remaining = winner === first ? second : first;
+                    const operation = JSON.parse(results.find(result => result.status === 'fulfilled').value);
+                    await store.unknownOperation(winner.registrationId, operation.revision);
+                    await store.unregister(winner.registrationId);
+                    const candidates = await store.listRecoveryCandidates(remaining.registrationId);
+                    assert(candidates.length === 1 && candidates[0].hasOperation, 'Closed registration lost its durable attempt.');
+                    const check = await Promise.allSettled([start(remaining)]);
+                    assert(check[0].status === 'rejected' && !(await store.getHealth(remaining.registrationId)).hasOperation,
+                        'The discoverable orphan left another attempt ready for dispatch.');
+                },
+                async pendingRetry() {
+                    mount(`
+                        <div class="equipment-form" data-owner="root">
+                            <input id="first" data-draft-key="main.first">
+                            <input id="later" data-draft-key="main.later">
+                        </div>
+                        <div class="mud-dialog" data-owner="root" data-draft-scope="child:A">
+                            <input id="child" data-draft-key="child.value">
+                        </div>`);
+                    let r = await register();
+                    enter('first', 'stored first');
+                    enter('later', 'stored later');
+                    enter('child', 'separate draft');
+                    await store.unregister(r.registrationId);
+                    const first = document.getElementById('first');
+                    const later = document.getElementById('later');
+                    const child = document.getElementById('child');
+                    first.value = later.value = child.value = '';
+                    later.disabled = true;
+
+                    r = await register();
+                    const initial = await store.applyPendingRaw(r.registrationId, 'main');
+                    assert(initial.applied.length === 1 && initial.pending.length === 1, 'Initial restore did not distinguish an unavailable field.');
+                    assert(first.value === 'stored first' && later.value === '', 'Unexpected initial field values.');
+                    first.value = 'newer text';
+                    later.disabled = false;
+                    let inputEvents = 0;
+                    later.addEventListener('input', () => inputEvents++);
+                    await store.reportRestoreScopeFailure(r.registrationId, 'child:A');
+
+                    const retry = await store.applyPendingRaw(r.registrationId, 'main', false);
+                    const readiness = await store.getRestoreReadiness(r.registrationId);
+                    assert(retry.applied.length === 1 && retry.pending.length === 0, 'Retry did not accept the previously unavailable field.');
+                    assert(first.value === 'newer text' && later.value === 'stored later', 'Retry replayed an already restored value.');
+                    assert(child.value === '' && readiness.pendingScopes.includes('child:A') && readiness.failedScopes.includes('child:A'),
+                        'Retry changed a different scope.');
+                    assert(inputEvents === 0, 'Silent restore dispatched an input event.');
+                },
                 async readiness() {
                     mount(`
                         <div class="equipment-form" data-owner="root"><input id="main" data-draft-key="main.sn"></div>
@@ -216,47 +280,33 @@ public sealed class Eq10DraftStoreBrowserTests
             using var client = new ClientWebSocket();
             await client.ConnectAsync(new Uri(socket), timeout.Token);
             await InvokeCdpAsync(client, 1, "Page.enable", new { }, timeout.Token);
-            for (var attempt = 0; attempt < 200; attempt++)
+            for (var attempt = 0; attempt < 400; attempt++)
             {
-                using var ready = await InvokeCdpAsync(client, 2, "Runtime.evaluate", new
+                using var response = await InvokeCdpAsync(client, attempt + 2, "Runtime.evaluate", new
                 {
-                    expression = "document.readyState",
+                    expression = "document.getElementById('results')?.textContent || ''",
                     returnByValue = true,
                 }, timeout.Token);
-                if (ready.RootElement.GetProperty("result").GetProperty("result")
-                    .GetProperty("value").GetString() == "complete")
-                    break;
-                if (attempt == 199)
-                    throw new TimeoutException("Fixture did not reach complete document state.");
+                if (response.RootElement.TryGetProperty("error", out var protocolError))
+                {
+                    if (protocolError.GetProperty("code").GetInt32() != -32000 ||
+                        protocolError.GetProperty("message").GetString() != "Execution context was destroyed.")
+                        throw new InvalidOperationException($"Browser protocol failed: {protocolError}");
+                }
+                else
+                {
+                    var result = response.RootElement.GetProperty("result");
+                    if (result.TryGetProperty("exceptionDetails", out var exception))
+                        throw new InvalidOperationException($"Browser evaluation failed: {exception}");
+                    var json = result.GetProperty("result").GetProperty("value").GetString();
+                    if (!string.IsNullOrEmpty(json))
+                        return JsonSerializer.Deserialize<BrowserResult>(json)
+                            ?? throw new InvalidOperationException("Empty browser result.");
+                }
+
                 await Task.Delay(50, timeout.Token);
             }
-            const string expression = """
-                (async () => {
-                    for (let attempt = 0; attempt < 400; attempt++) {
-                        const result = document.getElementById('results');
-                        if (result) return JSON.parse(result.textContent);
-                        await new Promise(resolve => setTimeout(resolve, 50));
-                    }
-                    throw new Error('Draft browser scenario did not publish a result.');
-                })()
-                """;
-            using var response = await InvokeCdpAsync(client, 3, "Runtime.evaluate", new
-            {
-                expression,
-                awaitPromise = true,
-                returnByValue = true,
-            }, timeout.Token);
-            if (response.RootElement.TryGetProperty("error", out var protocolError))
-                throw new InvalidOperationException($"Browser protocol failed: {protocolError}");
-            if (response.RootElement.TryGetProperty("exceptionDetails", out var exception))
-                throw new InvalidOperationException($"Browser evaluation failed: {exception}");
-            if (!response.RootElement.TryGetProperty("result", out var cdpResult) ||
-                !cdpResult.TryGetProperty("result", out var evaluation))
-                throw new InvalidOperationException($"Browser returned no evaluation result: {response.RootElement}");
-            if (!evaluation.TryGetProperty("value", out var value))
-                throw new InvalidOperationException($"Browser returned no result value: {response.RootElement}");
-            return value.Deserialize<BrowserResult>()
-                ?? throw new InvalidOperationException("Empty browser result.");
+            throw new TimeoutException("Draft browser scenario did not publish a result.");
         }
         finally
         {

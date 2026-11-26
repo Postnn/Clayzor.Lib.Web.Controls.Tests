@@ -8,8 +8,8 @@ public sealed class TerritorialEntityCreateRouteTests
 {
     /// <summary>Недоступное создание показывает сообщение без пустого редактора и загрузки типов.</summary>
     [Theory]
-    [InlineData(null, false, "Создание территории пока недоступно.", 0)]
-    [InlineData("42", true, "Создание территории пока недоступно.", 1)]
+    [InlineData(null, false, "Создание территории сейчас запрещено.", 0)]
+    [InlineData("42", true, "Создание территории сейчас запрещено.", 1)]
     [InlineData("42", false, "Родительская территория не найдена или недоступна.", 1)]
     [InlineData("0", false, "Родительская территория не найдена или недоступна.", 0)]
     public async Task CreateRouteDoesNotLoadUnavailableEditor(string? parent, bool parentExists,

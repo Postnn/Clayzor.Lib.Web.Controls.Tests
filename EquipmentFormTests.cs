@@ -1,3 +1,7 @@
+using System.Net;
+using System.Net.NetworkInformation;
+using Kesco.App.Web.Inventory.Services.PingDiagnostics;
+using Microsoft.Extensions.Options;
 using Bunit;
 using Clayzor.Lib.DALC;
 using Clayzor.Lib.Entities.Inventory;
@@ -27,7 +31,7 @@ using EquipmentEntity = Clayzor.Lib.Entities.Inventory.Equipment;
 namespace Clayzor.Lib.Web.Controls.Tests;
 
 /// <summary>Профильные тесты жизненного цикла формы редактирования оборудования.</summary>
-public sealed class EquipmentFormTests
+public sealed partial class EquipmentFormTests
 {
     /// <summary>Применить сохраняет запись, обновляет opener и не повторяет UPDATE без изменений.</summary>
     [Fact]
@@ -233,6 +237,35 @@ public sealed class EquipmentFormTests
         Assert.Empty(fixture.Service.PhoneSaves[1].Current);
     }
 
+    /// <summary>Подтверждённые связи остаются сохранёнными, а «Применить» повторяет только неоконченный план АТС.</summary>
+    [Fact]
+    public async Task PlanningError_RemainsPendingAndApplyDoesNotRepeatEquipmentWrite()
+    {
+        var fixture = CreateFixture(phones: true);
+        fixture.Service.PhonePlanningError = "Не удалось определить АТС. Команды АТС не отправлены.";
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        await InvokeHandler(page, "OnPhoneToAddChangedAsync", 11);
+        await InvokeSave(page, false);
+
+        Assert.NotNull(GetPrivate(page.Instance, "_pendingPhoneSync"));
+        Assert.Contains("Команды АТС не отправлены", page.Markup);
+        Assert.Equal(1, fixture.Service.UpdateWithPhonesCalls);
+        Assert.Equal(1, fixture.Service.SyncCalls);
+        Assert.DoesNotContain(context.JSInterop.Invocations, call => call.Identifier == "clayDraftStore.unknownOperation");
+
+        fixture.Service.PhonePlanningError = null;
+        var apply = page.FindAll("button").Single(button => button.TextContent.Trim() == "Применить");
+        Assert.False(apply.HasAttribute("disabled"));
+        await apply.ClickAsync();
+        page.WaitForAssertion(() => Assert.Null(GetPrivate(page.Instance, "_pendingPhoneSync")));
+
+        Assert.Equal(1, fixture.Service.UpdateWithPhonesCalls);
+        Assert.Equal(2, fixture.Service.SyncCalls);
+        Assert.Empty(fixture.Service.LastSyncOperations);
+    }
+
     /// <summary>После ошибки АТС повторный Save выполняет только синхронизацию без повторного UPDATE.</summary>
     [Fact]
     public async Task SyncFailure_RetriesWithoutRepeatingDatabaseSave()
@@ -294,7 +327,7 @@ public sealed class EquipmentFormTests
         Assert.Equal(2, fixture.Service.SyncCalls);
     }
 
-    /// <summary>Отмена pending предупреждает о сохранённом SQL и при отказе не закрывает форму.</summary>
+    /// <summary>Продолжение редактирования сохраняет незавершённую синхронизацию.</summary>
     [Fact]
     public async Task CancelPendingSync_ShowsWarningAndHonoursRejection()
     {
@@ -305,16 +338,16 @@ public sealed class EquipmentFormTests
         await CreatePendingSync(fixture, page);
 
         page.FindAll("button").Single(item => item.TextContent.Trim() == "Отмена").Click();
-        provider.WaitForAssertion(() => Assert.Contains("При закрытии повтор из этой формы будет потерян", provider.Markup));
-        await provider.FindAll("button").Single(item => item.TextContent.Trim() == "Нет").ClickAsync();
-        provider.WaitForAssertion(() => Assert.DoesNotContain("Закрытие формы", provider.Markup));
+        provider.WaitForAssertion(() => Assert.Contains(CloseMainWithoutSaving, provider.Markup));
+        await ClickMainDialogButtonAsync(provider, ContinueMainEditing);
+        provider.WaitForAssertion(() => Assert.DoesNotContain(CloseMainWithoutSaving, provider.Markup));
 
         Assert.NotNull(GetPrivate(page.Instance, "_pendingPhoneSync"));
         Assert.DoesNotContain(context.JSInterop.Invocations.ToList(),
             invocation => invocation.Identifier == "clayModelEquipmentForm.close");
     }
 
-    /// <summary>Подтверждение закрытия pending выполняется через реальные Отмена и Да.</summary>
+    /// <summary>Явное закрытие не удаляет незавершённую синхронизацию.</summary>
     [Fact]
     public async Task CancelPendingSync_ConfirmationClosesForm()
     {
@@ -325,11 +358,13 @@ public sealed class EquipmentFormTests
         await CreatePendingSync(fixture, page);
 
         page.FindAll("button").Single(item => item.TextContent.Trim() == "Отмена").Click();
-        provider.WaitForAssertion(() => Assert.Contains("При закрытии повтор из этой формы будет потерян", provider.Markup));
-        await provider.FindAll("button").Single(item => item.TextContent.Trim() == "Да").ClickAsync();
+        provider.WaitForAssertion(() => Assert.Contains(CloseMainWithoutSaving, provider.Markup));
+        await ClickMainDialogButtonAsync(provider, CloseMainWithoutSaving);
 
         page.WaitForAssertion(() => Assert.Contains(context.JSInterop.Invocations,
             invocation => invocation.Identifier == "clayModelEquipmentForm.close"));
+        Assert.Empty(context.JSInterop.Invocations[ReplaceMainScope]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.discard"]);
     }
 
     /// <summary>Refresh после подтверждения перезагружает запись и сохраняет pending для повтора.</summary>
@@ -344,7 +379,7 @@ public sealed class EquipmentFormTests
         var requestCount = fixture.Service.Requests.Count;
 
         page.FindAll("button").Single(item => item.TextContent.Trim() == "Обновить").Click();
-        provider.WaitForAssertion(() => Assert.Contains("Обновление записи сохранит ожидающую синхронизацию", provider.Markup));
+        provider.WaitForAssertion(() => Assert.Contains("Ожидающая синхронизация и возможность повтора", provider.Markup));
         await provider.FindAll("button").Single(item => item.TextContent.Trim() == "Да").ClickAsync();
 
         page.WaitForAssertion(() => Assert.Equal(requestCount + 1, fixture.Service.Requests.Count));
@@ -364,16 +399,16 @@ public sealed class EquipmentFormTests
 
         var rejectedChange = new LocationChangingContext { TargetLocation = "http://localhost/Equipment/EquipmentForm?id=8" };
         var rejectedTask = InvokeHandler(page, "BeforeInternalNavigationAsync", rejectedChange);
-        provider.WaitForAssertion(() => Assert.Contains("При закрытии повтор из этой формы будет потерян", provider.Markup));
-        await provider.FindAll("button").Single(item => item.TextContent.Trim() == "Нет").ClickAsync();
+        provider.WaitForAssertion(() => Assert.Contains(CloseMainWithoutSaving, provider.Markup));
+        await ClickMainDialogButtonAsync(provider, ContinueMainEditing);
         await rejectedTask;
         WaitForSn(page, "CLAY_TEST_7");
         Assert.NotNull(GetPrivate(page.Instance, "_pendingPhoneSync"));
 
         var confirmedChange = new LocationChangingContext { TargetLocation = "http://localhost/Equipment/EquipmentForm?id=8" };
         var confirmedTask = InvokeHandler(page, "BeforeInternalNavigationAsync", confirmedChange);
-        provider.WaitForAssertion(() => Assert.Contains("При закрытии повтор из этой формы будет потерян", provider.Markup));
-        await provider.FindAll("button").Single(item => item.TextContent.Trim() == "Да").ClickAsync();
+        provider.WaitForAssertion(() => Assert.Contains(CloseMainWithoutSaving, provider.Markup));
+        await ClickMainDialogButtonAsync(provider, CloseMainWithoutSaving);
         await confirmedTask;
         await page.InvokeAsync(() => fixture.Navigation.NavigateTo(confirmedChange.TargetLocation));
 
@@ -1057,9 +1092,9 @@ public sealed class EquipmentFormTests
         Assert.Null(GetPrivate(page.Instance, "_mainConflictMessage"));
     }
 
-    /// <summary>Read-only сверка подтверждённого результата завершает Unknown без повторной записи.</summary>
+    /// <summary>Совпадение данных сохраняет Unknown, пока нет доказуемого результата операции.</summary>
     [Fact]
-    public async Task ReconcileDraftOperation_MatchingSnapshot_CommitsWithoutWrites()
+    public async Task ReconcileDraftOperation_MatchingSnapshot_KeepsUnknownWithoutWrites()
     {
         var fixture = CreateFixture();
         await using var context = fixture.Context;
@@ -1069,7 +1104,8 @@ public sealed class EquipmentFormTests
 
         await InvokeHandler(page, "ReconcileDraftOperationAsync");
 
-        Assert.False((bool)GetPrivate(page.Instance, "_draftOperationUnresolved")!);
+        Assert.True((bool)GetPrivate(page.Instance, "_draftOperationUnresolved")!);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
         Assert.Equal(0, fixture.Service.UpdateCalls);
         Assert.Equal(0, fixture.Service.UpdateWithPhonesCalls);
         Assert.Equal(0, fixture.Service.SyncCalls);
@@ -1208,6 +1244,10 @@ public sealed class EquipmentFormTests
         WaitForSn(page, "CLAY_TEST_7");
         SetPrivate(page.Instance, "_canEditSim", true);
         SetPrivate(page.Instance, "_selectedType", new EquipmentType { Id = 27, HasSimCharacteristics = 1 });
+        var original = EquipmentSimConcurrencyTests.Source();
+        original.EditorVersion = original.CaptureVersion();
+        fixture.Service.SimEditorSnapshot = original;
+        SetPrivate(page.Instance, "_simCards", new List<EquipmentSimCard> { original });
         var dialogAdded = TrackNextDialog(context);
         var pending = InvokeHandler(page, "DeleteSimAsync");
         var dialog = await dialogAdded.Task.WaitAsync(TimeSpan.FromSeconds(2));
@@ -1363,7 +1403,8 @@ public sealed class EquipmentFormTests
         await editor.FindAll("button").Single(button => button.TextContent.Trim() == "OK").ClickAsync();
 
         editor.WaitForAssertion(() => Assert.Contains("Результат команды «Сохранение бухгалтерского учёта» неизвестен", editor.Markup));
-        Assert.Same(draft, fixture.Service.LastAccountingDraft);
+        Assert.NotSame(draft, fixture.Service.LastAccountingDraft);
+        Assert.Equal(draft.Notes, fixture.Service.LastAccountingDraft?.Notes);
         Assert.Equal("new draft", editor.Instance.Value.Notes);
         Assert.Equal(existing.ChangedAt, editor.Instance.Value.ChangedAt);
         Assert.True(editor.FindAll("button").Single(button => button.TextContent.Trim() == "OK").HasAttribute("disabled"));
@@ -2039,13 +2080,336 @@ public sealed class EquipmentFormTests
         Assert.True(PrivateBool(page.Instance, "_notFound"));
     }
 
+    /// <summary>Открытая карточка обновляет сроки и статус SIM после полуночи в часовом поясе клиента.</summary>
+    [Fact]
+    public async Task BusinessDayRollover_RefreshesOverdueAndSimBlockWithoutReload()
+    {
+        var today = DateTime.UtcNow.AddHours(3).Date;
+        var beforeMidnight = new DateTimeOffset(today.AddHours(20).AddMinutes(59), TimeSpan.Zero);
+        var clock = new EquipmentDayClock(beforeMidnight);
+        var fixture = CreateFixture(sim: true);
+        await using var context = fixture.Context;
+        context.Services.AddSingleton<TimeProvider>(clock);
+        fixture.Service.StoredLocations.Add(new EquipmentLocationPeriod
+        {
+            EquipmentId = 7, LocationId = 55, LocationName = "Срок расположения",
+            ReturnDate = today, FromUtc = today.AddDays(-1),
+        });
+        fixture.Service.StoredResponsibles.Add(new EquipmentResponsiblePeriod
+        {
+            EquipmentId = 7, EmployeeId = 4, EmployeeName = "Срок ответственности",
+            ReturnDate = today, FromUtc = today.AddDays(-1),
+        });
+        fixture.Service.StoredSimServices.Add(new EquipmentSimService
+        {
+            Id = 21, ServiceTypeId = "_BLOCK", ServiceName = "Блокировка до полуночи",
+            DateFrom = today.AddDays(-1), DateTo = today,
+        });
+        fixture.Service.StoredSimServices.Add(new EquipmentSimService
+        {
+            Id = 22, ServiceName = "План подключения", PlannedDateFrom = today,
+        });
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        Assert.Single(page.FindAll("[data-testid='sim-block-warning']"));
+        Assert.Empty(page.FindAll("tr.mud-theme-error"));
+        var model = CurrentModel(page.Instance);
+
+        clock.Tick(beforeMidnight.AddMinutes(1));
+
+        page.WaitForAssertion(() =>
+        {
+            Assert.Empty(page.FindAll("[data-testid='sim-block-warning']"));
+            Assert.DoesNotContain("Блокировка до полуночи", page.Markup);
+            var overdue = page.FindAll("tr.mud-theme-error").Select(row => row.TextContent).ToArray();
+            Assert.Contains(overdue, row => row.Contains("Срок расположения"));
+            Assert.Contains(overdue, row => row.Contains("Срок ответственности"));
+            Assert.Contains(overdue, row => row.Contains("План подключения"));
+        });
+        Assert.Equal(today.AddDays(1), Assert.Single(fixture.Service.SimServiceReadDates));
+        Assert.Same(model, CurrentModel(page.Instance));
+        Assert.Single(fixture.Service.Requests);
+        Assert.Equal(0, fixture.Service.UpdateCalls);
+        Assert.DoesNotContain(context.JSInterop.Invocations, call => call.Identifier == "clayDraftStore.beginOperationIntent");
+    }
+
+    private sealed class EquipmentDayClock(DateTimeOffset now) : TimeProvider
+    {
+        private DayTimer? _timer;
+        private DateTimeOffset _now = now;
+
+        public override DateTimeOffset GetUtcNow() => _now;
+
+        public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
+        {
+            _timer = new DayTimer(callback, state);
+            return _timer;
+        }
+
+        internal void Tick(DateTimeOffset now)
+        {
+            _now = now;
+            _timer?.Tick();
+        }
+
+        private sealed class DayTimer(TimerCallback callback, object? state) : ITimer
+        {
+            private bool _disposed;
+
+            internal void Tick()
+            {
+                if (!_disposed)
+                    callback(state);
+            }
+
+            public bool Change(TimeSpan dueTime, TimeSpan period) => !_disposed;
+            public void Dispose() => _disposed = true;
+            public ValueTask DisposeAsync()
+            {
+                Dispose();
+                return ValueTask.CompletedTask;
+            }
+        }
+    }
+
+    /// <summary>Проверка использует сохранённое имя текущего оборудования и штатный ограниченный транспорт.</summary>
+    [Fact]
+    public async Task EquipmentReachabilityUsesSavedHostInsteadOfEditedValue()
+    {
+        var fixture = CreateFixture(network: true);
+        fixture.Service.PingIdentityAllowed = true;
+        var transport = new EquipmentPingProbe();
+        await using var context = fixture.Context;
+        context.Services.AddSingleton(new PingDiagnosticService(transport, new EquipmentPingSettings(), TimeProvider.System));
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        CurrentModel(page.Instance).NetworkName = "unsaved.example.test";
+        fixture.Service.NextModel = new EquipmentEntity { Id = 7, NetworkName = "saved-host.example.test" };
+
+        await page.InvokeAsync(() => page.Find("[data-testid='equipment-ping-trigger'] button").ClickAsync());
+
+        Assert.Equal("saved-host.example.test", Assert.Single(transport.Hosts));
+        Assert.Equal(1, transport.Sends);
+        Assert.Contains("saved-host.example.test", page.Find("[data-testid='equipment-ping-status']").TextContent);
+        Assert.Contains("Узел отвечает", page.Find("[data-testid='equipment-ping-status']").TextContent);
+        Assert.Equal("unsaved.example.test", CurrentModel(page.Instance).NetworkName);
+    }
+
+    /// <summary>Нет сетевого I/O после отказа доверенной идентичности, отсутствия host или отказа allowlist.</summary>
+    [Theory]
+    [InlineData("denied", "Не удалось подтвердить текущего сотрудника")]
+    [InlineData("empty", "Сетевое имя не сохранено")]
+    [InlineData("forbidden", "не входит в настроенную область диагностики")]
+    public async Task EquipmentReachabilityDoesNotSendForRejectedTarget(string mode, string expected)
+    {
+        var fixture = CreateFixture(network: true);
+        fixture.Service.PingIdentityAllowed = mode != "denied";
+        var transport = new EquipmentPingProbe();
+        await using var context = fixture.Context;
+        context.Services.AddSingleton(new PingDiagnosticService(transport, new EquipmentPingSettings(), TimeProvider.System));
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        fixture.Service.NextModel = new EquipmentEntity
+        {
+            Id = 7, NetworkName = mode == "empty" ? null : "forbidden-host.example.test",
+        };
+
+        await page.InvokeAsync(() => page.Find("[data-testid='equipment-ping-trigger'] button").ClickAsync());
+
+        Assert.Contains(expected, page.Find("[data-testid='equipment-ping-status']").TextContent);
+        Assert.Empty(transport.Hosts);
+        Assert.Equal(0, transport.Sends);
+    }
+
+    /// <summary>Переход на другую запись отменяет задержанное определение исходного узла.</summary>
+    [Fact]
+    public async Task EquipmentReachabilityCancelsPendingReadOnRouteChange()
+    {
+        var fixture = CreateFixture(network: true);
+        fixture.Service.PingIdentityAllowed = true;
+        var transport = new EquipmentPingProbe { HoldDns = true };
+        await using var context = fixture.Context;
+        context.Services.AddSingleton(new PingDiagnosticService(transport, new EquipmentPingSettings(), TimeProvider.System));
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        fixture.Service.NextModel = new EquipmentEntity { Id = 7, NetworkName = "saved-host.example.test" };
+
+        var check = page.InvokeAsync(() => page.Find("[data-testid='equipment-ping-trigger'] button").ClickAsync());
+        await transport.DnsEntered.Task.WaitAsync(TimeSpan.FromSeconds(4));
+        await page.InvokeAsync(() => fixture.Navigation.NavigateTo("http://localhost/Equipment/EquipmentForm?id=8"));
+        WaitForSn(page, "CLAY_TEST_8");
+        await check.WaitAsync(TimeSpan.FromSeconds(4));
+
+        Assert.True(transport.DnsCancelled);
+        Assert.Equal(0, transport.Sends);
+        Assert.Empty(page.FindAll("[data-testid='equipment-ping-status']"));
+    }
+
+    /// <summary>Наблюдение запускается явно, соблюдает паузу и перечитывает сохранённый узел.</summary>
+    [Theory]
+    [InlineData("limit", 5, "Наблюдение завершено")]
+    [InlineData("revoke", 1, "Не удалось подтвердить текущего сотрудника")]
+    [InlineData("stop", 1, "Наблюдение остановлено")]
+    [InlineData("deadline", 1, "Время наблюдения истекло")]
+    [InlineData("route", 1, null)]
+    public async Task EquipmentObservationEnforcesScopeAndLimits(string mode, int sends, string? status)
+    {
+        var fixture = CreateFixture(network: true);
+        fixture.Service.PingIdentityAllowed = true;
+        var clock = new EquipmentObservationClock();
+        var transport = new EquipmentPingProbe();
+        await using var context = fixture.Context;
+        context.Services.AddSingleton<TimeProvider>(clock);
+        context.Services.AddSingleton(new PingDiagnosticService(transport, new EquipmentPingSettings(), clock));
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        var button = "[data-testid='equipment-observe-trigger'] button";
+        Assert.Empty(transport.Hosts);
+
+        fixture.Service.NextModel = new EquipmentEntity { Id = 7, NetworkName = "saved-host.example.test" };
+        var observation = page.InvokeAsync(() => page.Find(button).ClickAsync());
+
+        for (var sample = 0; sample < sends; sample++)
+        {
+            page.WaitForAssertion(() => Assert.True(clock.HasTimerDueIn(TimeSpan.FromSeconds(1))));
+            clock.Advance(TimeSpan.FromSeconds(1));
+            if (sample == 4) break;
+            page.WaitForAssertion(() => Assert.True(clock.HasTimerDueIn(TimeSpan.FromSeconds(5))));
+            Assert.Equal(sample + 1, transport.Sends);
+
+            if (mode == "stop")
+            {
+                await page.InvokeAsync(() => page.Find(button).ClickAsync());
+                break;
+            }
+
+            if (mode == "route")
+            {
+                await page.InvokeAsync(() => fixture.Navigation.NavigateTo("http://localhost/Equipment/EquipmentForm?id=8"));
+                WaitForSn(page, "CLAY_TEST_8");
+                break;
+            }
+
+            if (mode == "deadline")
+            {
+                clock.Advance(TimeSpan.FromSeconds(44));
+                break;
+            }
+
+            fixture.Service.PingIdentityAllowed = mode != "revoke";
+            fixture.Service.NextModel = new EquipmentEntity { Id = 7, NetworkName = "second-host.example.test" };
+            clock.Advance(TimeSpan.FromSeconds(4));
+            Assert.Equal(sample + 1, transport.Hosts.Count);
+            clock.Advance(TimeSpan.FromSeconds(1));
+        }
+
+        await observation.WaitAsync(TimeSpan.FromSeconds(5));
+        if (status is null)
+            Assert.Empty(page.FindAll("[data-testid='equipment-ping-status']"));
+        else
+            Assert.Contains(status, page.Find("[data-testid='equipment-ping-status']").TextContent);
+        clock.Advance(TimeSpan.FromMinutes(1));
+        Assert.Equal(sends, transport.Sends);
+        Assert.Equal(sends, transport.Hosts.Count);
+        Assert.Equal("saved-host.example.test", transport.Hosts[0]);
+        Assert.All(transport.Hosts.Skip(1), host => Assert.Equal("second-host.example.test", host));
+    }
+
+    private sealed class EquipmentObservationClock : TimeProvider
+    {
+        private readonly List<ManualTimer> _timers = [];
+        private TimeSpan _now;
+        public override DateTimeOffset GetUtcNow() => new DateTimeOffset(2026, 11, 26, 10, 0, 0, TimeSpan.Zero) + _now;
+        public bool HasTimerDueIn(TimeSpan delay)
+        {
+            lock (_timers) return _timers.Any(timer => timer.Due == _now + delay);
+        }
+
+        public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
+        {
+            lock (_timers)
+            {
+                var timer = new ManualTimer(this, callback, state);
+                _timers.Add(timer);
+                timer.Change(dueTime, period);
+                return timer;
+            }
+        }
+
+        public void Advance(TimeSpan duration)
+        {
+            List<ManualTimer> due;
+            lock (_timers)
+            {
+                _now += duration;
+                due = _timers.Where(timer => timer.Due is { } time && time <= _now).ToList();
+                foreach (var timer in due) timer.Due = null;
+            }
+            foreach (var timer in due) timer.Fire();
+        }
+
+        private sealed class ManualTimer(EquipmentObservationClock clock, TimerCallback callback, object? state) : ITimer
+        {
+            public TimeSpan? Due { get; set; }
+            public bool Change(TimeSpan dueTime, TimeSpan period)
+            {
+                lock (clock._timers) Due = dueTime == Timeout.InfiniteTimeSpan ? null : clock._now + dueTime;
+                return true;
+            }
+            public void Fire() => callback(state);
+            public void Dispose() { lock (clock._timers) { Due = null; clock._timers.Remove(this); } }
+            public ValueTask DisposeAsync() { Dispose(); return ValueTask.CompletedTask; }
+        }
+    }
+
+    private sealed class EquipmentPingSettings : IOptionsMonitor<PingDiagnosticOptions>
+    {
+        public PingDiagnosticOptions CurrentValue { get; } = new()
+        {
+            AllowedHosts = ["saved-host.example.test", "second-host.example.test"],
+            AllowedAddresses = ["127.0.0.1"],
+        };
+        public PingDiagnosticOptions Get(string? name) => CurrentValue;
+        public IDisposable? OnChange(Action<PingDiagnosticOptions, string?> listener) => null;
+    }
+
+    private sealed class EquipmentPingProbe : INetworkPingTransport
+    {
+        public List<string> Hosts { get; } = [];
+        public bool HoldDns { get; init; }
+        public bool DnsCancelled { get; private set; }
+        public int Sends { get; private set; }
+        public TaskCompletionSource DnsEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async Task<IPAddress[]> ResolveAsync(string host, CancellationToken ct)
+        {
+            Hosts.Add(host);
+            DnsEntered.TrySetResult();
+            if (HoldDns)
+            {
+                try { await Task.Delay(Timeout.InfiniteTimeSpan, ct); }
+                finally { DnsCancelled = ct.IsCancellationRequested; }
+            }
+            return [IPAddress.Loopback];
+        }
+
+        public Task<NetworkPingReply?> SendAsync(IPAddress address, CancellationToken ct)
+        {
+            Sends++;
+            return Task.FromResult<NetworkPingReply?>(new NetworkPingReply(IPStatus.Success, address, 32, 1, 128));
+        }
+    }
+
     private static Fixture CreateFixture(
         bool phones = false,
         bool network = false,
         bool phoneConfig = false,
         bool computer = false,
         IReadOnlyList<DocumentLookup>? writeOffActs = null,
-        int? writeOffDocumentId = null)
+        int? writeOffDocumentId = null, bool sim = false,
+        ClayDraftRestoreReadiness? draftReadiness = null,
+        ClayDraftEditorScopeState? mainScope = null,
+        bool acceptMainReplacement = true)
     {
         DapperColumnMapper.Initialize();
         var context = new BunitContext();
@@ -2056,14 +2420,25 @@ public sealed class EquipmentFormTests
         context.JSInterop.Setup<long>("clayGridTimeZone.localDateTimeToUtcMilliseconds", _ => true).SetResult(0L);
         context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.register", _ => true)
             .SetResult(new ClayDraftRestore("test-registration", false, 0, null, null));
+        context.JSInterop.Setup<ClayDraftRecoveryCandidate[]>("clayDraftStore.listRecoveryCandidates", _ => true).SetResult([]);
         context.JSInterop.Setup<ClayDraftStorageHealth>("clayDraftStore.getHealth", _ => true)
             .SetResult(new ClayDraftStorageHealth(true, 0, null, false, 0, 0));
+        context.JSInterop.Setup<ClayDraftEditorScopeState>("clayDraftStore.readEditorScope", _ => true)
+            .SetResult(mainScope ?? new ClayDraftEditorScopeState(21, false, false));
+        context.JSInterop.Setup<bool>(ReplaceMainScope, _ => true).SetResult(acceptMainReplacement);
+        context.JSInterop.Setup<ClayDraftRawApplyResult>("clayDraftStore.applyRaw", _ => true)
+            .SetResult(new ClayDraftRawApplyResult([], []));
+        context.JSInterop.Setup<ClayDraftRawApplyResult>("clayDraftStore.applyPendingRaw", _ => true)
+            .SetResult(new ClayDraftRawApplyResult([], []));
+        context.JSInterop.Setup<ClayDraftRestoreReadiness>("clayDraftStore.getRestoreReadiness", _ => true)
+            .SetResult(draftReadiness ?? new ClayDraftRestoreReadiness(true, [], []));
         context.JSInterop.Setup<string>("clayDraftStore.beginOperationIntent", _ => true)
             .SetResult("""{"version":1,"attemptId":"test-attempt","kind":"test","status":"running","revision":1,"data":"{}","scopes":[],"acceptLegacyTyped":false,"legacyTypedRevision":0}""");
         context.Services.AddMudServices();
         context.Services.AddMudExtensions();
         context.Services.AddScoped<DbManager>(_ => CreateDb());
         context.Services.AddSingleton(new ClayAppSettings());
+        EquipmentPeriodDialogHelpTests.AddThemeState(context);
         context.Services.AddScoped<ClayErrorService>();
         context.Services.AddScoped<ClayDraftService>();
         context.Services.AddSingleton(new ClayFormWindowService(js));
@@ -2090,8 +2465,8 @@ public sealed class EquipmentFormTests
         context.Services.AddSingleton<IConfiguration>(configuration);
         context.Services.AddSingleton<EquipmentFormService>(service);
         context.Services.AddSingleton(new EquipmentTypeSelectDataSource(CreateDb(
-            Script.Rows(TypeRow(phones, network, phoneConfig, computer)), Script.Rows(TypeRow(phones, network, phoneConfig, computer)),
-            Script.Rows(TypeRow(phones, network, phoneConfig, computer)), Script.Rows(TypeRow(phones, network, phoneConfig, computer)))));
+            Script.Rows(TypeRow(phones, network, phoneConfig, computer, sim)), Script.Rows(TypeRow(phones, network, phoneConfig, computer, sim)),
+            Script.Rows(TypeRow(phones, network, phoneConfig, computer, sim)), Script.Rows(TypeRow(phones, network, phoneConfig, computer, sim)))));
         context.Services.AddSingleton(new EquipmentModelSelectDataSource(CreateDb(
             Script.Rows(ModelRow(network, phoneConfig)),
             Script.Rows(ModelRow(network, phoneConfig)),
@@ -2253,11 +2628,12 @@ public sealed class EquipmentFormTests
         .Invoke(page, null)!;
 
     private static Dictionary<string, object?> TypeRow(
-        bool phones = false, bool network = false, bool phoneConfig = false, bool computer = false) => Script.Row(
+        bool phones = false, bool network = false, bool phoneConfig = false, bool computer = false, bool sim = false) => Script.Row(
         ("КодТипаОборудования", phoneConfig ? 30 : 103), ("ТипОборудования", phoneConfig ? "IP-телефон" : "Шторы"),
         ("SNобязателен", (byte)0), ("ЕстьХарактеристикиМонитора", (byte)0),
         ("ЕстьТелефонныйНомер", phones ? (byte)1 : (byte)0), ("ЕстьMACадрес", network ? (byte)1 : (byte)0),
         ("ЕстьХарактеристикиКомпьютера", computer ? (byte)1 : (byte)0),
+        (nameof(EquipmentType.HasSimCharacteristics), sim ? (byte)1 : (byte)0),
         ("ЕстьСетевоеИмя", network ? (byte)1 : (byte)0));
 
     private static Dictionary<string, object?> ModelRow(bool network = false, bool phoneConfig = false) => Script.Row(
@@ -2291,6 +2667,7 @@ public sealed class EquipmentFormTests
         public EquipmentEntity? Updated { get; private set; }
         public Exception? SaveException { get; set; }
         public Exception? SyncException { get; set; }
+        public string? PhonePlanningError { get; set; }
         public Exception? ResponsibleException { get; set; }
         public EquipmentResponsiblePeriod? ResponsibleUpdated { get; private set; }
         public bool DeferredUpdate { get; set; }
@@ -2388,7 +2765,7 @@ public sealed class EquipmentFormTests
                 Accounts = request.IncludeAccounts ? StoredAccounts.ToList() : [],
                 ComputerHistory = request.IncludeComputer ? StoredComputers.ToList() : [],
                 SimCards = [],
-                SimServices = [],
+                SimServices = request.IncludeSim ? StoredSimServices.ToList() : [],
                 SimServiceTypes = [],
                 Licenses = [],
                 LicenseTypes = [],
@@ -2460,13 +2837,17 @@ public sealed class EquipmentFormTests
 
         public Queue<TaskCompletionSource<IReadOnlyList<EquipmentSimService>>> SimServiceReadCompletions { get; } = new();
         public bool DeferSimServiceRead { get; set; }
+        public List<EquipmentSimService> StoredSimServices { get; } = [];
+        public List<DateTime?> SimServiceReadDates { get; } = [];
 
         public override async Task<IReadOnlyList<EquipmentSimService>> GetSimServicesAsync(
             int equipmentId, bool showHistory, bool showRequired, DateTime? businessToday)
         {
+            SimServiceReadDates.Add(businessToday);
             if (DeferSimServiceRead)
                 return await SimServiceReadCompletions.Dequeue().Task;
-            return [];
+            return StoredSimServices.Where(service => showHistory || service.DateTo is null ||
+                service.DateTo.Value.Date >= businessToday?.Date).ToList();
         }
 
         public override Task<IReadOnlyList<SimServiceType>> GetSimServiceTypesAsync() =>
@@ -2522,16 +2903,20 @@ public sealed class EquipmentFormTests
                 UpsServersRequested.TrySetResult();
                 await UpsServersCompletion.Task;
             }
-            return [];
+            return StoredUpsServers.ToList();
         }
 
         public override Task<IReadOnlyList<UpsTest>> GetUpsTestsAsync(int upsEquipmentId)
         {
             if (UpsReadFailureAt == 2 && UpsReadException is not null)
                 throw UpsReadException;
-            return Task.FromResult<IReadOnlyList<UpsTest>>([]);
+            return Task.FromResult<IReadOnlyList<UpsTest>>(StoredUpsTests.ToList());
         }
 
+        public List<UpsServerLink> StoredUpsServers { get; } = [];
+        public List<UpsTest> StoredUpsTests { get; } = [];
+        public IReadOnlyCollection<UpsServerLink>? LastUpsOriginalServers { get; private set; }
+        public IReadOnlyCollection<UpsTest>? LastUpsOriginalTests { get; private set; }
         public IReadOnlyCollection<UpsTest>? LastUpsCurrentTests { get; private set; }
 
         public override Task SaveUpsDetailsAsync(
@@ -2542,6 +2927,8 @@ public sealed class EquipmentFormTests
             IReadOnlyCollection<UpsTest> originalTests,
             IReadOnlyCollection<UpsTest> currentTests)
         {
+            LastUpsOriginalServers = originalServers.ToList();
+            LastUpsOriginalTests = originalTests.ToList();
             LastUpsCurrentTests = currentTests.ToList();
             return UpsSaveException is not null ? Task.FromException(UpsSaveException) : Task.CompletedTask;
         }
@@ -2591,6 +2978,12 @@ public sealed class EquipmentFormTests
         public bool DeferOwnerRead { get; set; }
         public Exception? OwnerReadException { get; set; }
 
+        public bool? PingIdentityAllowed { get; set; }
+
+        public override Task<Employee?> GetCurrentUserAsync() => PingIdentityAllowed is { } allowed
+            ? Task.FromResult<Employee?>(allowed ? new Employee { Id = 4 } : null)
+            : base.GetCurrentUserAsync();
+
         public override async Task<Employee?> GetCurrentUserWithRolesAsync()
         {
             if (OwnerReadException is not null)
@@ -2637,7 +3030,12 @@ public sealed class EquipmentFormTests
             return Task.CompletedTask;
         }
 
-        public override Task DeleteSimAsync(int equipmentId)
+        public EquipmentSimCard? SimEditorSnapshot { get; set; }
+
+        public override Task<EquipmentSimCard?> GetSimEditorSnapshotAsync(int equipmentId) =>
+            Task.FromResult(SimEditorSnapshot);
+
+        public override Task DeleteSimAsync(int equipmentId, string? expectedVersion)
         {
             DeleteSimCalls++;
             return Task.CompletedTask;
@@ -2714,15 +3112,17 @@ public sealed class EquipmentFormTests
                 equipment.EquipmentTypeId, original.ToList(), current.ToList());
         }
 
-        public override Task<PhoneSyncAttempt> SynchronizePhoneAttemptAsync(EquipmentPhoneSyncIntent intent)
+        public override Task<PhoneSyncAttempt> SynchronizePhoneAttemptAsync(EquipmentPhoneSyncIntent intent,
+            Func<PhoneSyncAttempt, Task>? checkpoint = null)
         {
             SyncCalls++;
             if (SyncException is not null)
                 throw SyncException;
-            return Task.FromResult(CreateAttempt(intent, SyncResults));
+            return Task.FromResult(CreateAttempt(intent, SyncResults) with { PlanningError = PhonePlanningError });
         }
 
-        public override Task<PhoneSyncAttempt> ConfigurePhoneEquipmentAttemptAsync(int equipmentId)
+        public override Task<PhoneSyncAttempt> ConfigurePhoneEquipmentAttemptAsync(int equipmentId,
+            Func<PhoneSyncAttempt, Task>? checkpoint = null)
         {
             SyncCalls++;
             if (SyncException is not null)
@@ -2732,13 +3132,16 @@ public sealed class EquipmentFormTests
             return Task.FromResult(CreateAttempt(intent, SyncResults));
         }
 
-        public override Task<PhoneSyncAttempt> RetryPhoneSyncAttemptAsync(PhoneSyncAttempt attempt)
+        public override Task<PhoneSyncAttempt> RetryPhoneSyncAttemptAsync(PhoneSyncAttempt attempt,
+            Func<PhoneSyncAttempt, Task>? checkpoint = null)
         {
             SyncCalls++;
             LastSyncOperations = attempt.Operations.Where(result => result.CanRetry).Select(result => result.Operation).ToArray();
             if (SyncException is not null)
                 throw SyncException;
-            return Task.FromResult(SyncResults is null ? attempt : CreateAttempt(attempt.Intent, SyncResults));
+            return Task.FromResult(SyncResults is null && attempt.PlanningError is null
+                ? attempt
+                : CreateAttempt(attempt.Intent, SyncResults) with { PlanningError = PhonePlanningError });
         }
 
         public override Task<PhoneSyncReconciliation> ReconcilePhoneSyncAttemptAsync(PhoneSyncAttempt attempt) =>

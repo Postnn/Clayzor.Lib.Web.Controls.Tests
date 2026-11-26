@@ -219,6 +219,6 @@ public sealed class PhoneSaveBuilderTests
     private static PhoneSaveRequest Request() => new()
     {
         Phone = new Phone { Id = 5, Number = "101", FullNumber = "101", PhoneTypeId = 1, StationId = 1, Notes = "old" },
-        OriginalPhone = new Phone { Id = 5, Number = "101", FullNumber = "101", PhoneTypeId = 1, StationId = 1, Notes = "old" },
+        OriginalPhone = new Phone { Id = 5, ChangedAtUtc = new DateTime(2026, 1, 2), Number = "101", FullNumber = "101", PhoneTypeId = 1, StationId = 1, Notes = "old" },
     };
 }

@@ -19,7 +19,7 @@ using MudBlazor.Services;
 namespace Clayzor.Lib.Web.Controls.Tests;
 
 /// <summary>Восстановление и принятие сырого ввода через реальный редактор SlBl.</summary>
-public sealed class SlBlEditorRestoreTests
+public sealed partial class SlBlEditorRestoreTests
 {
     private const string Address = "mailbox@example.invalid";
     private const string Baseline = "base.example.invalid";
@@ -44,7 +44,7 @@ public sealed class SlBlEditorRestoreTests
         var initial = context.JSInterop.Setup<ClayDraftRawApplyResult>("clayDraftStore.applyRaw", _ => !ready);
         if (throws) initial.SetException(new JSException("Временная ошибка применения"));
         else initial.SetResult(new ClayDraftRawApplyResult([], ["data:slbl.text"]));
-        context.JSInterop.Setup<ClayDraftRawApplyResult>("clayDraftStore.applyRaw", _ => ready)
+        context.JSInterop.Setup<ClayDraftRawApplyResult>("clayDraftStore.applyPendingRaw", _ => ready)
             .SetResult(new ClayDraftRawApplyResult(["data:slbl.text"], []));
         context.JSInterop.Setup<ClayDraftRestoreReadiness>("clayDraftStore.getRestoreReadiness", _ => !ready)
             .SetResult(new ClayDraftRestoreReadiness(false, ["main"], []));
@@ -70,7 +70,9 @@ public sealed class SlBlEditorRestoreTests
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.discard"]);
 
         ready = true;
-        await Button(form, "Повторить восстановление").ClickAsync(new MouseEventArgs());
+        await form.InvokeAsync(() => Button(form, "Повторить восстановление").ClickAsync(new MouseEventArgs()));
+        Assert.Single(context.JSInterop.Invocations["clayDraftStore.applyPendingRaw"]);
+        Assert.Single(context.JSInterop.Invocations["clayDraftStore.applyRaw"]);
         form.WaitForAssertion(() => Assert.False(Button(form, "Сохранить").HasAttribute("disabled")));
         var saving = Button(form, "Сохранить").ClickAsync(new MouseEventArgs());
         dialogs.WaitForAssertion(() => Assert.Contains("до двух минут", dialogs.Markup));
@@ -160,10 +162,69 @@ public sealed class SlBlEditorRestoreTests
         Assert.Equal(1, sql.Dispatches);
         Assert.Equal(1, sql.ComparisonReads);
         Assert.Single(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
+        Assert.Equal(6L, Assert.Single(context.JSInterop.Invocations["clayDraftStore.recordConfirmedOperation"]).Arguments[1]);
+        var order = context.JSInterop.Invocations.Select(call => call.Identifier).ToList();
+        Assert.True(order.IndexOf("clayDraftStore.recordConfirmedOperation") < order.IndexOf("clayDraftStore.commitOperation"));
         var commits = context.JSInterop.Invocations["clayDraftStore.commitOperation"];
         Assert.Equal(failCleanup ? 2 : 1, commits.Count);
         Assert.All(commits, call => Assert.Equal(6L, call.Arguments[1]));
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.unknownOperation"]);
+    }
+
+    /// <summary>Повторное открытие известного результата сохраняет новый черновик; совпадение Unknown не подтверждает исход.</summary>
+    [Theory]
+    [InlineData("confirmed", true, false)]
+    [InlineData("confirmed", false, true)]
+    [InlineData("unknown", true, false)]
+    public async Task RestoredReceiptOnlyCleansConfirmedAndPreservesLaterInput(string status, bool hasTyped, bool hasRaw)
+    {
+        using var sql = new MailboxConnection();
+        sql.ExternalWrite(status == "confirmed" ? "external.example.invalid" : LatestText);
+        await using var context = new BunitContext();
+        context.JSInterop.Mode = JSRuntimeMode.Loose;
+        var snapshot = JsonSerializer.Serialize(new { Address, Kind = SlBlKind.Safe, Original = Baseline, Current = OldText });
+        var command = JsonSerializer.Serialize(new SlBlIntent(Guid.NewGuid(), Address, SlBlKind.Safe, Baseline, LatestText));
+        var marker = JsonSerializer.Serialize(new
+        {
+            version = 1, attemptId = "previous-slbl", kind = "slbl.sync", status, revision = 6, data = command,
+            scopes = Array.Empty<object>(), acceptLegacyTyped = false, legacyTypedRevision = 0,
+        });
+        context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.register", _ => true)
+            .SetResult(new ClayDraftRestore("slbl-previous", true, 8, null, marker,
+                hasTyped ? new Dictionary<string, string> { ["main"] = snapshot } : null));
+        context.JSInterop.Setup<ClayDraftRawApplyResult>("clayDraftStore.applyRaw", _ => true)
+            .SetResult(new ClayDraftRawApplyResult([], []));
+        context.JSInterop.Setup<ClayDraftRestoreReadiness>("clayDraftStore.getRestoreReadiness", _ => true)
+            .SetResult(new ClayDraftRestoreReadiness(true, [], []));
+
+        ConfigureEditor(context, sql, hasRaw);
+        var form = context.Render<SlBlForm>(p => p.Add(component => component.Id, Address + ":0"));
+        var expected = hasTyped ? OldText : LatestText;
+        form.WaitForAssertion(() => Assert.Contains(expected, form.Markup));
+        await Button(form, "Обновить").ClickAsync(new MouseEventArgs());
+
+        Assert.Contains(expected, form.Find("textarea").TextContent);
+        Assert.True(Button(form, "Сохранить").HasAttribute("disabled"));
+        if (status == "confirmed")
+        {
+            Assert.Contains("Синхронизация подтверждена", form.Markup);
+            Assert.Equal(6L, Assert.Single(context.JSInterop.Invocations["clayDraftStore.commitOperation"]).Arguments[1]);
+            Assert.Equal(0, sql.ComparisonReads);
+            if (hasRaw)
+                form.WaitForAssertion(() => Assert.Single(context.JSInterop.Invocations["clayDraftStore.applyRaw"]));
+            else
+                Assert.Empty(context.JSInterop.Invocations["clayDraftStore.applyRaw"]);
+        }
+        else
+        {
+            Assert.Contains("исход попытки не подтверждён", form.Markup);
+            Assert.Empty(context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
+            Assert.Equal(1, sql.ComparisonReads);
+        }
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.recordConfirmedOperation"]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.discard"]);
+        Assert.Equal(0, sql.Dispatches);
     }
 
     /// <summary>Частичный результат сохраняет фактический baseline вместе с локальным текстом и intent.</summary>
@@ -272,13 +333,15 @@ public sealed class SlBlEditorRestoreTests
         }
     }
 
-    private static IRenderedComponent<MudDialogProvider> ConfigureEditor(BunitContext context, MailboxConnection sql)
+    private static IRenderedComponent<MudDialogProvider> ConfigureEditor(BunitContext context, MailboxConnection sql, bool remainingRaw = false, bool permitWrite = true)
     {
+        context.JSInterop.Setup<ClayDraftEditorScopeState>("clayDraftStore.readEditorScope", _ => true)
+            .SetResult(new ClayDraftEditorScopeState(8, remainingRaw, false));
         DapperColumnMapper.Initialize();
         context.Services.AddScoped(_ => new DbManager("Server=fixture", new FakeSqlErrorHandler(), () => sql));
         context.Services.AddScoped<ClayDraftService>();
         context.Services.AddSingleton<AuthenticationStateProvider, FixtureAuthentication>();
-        context.Services.AddSingleton<ISlBlMailboxWritePolicy, FixtureWritePolicy>();
+        context.Services.AddSingleton<ISlBlMailboxWritePolicy>(new FixtureWritePolicy(permitWrite));
         context.Services.AddMudServices();
         var dialogs = context.Render<MudDialogProvider>();
         context.Render<MudPopoverProvider>();
@@ -295,10 +358,10 @@ public sealed class SlBlEditorRestoreTests
             new AuthenticationState(new ClaimsPrincipal(new ClaimsIdentity([new Claim(ClaimTypes.Name, "fixture")], "test"))));
     }
 
-    private sealed class FixtureWritePolicy : ISlBlMailboxWritePolicy
+    private sealed class FixtureWritePolicy(bool permitted) : ISlBlMailboxWritePolicy
     {
         public Task<bool> AllowsAsync(Employee actor, string address, SlBlKind kind, CancellationToken ct) =>
-            Task.FromResult(actor.Id == 4 && address == Address && kind == SlBlKind.Safe);
+            Task.FromResult(permitted && actor.Id == 4 && address == Address && kind == SlBlKind.Safe);
     }
 
     private sealed class MailboxConnection : DbConnection

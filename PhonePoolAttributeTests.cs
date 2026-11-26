@@ -22,7 +22,7 @@ using MudBlazor.Services;
 namespace Clayzor.Lib.Web.Controls.Tests;
 
 /// <summary>Контракт составного ключа, записи и общих команд карточки атрибута пула.</summary>
-public sealed class PhonePoolAttributeTests
+public sealed partial class PhonePoolAttributeTests
 {
     private static readonly PhonePoolAttributeKey Key = new(1002, "Тест+%");
 
@@ -211,7 +211,11 @@ public sealed class PhonePoolAttributeTests
         page.WaitForAssertion(() => Assert.Contains(localValue, page.Markup));
         Assert.Contains(Key.PoolId.ToString(), page.Markup);
         Assert.Contains(Key.Type, page.Markup);
-        Assert.Empty(page.FindAll("[data-draft-key='pool-attribute.value']"));
+        var field = page.Find("section[data-draft-scope=main] input[data-draft-key='pool-attribute.value']");
+        Assert.True(field.HasAttribute("readonly"));
+        Assert.False(field.HasAttribute("disabled"));
+        Assert.Equal(localValue, field.GetAttribute("value"));
+        Assert.Contains(context.JSInterop.Invocations["clayDraftStore.applyRaw"], call => Equals(call.Arguments[1], "main"));
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.discard"]);
         Assert.DoesNotContain("Тестовый пул", page.Markup);
         Assert.True(Button(page, "Применить").HasAttribute("disabled"));
@@ -266,6 +270,70 @@ public sealed class PhonePoolAttributeTests
         Assert.True(Button(page, "Применить").HasAttribute("disabled"));
         Assert.Empty(sql.Writes);
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.saveTypedScope"]);
+    }
+
+    /// <summary>Повторное чтение восстанавливает сверку, сохраняя черновик и прежний запрет записи.</summary>
+    [Fact]
+    public async Task RecoveryRetryShowsAuthorizedPairWithoutReplacingLocalDraft()
+    {
+        using var sql = new Probe { TypeExists = false };
+        await using var context = CreateContext(sql, new ClayDraftRestore("recovery", true, 7, null, null,
+            new Dictionary<string, string> { ["main"] = RecoverySnapshot("Моё сохранённое значение") }));
+        var page = context.Render<PhonePoolAttributeForm>();
+        page.WaitForAssertion(() => Assert.Contains("Моё сохранённое значение", page.Markup));
+
+        sql.TypeExists = true;
+        sql.Row = Value("Актуальное значение");
+        Assert.False(Button(page, "Обновить").HasAttribute("disabled"));
+        await Button(page, "Обновить").ClickAsync(new MouseEventArgs());
+
+        Assert.Contains("Актуальное значение", page.Markup);
+        Assert.Contains("Моё сохранённое значение", page.Markup);
+        Assert.True(page.Find("input[data-draft-key='pool-attribute.value']").HasAttribute("readonly"));
+        Assert.True(Button(page, "Применить").HasAttribute("disabled"));
+        Assert.DoesNotContain(page.FindAll("button"), button => button.TextContent.Trim() == "Удалить");
+
+        sql.DenyRead = true;
+        await Button(page, "Повторить чтение атрибута").ClickAsync(new MouseEventArgs());
+        Assert.DoesNotContain("Актуальное значение", page.Markup);
+        Assert.Contains("Нет доступа к данным пары атрибута", page.Markup);
+        Assert.Contains("Моё сохранённое значение", page.Markup);
+        Assert.Empty(sql.Writes);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.discard"]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.applyRaw"].Skip(1));
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.saveTypedScope"]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
+    }
+
+    /// <summary>Ответ оставшегося в работе чтения не попадает в другую карточку после навигации.</summary>
+    [Fact]
+    public async Task RecoveryRetryIgnoresResultAfterRouteChanges()
+    {
+        using var sql = new Probe { TypeExists = false };
+        await using var context = CreateContext(sql, new ClayDraftRestore("recovery", true, 7, null, null));
+        var page = context.Render<PhonePoolAttributeForm>();
+        page.WaitForElement("section[data-draft-scope=main] input[readonly]");
+
+        sql.TypeExists = true;
+        sql.Row = Value("Значение предыдущего маршрута");
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        sql.BeforeCardRead = () => { entered.TrySetResult(); return release.Task; };
+
+        var read = Button(page, "Повторить чтение атрибута").ClickAsync(new MouseEventArgs());
+        try
+        {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await page.InvokeAsync(() => context.Services.GetRequiredService<NavigationManager>()
+                .NavigateTo("/Equipment/PhonePoolAtribute_form?id=invalid"));
+            page.WaitForAssertion(() => Assert.Equal("invalid", page.Instance.Id));
+        }
+        finally { release.TrySetResult(); }
+        await read.WaitAsync(TimeSpan.FromSeconds(5));
+
+        page.WaitForAssertion(() => Assert.Contains("Не удалось установить идентификатор", page.Markup));
+        Assert.DoesNotContain("Значение предыдущего маршрута", page.Markup);
+        Assert.Empty(sql.Writes);
     }
 
     /// <summary>Доступ к черновику требует валидной пары и доверенной идентичности.</summary>
@@ -335,12 +403,15 @@ public sealed class PhonePoolAttributeTests
     private sealed class Probe : DbConnection
     {
         public bool Allowed { get; set; } = true;
+        public bool EditAllowed { get; set; } = true;
+        public int EmployeeId { get; set; } = 4;
         public bool PoolExists { get; init; } = true;
         public bool TypeExists { get; set; } = true;
-        public bool DenyRead { get; init; }
+        public bool DenyRead { get; set; }
         public bool LoseCommit { get; init; }
         public int Affected { get; init; } = 1;
         public int Commits { get; set; }
+        public Func<Task>? BeforeCardRead { get; set; }
         public PhonePoolAttributeValue? Row { get; set; }
         public List<string> Writes { get; } = [];
         public override string ConnectionString { get; set; } = "";
@@ -389,15 +460,23 @@ public sealed class PhonePoolAttributeTests
         public override object ExecuteScalar() => throw new NotSupportedException();
         public override int ExecuteNonQuery() => throw new NotSupportedException();
 
+        protected override async Task<DbDataReader> ExecuteDbDataReaderAsync(CommandBehavior behavior, CancellationToken ct)
+        {
+            if (DbTransaction is null && owner.BeforeCardRead is { } wait &&
+                CommandText.Contains("@poolId", StringComparison.Ordinal))
+                await wait();
+            return ExecuteDbDataReader(behavior);
+        }
+
         protected override DbDataReader ExecuteDbDataReader(CommandBehavior behavior)
         {
-            if (CommandText.Contains("SUSER_SID()")) return Rows([("КодСотрудника", typeof(int))], [4]).CreateDataReader();
+            if (CommandText.Contains("SUSER_SID()")) return Rows([("КодСотрудника", typeof(int))], [owner.EmployeeId]).CreateDataReader();
             if (CommandText.Contains("fn_ТекущиеРоли"))
                 return Rows([("RoleId", typeof(int)), ("PersonId", typeof(int))],
                     owner.Allowed ? [(int)Роли.Дежурный_инженер, 0] : null).CreateDataReader();
             if (CommandText.Contains("HAS_PERMS_BY_NAME"))
                 return Rows([("CanRead", typeof(bool)), ("CanInsert", typeof(bool)), ("CanUpdate", typeof(bool)),
-                    ("CanDelete", typeof(bool))], [true, true, true, true]).CreateDataReader();
+                    ("CanDelete", typeof(bool))], [true, owner.EditAllowed, owner.EditAllowed, owner.EditAllowed]).CreateDataReader();
 
             Assert.Equal(Key.PoolId, Parameter("poolId"));
             Assert.Equal(Key.Type, Parameter("type"));

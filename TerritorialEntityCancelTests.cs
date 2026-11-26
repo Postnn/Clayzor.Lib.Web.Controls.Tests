@@ -217,7 +217,7 @@ public sealed class TerritorialEntityCancelTests
         public ValueTask DisposeAsync() => Context.DisposeAsync();
     }
 
-    private sealed class TransactionConnection(ScriptedConnection script) : DbConnection
+    internal sealed class TransactionConnection(ScriptedConnection script, Action? commit = null) : DbConnection
     {
         [System.Diagnostics.CodeAnalysis.AllowNull]
         public override string ConnectionString { get => script.ConnectionString; set => script.ConnectionString = value ?? ""; }
@@ -229,13 +229,13 @@ public sealed class TerritorialEntityCancelTests
         public override void Close() => script.Close();
         public override void ChangeDatabase(string databaseName) => throw new NotSupportedException();
         protected override DbCommand CreateDbCommand() => script.CreateCommand();
-        protected override DbTransaction BeginDbTransaction(IsolationLevel isolationLevel) => new Transaction(this, isolationLevel);
+        protected override DbTransaction BeginDbTransaction(IsolationLevel isolationLevel) => new Transaction(this, isolationLevel, commit);
 
-        private sealed class Transaction(DbConnection connection, IsolationLevel isolationLevel) : DbTransaction
+        private sealed class Transaction(DbConnection connection, IsolationLevel isolationLevel, Action? commit) : DbTransaction
         {
             protected override DbConnection DbConnection => connection;
             public override IsolationLevel IsolationLevel => isolationLevel;
-            public override void Commit() => throw new InvalidOperationException("A rejected write cannot be committed.");
+            public override void Commit() => (commit ?? throw new InvalidOperationException("A rejected write cannot be committed."))();
             public override void Rollback() { }
         }
     }

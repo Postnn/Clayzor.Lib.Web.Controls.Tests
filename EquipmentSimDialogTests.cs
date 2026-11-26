@@ -22,6 +22,7 @@ public sealed class EquipmentSimDialogTests
         await using var context = new BunitContext();
         context.JSInterop.Mode = JSRuntimeMode.Loose;
         context.Services.AddMudServices();
+        EquipmentPeriodDialogHelpTests.AddAppearance(context);
         context.Services.AddScoped<Clayzor.Lib.Web.Controls.Services.ClayDraftService>();
         context.Services.AddSingleton<IConfiguration>(new ConfigurationManager());
         context.Services.AddSingleton(new EquipmentFormService(CreateDb(), new TestAuthenticationStateProvider()));
@@ -78,8 +79,7 @@ public sealed class EquipmentSimDialogTests
     public async Task ContractEdit_PreservesLoadedSecrets()
     {
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([
-            Script.Scalar(1), Script.Rows(Script.Row(("PIN", "1234"), ("PIN2", "12345"),
-                ("PUK", "12345678"), ("PUK2", "87654321"))),
+            Script.Scalar(1), EquipmentSimConcurrencyTests.SnapshotRow(EquipmentSimConcurrencyTests.Source()),
         ]));
         await using var context = CreateContext(connection);
         var provider = context.Render<MudDialogProvider>();
@@ -93,6 +93,8 @@ public sealed class EquipmentSimDialogTests
 
         var value = Assert.IsType<EquipmentSimDialogResult>(result.Data);
         Assert.Equal(11, value.ContractId);
+        Assert.NotNull(value.OriginalVersion);
+        Assert.DoesNotContain("\"Secrets\"", System.Text.Json.JsonSerializer.Serialize(value));
         Assert.Equal("1234", value.Secrets.Pin);
         Assert.Equal("87654321", value.Secrets.Puk2);
         Assert.DoesNotContain(connection.CommandLog, sql => sql.Contains("UPDATE"));
@@ -103,7 +105,7 @@ public sealed class EquipmentSimDialogTests
     public async Task ExistingInvalidPerson_ShowsAdvisoryWithoutClearingSelection()
     {
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([
-            Script.Scalar(1), Script.Rows(Script.Row(("PIN", ""), ("PIN2", ""), ("PUK", ""), ("PUK2", ""))), Script.Scalar(0),
+            Script.Scalar(1), EquipmentSimConcurrencyTests.SnapshotRow(EquipmentSimConcurrencyTests.Source(9)), Script.Scalar(0),
         ]));
         await using var context = CreateContext(connection);
         var provider = context.Render<MudDialogProvider>();
@@ -118,7 +120,7 @@ public sealed class EquipmentSimDialogTests
     public async Task AdvisoryReadFailure_IsDistinctAndPreservesSelection()
     {
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([
-            Script.Scalar(1), Script.Rows(Script.Row(("PIN", ""), ("PIN2", ""), ("PUK", ""), ("PUK2", ""))), Script.Error(SqlExceptionFactory.Create(50000, "read failed")),
+            Script.Scalar(1), EquipmentSimConcurrencyTests.SnapshotRow(EquipmentSimConcurrencyTests.Source(9)), Script.Error(SqlExceptionFactory.Create(50000, "read failed")),
         ]));
         await using var context = CreateContext(connection);
         var provider = context.Render<MudDialogProvider>();
@@ -129,12 +131,64 @@ public sealed class EquipmentSimDialogTests
         Assert.Equal(9, dialog.Instance.PersonalDataPersonId);
     }
 
+    /// <summary>Удалённая или изменённая запись не превращает восстановленный Edit в Add и сохраняет raw.</summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task RestoredEdit_WithoutMatchingProtectedVersionKeepsRawAndBlocksSave(bool missing)
+    {
+        var original = EquipmentSimConcurrencyTests.Source();
+        var current = EquipmentSimConcurrencyTests.Source();
+        current.Secrets.Pin = "0000";
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([
+            Script.Scalar(1), missing ? Script.Rows() : EquipmentSimConcurrencyTests.SnapshotRow(current),
+        ]));
+        await using var context = CreateContext(connection);
+        var provider = context.Render<MudDialogProvider>();
+        var ready = new TaskCompletionSource<IRenderedComponent<EquipmentSimDialog>>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var editorContext = new EquipmentEditorContext(7, 1, () => true)
+        {
+            DraftState = System.Text.Json.JsonSerializer.Serialize(new
+            {
+                HasExisting = true, OriginalVersion = original.CaptureVersion(), PhoneNumber = original.PhoneNumber,
+            }),
+            RawRestore = async () =>
+            {
+                var editor = await ready.Task;
+                await editor.FindAll("input[type=password]")[0].InputAsync("4321");
+            },
+        };
+        var reference = await context.Services.GetRequiredService<IDialogService>().ShowAsync<EquipmentSimDialog>(
+            "SIM", new DialogParameters<EquipmentSimDialog>
+            {
+                { item => item.EditorContext, editorContext },
+                { item => item.EquipmentId, 7 },
+                { item => item.HasExisting, !missing },
+            });
+        var dialog = provider.FindComponent<EquipmentSimDialog>();
+        ready.SetResult(dialog);
+
+        dialog.WaitForAssertion(() =>
+        {
+            Assert.True(dialog.Instance.HasExisting);
+            Assert.Equal("4321", dialog.Instance.Secrets.Pin);
+            Assert.Contains("Сверьте актуальные данные", dialog.Markup);
+            Assert.True(dialog.FindAll("button").Single(button => button.TextContent.Trim() == "OK").HasAttribute("disabled"));
+        });
+        var typed = editorContext.CaptureDraftState();
+        Assert.DoesNotContain("Secrets", typed);
+        Assert.DoesNotContain("\"4321\"", typed);
+        Assert.False(reference.Result.IsCompleted);
+        await provider.InvokeAsync(() => reference.Close(DialogResult.Cancel()));
+    }
+
     private static BunitContext CreateContext(ScriptedConnection connection)
     {
         DapperColumnMapper.Initialize();
         var context = new BunitContext();
         context.JSInterop.Mode = JSRuntimeMode.Loose;
         context.Services.AddMudServices();
+        EquipmentPeriodDialogHelpTests.AddAppearance(context);
         context.Services.AddScoped<Clayzor.Lib.Web.Controls.Services.ClayDraftService>();
         context.Services.AddSingleton<IConfiguration>(new ConfigurationManager());
         context.Services.AddSingleton(new EquipmentFormService(CreateDb(connection), new TestAuthenticationStateProvider()));
@@ -150,6 +204,7 @@ public sealed class EquipmentSimDialogTests
             {
                 { dialog => dialog.EquipmentId, 7 },
                 { dialog => dialog.HasExisting, true },
+                { dialog => dialog.Original, EquipmentSimConcurrencyTests.Source(personalDataPersonId).CaptureOriginal() },
                 { dialog => dialog.PhoneNumber, "79000000001" },
                 { dialog => dialog.ActivatedDate, new DateTime(2026, 11, 18) },
                 { dialog => dialog.ActivatedTime, new TimeSpan(8, 30, 0) },

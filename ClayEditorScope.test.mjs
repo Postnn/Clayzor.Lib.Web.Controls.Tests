@@ -20,10 +20,13 @@ function createBrowser() {
         matches: () => true, closest: () => null, getAttribute: () => null, dispatchEvent: () => {},
     });
     const main = makeField('main');
+    const secondary = makeField('main');
+    secondary.dataset.draftKey = 'main.secondary';
     const child = makeField('child');
-    const root = { contains: field => field === main || field === child };
+    const fields = { main, secondary, child };
+    const root = { contains: field => Object.values(fields).includes(field) };
     const document = {
-        querySelectorAll: selector => selector === '#editor' ? [root] : [main, child],
+        querySelectorAll: selector => selector === '#editor' ? [root] : Object.values(fields),
         addEventListener: (name, listener) => listeners.set(name, listener),
         removeEventListener: name => listeners.delete(name),
     };
@@ -106,13 +109,22 @@ function createBrowser() {
         open: (entity = '4', user = 'employee') => window.clayDraftStore.register('territory', entity, user, 1, '#editor'),
         forgetPointer: () => session.clear(),
         rejectDeletes: value => { rejectDelete = value; },
-        mountValue: (scope, value) => { (scope === 'main' ? main : child).value = value; },
-        displayedValue: scope => (scope === 'main' ? main : child).value,
+        mountValue: (name, value) => { fields[name].value = value; },
+        setDisabled: (name, disabled) => { fields[name].disabled = disabled; },
+        onDispatch: (name, handler) => { fields[name].dispatchEvent = handler; },
+        displayedValue: name => fields[name].value,
+        setClaySelect: (name, restoreDraftText) => {
+            const field = fields[name];
+            field.id = name;
+            field.getAttribute = key => key === 'role' ? 'combobox' : null;
+            field.closest = selector => selector === '.clay-select' ? root : null;
+            window.claySelect = { restoreDraftText };
+        },
         writeHook: hook => { interceptWrite = hook; },
-        input: (scope, value) => {
-            const field = scope === 'main' ? main : child;
+        input: (name, value, isTrusted = false) => {
+            const field = fields[name];
             field.value = value;
-            listeners.get('input')({ target: field });
+            listeners.get('input')({ target: field, isTrusted });
         },
     };
 }
@@ -330,4 +342,184 @@ test('failed deletion after accepted cleanup leaves a clean classification on re
     const clean = await browser.open();
     assert.equal(clean.hasDraft, false);
     assert.equal((await store.getHealth(clean.registrationId)).healthy, true);
+});
+
+test('failed field rebase preserves original typed and raw values in memory and storage', async () => {
+    const browser = createBrowser();
+    const { store } = browser;
+    const { registrationId: id } = await browser.open();
+    await store.saveTypedScope(id, 'main', 'old baseline');
+    browser.input('main', 'unfinished input');
+    browser.input('child', 'independent input');
+    const review = await store.readRebaseState(id, 'main');
+
+    browser.writeHook(() => { throw new Error('rebase storage unavailable'); });
+    assert.equal(await store.rebaseScope(id, 'main', review.revision, 'new baseline', review.rawKeys), false);
+    assert.equal((await store.readEditorScope(id, 'main')).hasRaw, true);
+    assert.equal((await store.readEditorScope(id, 'child')).hasRaw, true);
+    await store.unregister(id);
+
+    const restored = await browser.open();
+    assert.equal(restored.typedScopes.main, 'old baseline');
+    await store.applyRaw(restored.registrationId, 'main');
+    assert.equal(browser.displayedValue('main'), 'unfinished input');
+});
+
+test('a later edit aborts field rebase and preserves both the old baseline and the new raw input', async () => {
+    const browser = createBrowser();
+    const { store } = browser;
+    const { registrationId: id } = await browser.open();
+    await store.saveTypedScope(id, 'main', 'old baseline');
+    browser.input('main', 'local');
+    const review = await store.readRebaseState(id, 'main');
+    const entered = Promise.withResolvers();
+    const resume = Promise.withResolvers();
+    browser.writeHook(() => {
+        entered.resolve();
+        return resume.promise;
+    });
+
+    const rebasing = store.rebaseScope(id, 'main', review.revision, 'new baseline', review.rawKeys);
+    try {
+        await entered.promise;
+        browser.input('main', 'later edit');
+        assert.equal(await rebasing, false);
+    } finally {
+        resume.resolve();
+    }
+    await store.unregister(id);
+    const restored = await browser.open();
+    assert.equal(restored.typedScopes.main, 'old baseline');
+    await store.applyRaw(restored.registrationId, 'main');
+    assert.equal(browser.displayedValue('main'), 'later edit');
+
+    const accepted = await store.readRebaseState(restored.registrationId, 'main');
+    assert.equal(await store.rebaseScope(restored.registrationId, 'main',
+        accepted.revision, 'accepted baseline', accepted.rawKeys), true);
+    assert.equal((await store.readEditorScope(restored.registrationId, 'main')).hasRaw, false);
+});
+
+test('pending retry restores only unavailable fields in the requested scope', async () => {
+    const browser = createBrowser();
+    const { store } = browser;
+    const first = await browser.open();
+    browser.input('main', 'previous text');
+    browser.input('secondary', 'locked text');
+    browser.input('child', 'separate text');
+    await store.unregister(first.registrationId);
+
+    browser.mountValue('main', '');
+    browser.mountValue('secondary', '');
+    browser.mountValue('child', '');
+    browser.setDisabled('secondary', true);
+    const { registrationId: id } = await browser.open();
+    const initial = await store.applyPendingRaw(id, 'main');
+    assert.equal(initial.applied.join(), 'data:main.name:0');
+    assert.equal(initial.pending.join(), 'data:main.secondary:0');
+
+    browser.mountValue('main', 'newer rendered text');
+    browser.setDisabled('secondary', false);
+    await store.reportRestoreScopeFailure(id, 'main');
+    await store.reportRestoreScopeFailure(id, 'child');
+    const retry = await store.applyPendingRaw(id, 'main');
+    assert.equal(retry.applied.join(), 'data:main.secondary:0');
+    assert.equal(browser.displayedValue('main'), 'newer rendered text');
+    assert.equal(browser.displayedValue('secondary'), 'locked text');
+    assert.equal(browser.displayedValue('child'), '');
+    const readiness = await store.getRestoreReadiness(id);
+    assert.equal(readiness.pendingScopes.join(), 'child');
+    assert.equal(readiness.failedScopes.join(), 'child');
+    await store.unregister(id);
+});
+
+test('an explicit clear supersedes pending raw without replaying the older text', async () => {
+    const browser = createBrowser();
+    const { store } = browser;
+    const first = await browser.open();
+    browser.input('main', 'protected text');
+    await store.unregister(first.registrationId);
+    browser.setDisabled('main', true);
+    const { registrationId: id } = await browser.open();
+    assert.equal((await store.applyPendingRaw(id, 'main')).pending.length, 1);
+    browser.setDisabled('main', false);
+    browser.input('main', '', true);
+
+    const retry = await store.applyPendingRaw(id, 'main');
+    assert.equal(retry.applied.length, 0);
+    assert.equal(browser.displayedValue('main'), '');
+    assert.equal((await store.getRestoreReadiness(id)).complete, true);
+    await store.unregister(id);
+
+    browser.mountValue('main', 'database text');
+    const reopened = await browser.open();
+    await store.applyPendingRaw(reopened.registrationId, 'main');
+    assert.equal(browser.displayedValue('main'), '');
+    await store.unregister(reopened.registrationId);
+});
+
+test('ClaySelect raw remains pending until the matching editor accepts it', async () => {
+    const browser = createBrowser();
+    const { store } = browser;
+    const first = await browser.open();
+    browser.input('main', 'unconfirmed lookup');
+    await store.unregister(first.registrationId);
+    browser.mountValue('main', '');
+    const { registrationId: id } = await browser.open();
+    browser.setClaySelect('main', async () => false);
+    assert.equal((await store.applyPendingRaw(id, 'main')).pending.length, 1);
+    assert.equal((await store.getRestoreReadiness(id)).pendingScopes.join(), 'main');
+    browser.setClaySelect('main', async (name, value) => {
+        assert.equal(name, 'main');
+        assert.equal(value, 'unconfirmed lookup');
+        browser.mountValue(name, value);
+        return true;
+    });
+    assert.equal((await store.applyPendingRaw(id, 'main')).applied.length, 1);
+    assert.equal(browser.displayedValue('main'), 'unconfirmed lookup');
+    assert.equal((await store.getRestoreReadiness(id)).complete, true);
+    await store.unregister(id);
+});
+
+test('pending silent retry recovers textarea text without dispatching it as input', async () => {
+    const browser = createBrowser();
+    const { store } = browser;
+    const first = await browser.open();
+    browser.input('main', 'template body');
+    await store.unregister(first.registrationId);
+    browser.mountValue('main', '');
+    let events = 0;
+    browser.onDispatch('main', () => { events++; });
+
+    const reopened = await browser.open();
+    const restored = await store.applyPendingRaw(reopened.registrationId, 'main', false);
+    assert.equal(restored.applied.length, 1);
+    assert.equal(browser.displayedValue('main'), 'template body');
+    assert.equal(events, 0);
+    await store.unregister(reopened.registrationId);
+});
+
+test('exclusive confirmation blocks a competing tab and an orphaned operation in the same scope', async () => {
+    const browser = createBrowser();
+    const { store } = browser;
+    const first = await browser.open();
+    browser.forgetPointer();
+    const second = await browser.open();
+    const start = registrationId => store.beginOperationIntent(registrationId, JSON.stringify({
+        version: 1, kind: 'equipment.create', data: '{}', acceptedScopes: ['main'], blockOtherDraftOperations: true,
+    }));
+    const attempts = await Promise.allSettled([start(first.registrationId), start(second.registrationId)]);
+    assert.equal(attempts.filter(attempt => attempt.status === 'fulfilled').length, 1);
+    const winner = attempts[0].status === 'fulfilled' ? first : second;
+    const other = winner === first ? second : first;
+    const accepted = JSON.parse(attempts.find(attempt => attempt.status === 'fulfilled').value);
+    await store.unknownOperation(winner.registrationId, accepted.revision);
+    await store.unregister(winner.registrationId);
+    await assert.rejects(start(other.registrationId), /В другом черновике/);
+    assert.equal((await store.getHealth(other.registrationId)).hasOperation, false);
+
+    const separate = await browser.open('different-source');
+    const independent = JSON.parse(await start(separate.registrationId));
+    assert.equal(independent.status, 'running');
+    await store.unregister(other.registrationId);
+    await store.unregister(separate.registrationId);
 });
