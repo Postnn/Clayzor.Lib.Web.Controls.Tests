@@ -101,27 +101,20 @@ public sealed partial class DutyTests
         AssertNoDutyExitWrite(db, context);
     }
 
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task DutyExitPreservesUnknownOrReadOnlyRecovery(bool unknown)
+    [Fact]
+    public async Task DutyExitPreservesReadOnlyRecovery()
     {
         using var db = new Probe { Row = Original with { Closed = 1 } };
-        var operation = unknown
-            ? """{"version":1,"attemptId":"duty-unknown-cancel","kind":"duty.save","status":"unknown","revision":9,"data":"{\"Original\":null,\"Draft\":{\"Date\":\"2026-11-21\",\"PlannedId\":8}}","scopes":[],"acceptLegacyTyped":false,"legacyTypedRevision":0}"""
-            : null;
-        var restore = new ClayDraftRestore("duty-readonly-cancel", true, 9, null, operation);
+        var restore = new ClayDraftRestore("duty-readonly-cancel", true, 9, null, null);
         await using var context = EditorContext(db, restore, rawReady: true);
         SetupDutyCancelScope(context);
         var page = context.Render<DutyEditor>(p => p.Add(component => component.RouteId, "20261121"));
         page.WaitForAssertion(() => Assert.Contains("Закрыто", page.Markup));
-        if (unknown) Assert.Contains("duty-unknown-cancel", page.Markup);
         await page.InvokeAsync(() => DutyAction(page, "Отмена").ClickAsync());
 
         Assert.Single(context.JSInterop.Invocations["clayModelEquipmentForm.close"]);
         Assert.Single(context.JSInterop.Invocations["clayDraftStore.closeRam"]);
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.replaceEditorScope"]);
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
         AssertNoDutyExitWrite(db, context);
     }
 
@@ -213,9 +206,7 @@ public sealed partial class DutyTests
         using var db = new Probe { Row = start };
         await using var context = EditorContext(db, EmptyDutyCancelRestore(), rawReady: true);
         context.JSInterop.Setup<ClayDraftStorageHealth>("clayDraftStore.getHealth", _ => true)
-            .SetResult(new ClayDraftStorageHealth(true, 0, null, false, 1, 1));
-        context.JSInterop.Setup<string>("clayDraftStore.beginOperationIntent", _ => true)
-            .SetResult("""{"version":1,"attemptId":"fixture","kind":"duty.save","status":"running","revision":9,"data":"{}","scopes":[],"acceptLegacyTyped":false,"legacyTypedRevision":0}""");
+            .SetResult(new ClayDraftStorageHealth(true, 0, null, 1, 1));
         context.JSInterop.Setup<bool>("clayDraftStore.closeRam", call => call.Arguments.Count == 2).SetResult(false);
         var page = context.Render<DutyEditor>(p => p.Add(component => component.RouteId, "20261125"));
         page.WaitForAssertion(() => Assert.False(DutyAction(page, "Сохранить").HasAttribute("disabled")));
@@ -233,7 +224,7 @@ public sealed partial class DutyTests
     private static void SetupDutyCancelScope(BunitContext context, bool accepts = true)
     {
         context.JSInterop.Setup<ClayDraftEditorScopeState>("clayDraftStore.readEditorScope", _ => true)
-            .SetResult(new ClayDraftEditorScopeState(15, true, false));
+            .SetResult(new ClayDraftEditorScopeState(15, true));
         context.JSInterop.Setup<bool>("clayDraftStore.replaceEditorScope", _ => true).SetResult(accepts);
     }
 
@@ -255,7 +246,6 @@ public sealed partial class DutyTests
     {
         Assert.Equal(0, db.ScheduleWrites);
         Assert.Equal(0, db.Commits);
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.discard"]);
     }
 

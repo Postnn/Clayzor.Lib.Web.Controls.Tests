@@ -28,7 +28,7 @@ public sealed class DraftOriginalVersionProposalTests
             ? """{"Original":"visible database value","Current":"first local edit"}"""
             : """{"Original":"visible database value","Current":"first local edit","Version":{"Key":"001","ChangedBy":4,"ChangedByName":"User","ChangedAt":"2026-11-20T08:00:00Z"}}""";
         context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.register", _ => true)
-            .SetResult(new ClayDraftRestore("version-test", true, 3, null, null,
+            .SetResult(new ClayDraftRestore("version-test", true, 3, null,
                 new Dictionary<string, string> { ["main"] = original }));
         context.JSInterop.Setup<ClayDraftRawApplyResult>("clayDraftStore.applyRaw", _ => true)
             .SetResult(new ClayDraftRawApplyResult([], []));

@@ -148,7 +148,6 @@ public sealed partial class EquipmentFormTests
             Assert.Equal("fresh", value.Notes);
             Assert.Equal(version, value.ChangedAt);
         }
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
         await dialogs.InvokeAsync(() => reference.Close(DialogResult.Cancel()));
         await opening.WaitAsync(TimeSpan.FromSeconds(4));
     }

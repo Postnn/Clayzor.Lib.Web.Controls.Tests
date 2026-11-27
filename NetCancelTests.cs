@@ -82,24 +82,6 @@ public sealed partial class NetFormTests
         AssertNoNetCancelWrite(fixture);
     }
 
-    [Theory]
-    [InlineData("unknown", true)]
-    [InlineData("confirmed", true)]
-    public async Task NetCancelKeepsOutstandingPoeOutcome(string status, bool closes)
-    {
-        using var fixture = new NetFixture(poe: 1, restoredOperation: OperationJson("net.poe", status));
-        var page = fixture.Context.Render<NetPage>();
-        WaitForLoad(page);
-        page.WaitForAssertion(() => Assert.Empty(page.FindAll("[data-testid='net-input-notice']")));
-        await page.InvokeAsync(() => NetCancelButton(page).ClickAsync());
-
-        Assert.Equal(closes ? 1 : 0, fixture.Context.JSInterop.Invocations["clayModelEquipmentForm.close"].Count);
-        Assert.Single(fixture.Context.JSInterop.Invocations["clayDraftStore.closeRam"]);
-        Assert.DoesNotContain(fixture.Context.JSInterop.Invocations, call => call.Identifier is
-            "clayDraftStore.replaceEditorScope" or "clayDraftStore.commitOperation" or "clayDraftStore.discardScope");
-        AssertNoNetCancelWrite(fixture);
-    }
-
     [Fact]
     public async Task NetCancelResetDropsDelayedFreshReadAfterRouteChange()
     {
@@ -219,7 +201,7 @@ public sealed partial class NetFormTests
     private static void InstallNetCancelScope(BunitContext context, bool acceptRevision = true)
     {
         context.JSInterop.Setup<ClayDraftEditorScopeState>("clayDraftStore.readEditorScope", _ => true)
-            .SetResult(new ClayDraftEditorScopeState(23, true, false));
+            .SetResult(new ClayDraftEditorScopeState(23, true));
         context.JSInterop.Setup<bool>("clayDraftStore.replaceEditorScope", _ => true).SetResult(acceptRevision);
     }
 
@@ -234,7 +216,6 @@ public sealed partial class NetFormTests
 
     private static void AssertNoNetCancelWrite(NetFixture fixture)
     {
-        Assert.Empty(fixture.Context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
         Assert.DoesNotContain(fixture.Connection.CommandLog, sql => sql.Contains("UPDATE vwЛокальнаяСеть", StringComparison.Ordinal));
     }
 }

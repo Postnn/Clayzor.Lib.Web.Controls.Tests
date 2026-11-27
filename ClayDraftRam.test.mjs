@@ -8,7 +8,7 @@ const script = await readFile(new URL('../../src/Clayzor.Lib.Web.Controls/wwwroo
 const first = '00000000000000000000000000000001';
 const second = '00000000000000000000000000000002';
 
-function createDocument(drafts = new Map(), session = new Map()) {
+function createDocument(drafts = new Map(), session = new Map(), origin = 'https://inventory.example') {
     const root = { contains: node => node === field };
     const field = {
         type: 'text', value: '', disabled: false,
@@ -16,7 +16,7 @@ function createDocument(drafts = new Map(), session = new Map()) {
         matches: () => true, closest: () => null, getAttribute: () => null, dispatchEvent: () => {},
     };
     const listeners = new Map();
-    const protectedWindow = { location: { origin: 'https://inventory.example' } };
+    const protectedWindow = { location: { origin } };
     const fetches = [];
     const buffers = [];
     const reads = [];
@@ -74,7 +74,7 @@ function createDocument(drafts = new Map(), session = new Map()) {
         crypto: webcrypto, URL, TextEncoder, TextDecoder, Event, navigator: {}, window: protectedWindow, btoa, atob, Blob,
         DotNet: { createJSStreamReference: value => value },
         document: {
-            baseURI: 'https://inventory.example/inventory/',
+            baseURI: `${origin}/inventory/`,
             querySelectorAll: selector => selector === '#editor' ? [root] : fieldVisible ? [field] : [],
             addEventListener(name, listener) {
                 if (!listeners.has(name)) listeners.set(name, new Set());
@@ -115,6 +115,16 @@ function createDocument(drafts = new Map(), session = new Map()) {
     };
 }
 
+test('loopback HTTP requests a key but remote HTTP is rejected before fetch', async () => {
+    const local = createDocument(new Map(), new Map(), 'http://localhost:5020');
+    await local.open();
+    assert.equal(local.fetches[0].url, 'http://localhost:5020/inventory/api/drafts/key');
+
+    const remote = createDocument(new Map(), new Map(), 'http://inventory.example');
+    await assert.rejects(remote.open(), /HTTPS/);
+    assert.equal(remote.fetches.length, 0);
+});
+
 test('a changed revision keeps an editor open and preserves later input', async () => {
     const fixture = createDocument();
     const { registrationId } = await fixture.open();
@@ -128,47 +138,6 @@ test('a changed revision keeps an editor open and preserves later input', async 
     assert.equal(fixture.drafts.size, 1);
     assert.equal(await fixture.store.closeRam(registrationId, latest.revision), true);
     assert.equal(fixture.drafts.size, 0);
-});
-
-test('close state detects nested input without returning its values', async () => {
-    const fixture = createDocument();
-    const { registrationId } = await fixture.open();
-    const before = await fixture.store.readEditorCloseState(registrationId);
-    const nested = 'child:ups-test:2:root';
-    await fixture.store.saveTypedScope(registrationId, nested, 'private typed value');
-    fixture.field.dataset.draftScope = nested;
-    fixture.input('private raw value');
-
-    const main = await fixture.store.readEditorScope(registrationId, 'main');
-    const current = await fixture.store.readEditorCloseState(registrationId);
-    assert.equal(main.hasRaw, false);
-    assert.deepEqual(JSON.parse(JSON.stringify(current)), {
-        revision: main.revision, hasRaw: true, hasOperation: false, typedScopes: [nested],
-    });
-    assert.equal(await fixture.store.closeRam(registrationId, before.revision), false);
-    assert.equal(fixture.field.value, 'private raw value');
-    assert.equal(fixture.drafts.size, 1);
-});
-
-test('operation evidence used to close Equipment excludes private snapshots and requires the exact revision', async () => {
-    const fixture = createDocument();
-    const { registrationId } = await fixture.openEquipment();
-    await fixture.store.beginOperationIntent(registrationId, JSON.stringify({
-        version: 1, kind: 'equipment-save', acceptedScopes: ['main'], attemptId: first,
-        data: JSON.stringify({
-            Kind: 'equipment-save', EquipmentId: 7, Origin: 'main', Editor: null,
-            Intent: { ExpectedSnapshot: 'private values', AfterSnapshot: 'other private values' },
-        }),
-    }));
-    const close = await fixture.store.readEditorCloseState(registrationId);
-    assert.equal(close.hasOperation, true);
-    assert.deepEqual(JSON.parse(JSON.stringify(await fixture.store.readCloseOperationEvidence(registrationId, close.revision))), {
-        attemptId: first, kind: 'equipment-save', data: '{}',
-    });
-    fixture.input('later input');
-    await assert.rejects(fixture.store.readCloseOperationEvidence(registrationId, close.revision), /Изменилась операция/);
-    assert.equal(await fixture.store.closeRam(registrationId, close.revision), false);
-    assert.equal(fixture.drafts.size, 1);
 });
 
 test('concurrent attach and stream use one HTTPS request and reconnect restores typed and raw input', async () => {
@@ -263,121 +232,6 @@ test('a reloaded document never reads old ciphertext and changed employee revoke
     await assert.rejects(old.store.saveTyped(previous.registrationId, 'wrong user'));
     assert.equal(old.fetches.length, 1);
     assert.equal(await old.store.canReload(), false);
-});
-
-test('close prevents a pending local begin from authorizing a business command', async () => {
-    const fixture = createDocument();
-    const { registrationId } = await fixture.open();
-    fixture.input('existing input');
-    await fixture.store.saveTyped(registrationId, 'baseline');
-    let entered;
-    let release;
-    const started = new Promise(resolve => { entered = resolve; });
-    const held = new Promise(resolve => { release = resolve; });
-    fixture.putHook(() => { entered(); return held; });
-    const begin = fixture.store.beginOperationIntent(registrationId, JSON.stringify({
-        version: 1, kind: 'test-operation', acceptedScopes: ['main'], data: '{}',
-    }));
-    await started;
-    const closing = fixture.store.closeRam(registrationId);
-    release();
-    await assert.rejects(begin, /not active/);
-    await closing;
-    assert.equal(fixture.drafts.size, 0);
-});
-
-test('reopening a committed empty record after a failed delete does not report a draft', async () => {
-    const fixture = createDocument();
-    const { registrationId } = await fixture.open();
-    const sibling = await fixture.open(second);
-    await fixture.store.saveTypedScope(registrationId, 'main', 'submitted');
-    await fixture.store.saveTypedScope(sibling.registrationId, 'main', 'sibling');
-    const { revision } = JSON.parse(await fixture.store.beginOperationIntent(registrationId, JSON.stringify({
-        version: 1, kind: 'test-save', acceptedScopes: ['main'], data: '{}',
-    })));
-
-    await fixture.store.recordConfirmedOperation(registrationId, revision);
-    fixture.refuseDelete(true);
-    await assert.rejects(fixture.store.commitOperation(registrationId, revision), /delete refused/);
-    assert.equal(fixture.drafts.size, 2);
-    await fixture.store.unregister(registrationId);
-    const reopened = await fixture.open();
-    assert.equal(reopened.hasDraft, false);
-    assert.equal(reopened.operation, null);
-    assert.equal(fixture.drafts.size, 2);
-
-    fixture.refuseDelete(false);
-    await fixture.store.unregister(reopened.registrationId);
-    assert.equal((await fixture.open()).hasDraft, false);
-    assert.equal(fixture.drafts.size, 1);
-    assert.equal((await fixture.open(second)).typedScopes.main, 'sibling');
-});
-
-for (const status of ['running', 'unknown']) {
-    test(`cleanup rejects ${status} and preserves the exact attempt and input until confirmation`, async () => {
-        const fixture = createDocument();
-        const { registrationId } = await fixture.open();
-        fixture.input('unsubmitted browser text');
-        await fixture.store.saveTypedScope(registrationId, 'main', 'submitted typed text');
-        const intent = JSON.stringify({
-            version: 1, kind: 'test-save', acceptedScopes: ['main'], data: '{}',
-        });
-        const attempt = JSON.parse(await fixture.store.beginOperationIntent(registrationId, intent));
-        if (status === 'unknown')
-            await fixture.store.unknownOperation(registrationId, attempt.revision);
-
-        const before = await fixture.store.getHealth(registrationId);
-        await assert.rejects(fixture.store.commitOperation(registrationId, attempt.revision), /подтвердите исход/);
-        assert.equal((await fixture.store.getHealth(registrationId)).revision, before.revision);
-        await fixture.store.unregister(registrationId);
-        const reopened = await fixture.open();
-        const restored = JSON.parse(reopened.operation);
-        assert.equal(restored.attemptId, attempt.attemptId);
-        assert.equal(restored.revision, attempt.revision);
-        assert.equal(restored.status, status);
-        assert.equal(reopened.typedScopes.main, 'submitted typed text');
-        fixture.field.value = '';
-        await fixture.store.applyRaw(reopened.registrationId, 'main', false);
-        assert.equal(fixture.field.value, 'unsubmitted browser text');
-        await assert.rejects(fixture.store.beginOperationIntent(reopened.registrationId, intent), /не сверена/);
-
-        await fixture.store.recordConfirmedOperation(reopened.registrationId, restored.revision);
-        fixture.input('later browser text');
-        await fixture.store.saveTypedScope(reopened.registrationId, 'main', 'later typed text');
-        await fixture.store.commitOperation(reopened.registrationId, restored.revision);
-        await fixture.store.commitOperation(reopened.registrationId, restored.revision);
-        await fixture.store.unregister(reopened.registrationId);
-        const after = await fixture.open();
-        assert.equal(after.operation, null);
-        assert.equal(after.typedScopes.main, 'later typed text');
-        fixture.field.value = '';
-        await fixture.store.applyRaw(after.registrationId, 'main', false);
-        assert.equal(fixture.field.value, 'later browser text');
-    });
-}
-
-test('healthy storage rejects accepting a scope whose raw input could not be restored', async () => {
-    const fixture = createDocument();
-    const { registrationId } = await fixture.open();
-    fixture.input('unsent raw input');
-    await fixture.store.saveTypedScope(registrationId, 'main', 'initial');
-    await fixture.store.unregister(registrationId);
-    fixture.showField(false);
-    fixture.field.value = '';
-    const reopened = await fixture.open();
-    const handle = reopened.registrationId;
-    await fixture.store.applyRaw(handle, 'main', false);
-    assert.equal((await fixture.store.getRestoreReadiness(handle)).complete, false);
-    assert.equal((await fixture.store.getHealth(handle)).healthy, true);
-
-    const intent = JSON.stringify({ version: 1, kind: 'test-save', acceptedScopes: ['main'], data: '{}' });
-    await assert.rejects(fixture.store.beginOperationIntent(handle, intent), /восстановите ввод/);
-    assert.equal((await fixture.store.getHealth(handle)).hasOperation, false);
-    fixture.showField(true);
-    await fixture.store.applyRaw(handle, 'main', false);
-    assert.equal(fixture.field.value, 'unsent raw input');
-    assert.equal((await fixture.store.getRestoreReadiness(handle)).complete, true);
-    assert.equal(JSON.parse(await fixture.store.beginOperationIntent(handle, intent)).status, 'running');
 });
 
 test('an unreadable owned RAM record is replaced without losing live input or another editor', async () => {

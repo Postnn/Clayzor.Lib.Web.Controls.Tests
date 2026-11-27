@@ -9,95 +9,6 @@ public sealed class Eq10DraftServiceTests
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
-    /// <summary>Блокировка прежнего контекста действует до окончания импорта, включая отказ сервера.</summary>
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task LegacyEvidenceLeaseIsReleasedOnlyAfterImport(bool failImport)
-    {
-        var evidence = new ClayLegacyDraftOperationEvidence(Guid.NewGuid().ToString("N"), "net.poe", "17");
-        var js = new WireJsRuntime { LegacyEvidence = [evidence] };
-        await using var service = new ClayDraftService(js);
-        var releaseImport = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        var transfer = service.TransferLegacyEvidenceAsync("inventory.net", "17", "42", async (items, _) =>
-        {
-            Assert.Equal(evidence, Assert.Single(items));
-            await releaseImport.Task;
-            if (failImport) throw new InvalidOperationException("Import failed.");
-        });
-
-        var begin = Assert.Single(js.Calls);
-        Assert.Equal("clayDraftStore.beginLegacyOperationEvidenceTransfer", begin.Identifier);
-        var leaseId = Assert.IsType<string>(begin.Arguments[3]);
-
-        releaseImport.SetResult();
-        if (failImport) await Assert.ThrowsAsync<InvalidOperationException>(() => transfer);
-        else await transfer;
-
-        AssertCall(js, "clayDraftStore.finishLegacyOperationEvidenceTransfer", leaseId);
-    }
-
-    /// <summary>Даже при потере ответа чтения освобождается та же блокировка, а импорт не запускается.</summary>
-    [Fact]
-    public async Task LegacyEvidenceLeaseReleasesKnownIdAfterLostReadReply()
-    {
-        var js = new WireJsRuntime { FailLegacyEvidenceRead = true };
-        await using var service = new ClayDraftService(js);
-
-        await Assert.ThrowsAsync<JSException>(() => service.TransferLegacyEvidenceAsync("inventory.net", "17", "42",
-            (_, _) => throw new InvalidOperationException("Evidence was not read.")));
-
-        var begin = Assert.Single(js.Calls, call => call.Identifier == "clayDraftStore.beginLegacyOperationEvidenceTransfer");
-        AssertCall(js, "clayDraftStore.finishLegacyOperationEvidenceTransfer", begin.Arguments[3]);
-    }
-
-    [Theory]
-    [InlineData("success")]
-    [InlineData("import")]
-    [InlineData("ram")]
-    [InlineData("stale")]
-    [InlineData("retire")]
-    public async Task RetirementRequiresSuccessfulImportAndCurrentRamHandle(string outcome)
-    {
-        const string begin = "clayDraftStore.beginLegacyOperationEvidenceTransfer";
-        const string attach = "clayDraftStore.registerRam";
-        const string retire = "clayDraftStore.retireLegacyOperationEvidenceTransfer";
-        const string finish = "clayDraftStore.finishLegacyOperationEvidenceTransfer";
-        const string unregister = "clayDraftStore.unregister";
-        var js = new WireJsRuntime { FailRamAttach = outcome == "ram", FailLegacyRetirement = outcome == "retire" };
-        js.RegisterJsonQueue.Enqueue(RegisterJson("ram-verified", null));
-        await using var service = new ClayDraftService(js);
-        var current = true;
-        var transfer = service.TransferLegacyAndRegisterRamAsync("inventory.net", "17", "42", async (_, ct) =>
-        {
-            if (outcome == "import") throw new InvalidOperationException("Import failed.");
-            var owned = await service.RegisterRamHandleAsync("inventory.net", "17", "42", 1, "#editor", Guid.NewGuid(), ct);
-            if (outcome == "stale") current = false;
-            return owned;
-        }, () => current);
-
-        if (outcome == "success") Assert.NotNull(await transfer);
-        else if (outcome is "ram" or "retire") await Assert.ThrowsAsync<JSException>(() => transfer);
-        else await Assert.ThrowsAsync<InvalidOperationException>(() => transfer);
-
-        string[] expected = outcome switch
-        {
-            "success" => [begin, attach, retire, finish],
-            "import" => [begin, finish],
-            "ram" => [begin, attach, finish],
-            "stale" => [begin, attach, finish, unregister],
-            _ => [begin, attach, retire, finish, unregister],
-        };
-        Assert.Equal(expected, js.Calls.Select(call => call.Identifier).ToArray());
-        var leaseId = js.Calls[0].Arguments[3];
-        Assert.Equal(true, js.Calls[0].Arguments[4]);
-        Assert.All(js.Calls.Where(call => call.Identifier == retire || call.Identifier == finish),
-            call => Assert.Equal(leaseId, call.Arguments[0]));
-        Assert.Equal(outcome == "success", service.HasActiveRegistration);
-    }
-
-    /// <summary>Техническое освобождение сохраняет контекст, а неудачное закрытие можно повторить.</summary>
     [Fact]
     public async Task RamRegistrationDistinguishesTechnicalReleaseFromRetryableClose()
     {
@@ -163,27 +74,23 @@ public sealed class Eq10DraftServiceTests
         Assert.NotNull(second);
     }
 
-    /// <summary>После C# rejection живой JS handle освобождается без discard; retry видит прежние durable bytes.</summary>
+    /// <summary>Дубликат registration ID отклоняется без замены активной регистрации.</summary>
     [Fact]
-    public async Task RejectedRegistration_UnregistersLiveHandleWithoutDiscardAndAllowsCorrectedRetry()
+    public async Task DuplicateRegistration_IsRejectedWithoutReplacingActiveHandle()
     {
         var js = new WireJsRuntime();
-        js.RegisterJsonQueue.Enqueue(RegisterJson("bad-reg", """{"version":999}""", "durable-before"));
-        js.RegisterJsonQueue.Enqueue(RegisterJson("good-reg", null, "durable-before"));
+        js.RegisterJsonQueue.Enqueue(RegisterJson("same-reg", null, "durable-before"));
+        js.RegisterJsonQueue.Enqueue(RegisterJson("same-reg", null, "other-state"));
         await using var service = new ClayDraftService(js);
+        var first = await service.RegisterHandleAsync("equipment-form", "8", "inventory:42", 2, "#equipment-8");
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => service.RegisterHandleAsync(
             "equipment-form", "8", "inventory:42", 2, "#equipment-8"));
 
-        AssertCall(js, "clayDraftStore.unregister", "bad-reg");
-        Assert.DoesNotContain(js.Calls, call => call.Identifier == "clayDraftStore.discard");
-        Assert.False(service.HasActiveRegistration);
-
-        var retry = await service.RegisterHandleAsync(
-            "equipment-form", "8", "inventory:42", 2, "#equipment-8");
-        Assert.Equal("durable-before", retry.Restore.TypedState);
-        Assert.Equal(1, await retry.SaveTypedAsync("corrected"));
-        AssertCall(js, "clayDraftStore.saveTyped", "good-reg", "corrected");
+        Assert.True(service.HasActiveRegistration);
+        Assert.Equal("durable-before", first.Restore.TypedState);
+        Assert.Equal(1, await first.SaveTypedAsync("corrected"));
+        AssertCall(js, "clayDraftStore.saveTyped", "same-reg", "corrected");
     }
 
     /// <summary>Readiness deserialization сохраняет pending/failed раздельно и не требует raw values.</summary>
@@ -205,14 +112,13 @@ public sealed class Eq10DraftServiceTests
         Assert.DoesNotContain("password", JsonSerializer.Serialize(readiness), StringComparison.OrdinalIgnoreCase);
     }
 
-    private static string RegisterJson(string registrationId, string? operationJson, string typedState = "typed") =>
+    private static string RegisterJson(string registrationId, string? rejectedState, string typedState = "typed") =>
         JsonSerializer.Serialize(new
         {
             registrationId,
             hasDraft = true,
-            revision = operationJson is null ? 4 : 11,
-            typedState,
-            operation = operationJson,
+            revision = rejectedState is null ? 4 : 11,
+            typedState = rejectedState ?? typedState,
             typedScopes = new Dictionary<string, string>(),
         }, JsonOptions);
 
@@ -224,10 +130,7 @@ public sealed class Eq10DraftServiceTests
         public List<JsCall> Calls { get; } = [];
         public Queue<string> RegisterJsonQueue { get; } = new();
         public string? RegisterJson { get; set; }
-        public ClayLegacyDraftOperationEvidence[] LegacyEvidence { get; init; } = [];
-        public bool FailLegacyEvidenceRead { get; init; }
         public bool FailRamAttach { get; init; }
-        public bool FailLegacyRetirement { get; init; }
         public bool FailRamClose { get; set; }
         public string ReadinessJson { get; set; } =
             """{"complete":true,"pendingScopes":[],"failedScopes":[]}""";
@@ -244,12 +147,8 @@ public sealed class Eq10DraftServiceTests
             Calls.Add(new JsCall(identifier, arguments));
             if (identifier == "clayDraftStore.closeRam" && FailRamClose)
                 return ValueTask.FromException<TValue>(new JSException("delete did not commit"));
-            if (identifier == "clayDraftStore.beginLegacyOperationEvidenceTransfer" && FailLegacyEvidenceRead)
-                return ValueTask.FromException<TValue>(new JSException("read reply lost"));
             if (identifier == "clayDraftStore.registerRam" && FailRamAttach)
                 return ValueTask.FromException<TValue>(new JSException("Ram key refused"));
-            if (identifier == "clayDraftStore.retireLegacyOperationEvidenceTransfer" && FailLegacyRetirement)
-                return ValueTask.FromException<TValue>(new JSException("retirement did not commit"));
             object? result = identifier switch
             {
                 "clayDraftStore.register" or "clayDraftStore.registerRam" => JsonSerializer.Deserialize<TValue>(
@@ -258,7 +157,6 @@ public sealed class Eq10DraftServiceTests
                     """{"applied":[],"pending":[],"scopes":{}}""", JsonOptions),
                 "clayDraftStore.getRestoreReadiness" => JsonSerializer.Deserialize<TValue>(ReadinessJson, JsonOptions),
                 "clayDraftStore.closeRam" when arguments.Length == 2 => (TValue)(object)false,
-                "clayDraftStore.beginLegacyOperationEvidenceTransfer" => (TValue)(object)LegacyEvidence,
                 "clayDraftStore.saveTyped" or "clayDraftStore.saveTypedScope" => (TValue)(object)1L,
                 _ => default,
             };

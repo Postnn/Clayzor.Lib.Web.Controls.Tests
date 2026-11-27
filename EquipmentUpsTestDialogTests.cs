@@ -154,7 +154,7 @@ public sealed class EquipmentUpsTestDialogTests
         int reads = 0;
         int writes = 0;
         var cancellation = new EquipmentUpsTestCancellation(
-            () => Task.FromResult<ClayDraftEditorScopeState?>(new(12, false, false)),
+            () => Task.FromResult<ClayDraftEditorScopeState?>(new(12, false)),
             () =>
             {
                 reads++;

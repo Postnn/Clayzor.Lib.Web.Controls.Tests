@@ -90,6 +90,5 @@ public sealed partial class EquipmentInsTests
         var transfer = Assert.Single(context.JSInterop.Invocations["completeSelectionAdvance"]);
         Assert.Equal(17L, transfer.Arguments[1]);
         Assert.Equal(0, fixture.Service.CreateCalls);
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
     }
 }

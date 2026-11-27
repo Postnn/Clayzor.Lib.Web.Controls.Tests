@@ -25,7 +25,6 @@ public sealed partial class EquipmentFormTests
         await InvokeSave(page, false);
 
         Assert.Equal(writes ? 1 : 0, fixture.Service.UpdateCalls);
-        Assert.Equal(writes ? 1 : 0, context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"].Count);
         if (!writes)
         {
             Assert.Contains("Сначала полностью восстановите ввод", page.Markup);
@@ -55,6 +54,5 @@ public sealed partial class EquipmentFormTests
         await provider.InvokeAsync(() => reference.Close(DialogResult.Cancel()));
         await opening.WaitAsync(TimeSpan.FromSeconds(2));
         Assert.Equal(0, fixture.Service.ComputerSaveCalls);
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
     }
 }

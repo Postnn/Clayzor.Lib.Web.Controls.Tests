@@ -107,22 +107,6 @@ public sealed partial class MaintenanceTests
         Assert.Equal(0, db.InsertCount);
     }
 
-    [Theory]
-    [InlineData("unknown")]
-    [InlineData("confirmed")]
-    public async Task SubmittedMaintenanceOutcomeHasNoDestructiveQuestionCancel(string state)
-    {
-        var operation = $$"""{"version":1,"attemptId":"fixture-maintenance-outcome","kind":"maintenance.complete","status":"{{state}}","revision":3,"data":"17","scopes":[],"acceptLegacyTyped":false,"legacyTypedRevision":0}""";
-        await using var context = CreateContext(out var db, restoredOperation: operation, restoredConfirmation: 17);
-        var page = context.Render<MaintenancePage>();
-        page.WaitForAssertion(() => Assert.Contains("Исход выполнения требует проверки", page.Markup));
-        AssertNoCancellationWrite(db, context);
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
-
-        Assert.DoesNotContain("Отменить вопрос", page.Markup);
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.replaceEditorScope"]);
-    }
-
     [Fact]
     public async Task DiscardedQuestionScopeCanBeOpenedForNextConfirmation()
     {
@@ -146,7 +130,7 @@ public sealed partial class MaintenanceTests
     private static void SetConfirmationCancelRevision(BunitContext context, bool accepts = true)
     {
         context.JSInterop.Setup<ClayDraftEditorScopeState>("clayDraftStore.readEditorScope", _ => true)
-            .SetResult(new ClayDraftEditorScopeState(29, false, false));
+            .SetResult(new ClayDraftEditorScopeState(29, false));
         context.JSInterop.Setup<bool>("clayDraftStore.replaceEditorScope", _ => true).SetResult(accepts);
     }
 
@@ -170,7 +154,6 @@ public sealed partial class MaintenanceTests
     {
         Assert.Equal(0, db.InsertCount);
         Assert.DoesNotContain(context.JSInterop.Invocations, call => call.Identifier is
-            "clayDraftStore.beginOperationIntent" or "clayDraftStore.commitOperation" or
             "clayDraftStore.discardScope" or "clayDraftStore.discard");
         Assert.DoesNotContain(context.JSInterop.Invocations["clayDraftStore.saveTypedScope"],
             call => !allowQuestionSave || !Equals(call.Arguments[1], "confirmation"));

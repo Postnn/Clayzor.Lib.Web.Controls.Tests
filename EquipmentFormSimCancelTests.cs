@@ -63,7 +63,6 @@ public sealed partial class EquipmentFormTests
                 Assert.DoesNotContain("\"Pin\"", text);
                 Assert.DoesNotContain("\"Secrets\"", text);
             }
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
         await dialogs.InvokeAsync(() => reference.Close(DialogResult.Cancel()));
         await opening.WaitAsync(TimeSpan.FromSeconds(4));
     }

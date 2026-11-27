@@ -65,7 +65,6 @@ public sealed partial class EquipmentFormTests
         Assert.Equal((upsId, 7), (read.UpsId, read.ServerId));
         Assert.True(read.EmployeeId > 0);
         Assert.Equal(0, fixture.Service.UpsWriteCalls);
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
         Assert.False(opening.IsCompleted);
 
         Assert.Equal(acceptsRevision ? 20 : 11, Assert.Single(editor.Instance.Tests).BatteryTime);

@@ -98,25 +98,17 @@ public sealed partial class PhonePoolAttributeTests
         await page.InvokeAsync(() => AssertNoPoolAttributeCancelWrite(sql, context));
     }
 
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task ReadOnlyPoolAttributeExitNeverTouchesPriorRawOrUnknown(bool unknown)
+    [Fact]
+    public async Task ReadOnlyPoolAttributeExitNeverTouchesPriorRaw()
     {
         using var sql = new Probe { TypeExists = false };
         var snapshot = RecoverySnapshot("Ввод в режиме чтения");
-        var operation = unknown ? JsonSerializer.Serialize(new
-        {
-            version = 1, attemptId = "ppa-unknown-exit", kind = "phone-pool-attribute.update", status = "unknown",
-            revision = 7, data = snapshot, scopes = Array.Empty<object>(), acceptLegacyTyped = false, legacyTypedRevision = 0,
-        }) : null;
-        await using var context = CreateContext(sql, new ClayDraftRestore("ppa-readonly-exit", true, 7, null, operation,
+        await using var context = CreateContext(sql, new ClayDraftRestore("ppa-readonly-exit", true, 7, null,
             new Dictionary<string, string> { ["main"] = snapshot }));
         SetAttributeScopeRevision(context);
         var page = context.Render<PhonePoolAttributeForm>();
         page.WaitForAssertion(() => Assert.Contains("Тип атрибута не найден", page.Markup));
         Assert.DoesNotContain("Ввод в режиме чтения", page.Markup);
-        Assert.DoesNotContain("ppa-unknown-exit", page.Markup);
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.registerRam"]);
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.applyRaw"]);
 
@@ -177,7 +169,7 @@ public sealed partial class PhonePoolAttributeTests
     private static void SetAttributeScopeRevision(BunitContext context, bool accepted = true, bool hasRaw = true)
     {
         context.JSInterop.Setup<ClayDraftEditorScopeState>("clayDraftStore.readEditorScope", _ => true)
-            .SetResult(new ClayDraftEditorScopeState(13, hasRaw, false));
+            .SetResult(new ClayDraftEditorScopeState(13, hasRaw));
         context.JSInterop.Setup<bool>("clayDraftStore.replaceEditorScope", _ => true).SetResult(accepted);
     }
 
@@ -197,7 +189,6 @@ public sealed partial class PhonePoolAttributeTests
         Assert.Empty(sql.Writes);
         Assert.Equal(0, sql.Commits);
         Assert.DoesNotContain(context.JSInterop.Invocations, call => call.Identifier is
-            "clayDraftStore.beginOperationIntent" or "clayDraftStore.commitOperation" or
             "clayDraftStore.discard" or "clayDraftStore.discardScope");
     }
 }

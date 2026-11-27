@@ -36,7 +36,6 @@ public sealed partial class EquipmentFormTests
         await InvokeSave(page, true);
         Assert.Equal(0, fixture.Service.UpdateCalls);
         Assert.Empty(context.JSInterop.Invocations["clayModelEquipmentForm.close"]);
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
 
         context.JSInterop.Setup<ClayDraftRawApplyResult>(PendingApply, _ => true)
             .SetResult(new ClayDraftRawApplyResult(["data:equipment.writeoff:0"], []));

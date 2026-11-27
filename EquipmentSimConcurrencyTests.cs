@@ -92,7 +92,7 @@ public sealed class EquipmentSimConcurrencyTests
 
     /// <summary>SQL ошибка с кодами в тексте не попадает наружу и сохраняет фазу.</summary>
     [Theory]
-    [InlineData(-2, EquipmentWritePhase.Unknown)]
+    [InlineData(-2, EquipmentWritePhase.Rejected)]
     [InlineData(50000, EquipmentWritePhase.Rejected)]
     public async Task WriteFailure_DoesNotSendProtectedParametersToDiagnostics(int number, EquipmentWritePhase phase)
     {

@@ -9,15 +9,12 @@ namespace Clayzor.Lib.Web.Controls.Tests;
 /// <summary>Production clayDraftStore.js в настоящем headless browser с IndexedDB/WebCrypto/Web Locks.</summary>
 public sealed class Eq10DraftStoreBrowserTests
 {
-    /// <summary>DOM ownership, operation lifetime, accepted revisions и scoped readiness.</summary>
+    /// <summary>DOM ownership и scoped readiness обычных черновиков.</summary>
     [Theory]
     [InlineData("roots")]
     [InlineData("legacy")]
-    [InlineData("unknown")]
-    [InlineData("accepted")]
     [InlineData("readiness")]
     [InlineData("pendingRetry")]
-    [InlineData("exclusiveCreation")]
     public async Task ProductionStore_PreservesEq10Contracts(string scenario)
     {
         var result = await RunBrowserAsync(scenario);
@@ -34,6 +31,10 @@ public sealed class Eq10DraftStoreBrowserTests
         var html = $$"""
             <!doctype html>
             <html><head><meta charset="utf-8"></head><body>
+            <script>
+            window.__draftScriptError = null;
+            window.addEventListener('error', event => { window.__draftScriptError = `${event.message} ${event.filename}:${event.lineno}:${event.colno}`; });
+            </script>
             <script>
             {{source}}
             </script>
@@ -101,75 +102,6 @@ public sealed class Eq10DraftStoreBrowserTests
                     await store.applyRaw(r.registrationId);
                     assert(document.getElementById('main').value === 'MAIN' &&
                         document.getElementById('portal').value === 'PORTAL', 'Legacy root/portal registration regressed.');
-                },
-                async unknown() {
-                    mount('<div class="equipment-form" data-owner="root"><input data-draft-key="main.sn"></div>');
-                    let r = await register();
-                    await store.saveTyped(r.registrationId, '{"editable":true}');
-                    const operation = JSON.parse(await store.beginOperationIntent(r.registrationId, intent('equipment-save')));
-                    await store.unknownOperation(r.registrationId, operation.revision);
-                    await store.discard(r.registrationId);
-                    r = await register();
-                    const restored = JSON.parse(r.operation);
-                    assert(r.hasDraft && r.typedState === null, 'Discard did not produce an operation-only draft.');
-                    assert(restored.status === 'unknown' && restored.attemptId === operation.attemptId,
-                        'Discard forgot or replaced the Unknown attempt.');
-                    let blocked = false;
-                    try { await store.beginOperationIntent(r.registrationId, intent('replay')); } catch { blocked = true; }
-                    assert(blocked, 'Unknown after discard/register permitted another Begin.');
-                    await store.rejectOperation(r.registrationId, restored.revision);
-                    const provenNext = JSON.parse(await store.beginOperationIntent(r.registrationId, intent('after-proven-outcome')));
-                    assert(provenNext.attemptId !== restored.attemptId, 'Proven outcome did not release exactly the old attempt.');
-                },
-                async accepted() {
-                    mount(`
-                        <div class="equipment-form" data-owner="root"><input id="main" data-draft-key="main.sn"></div>
-                        <div class="mud-dialog" data-owner="root" data-draft-scope="child:account:A"><input id="child" data-draft-key="account.notes"></div>`);
-                    let r = await register();
-                    await store.saveTyped(r.registrationId, '{"serial":"PARENT"}');
-                    await store.saveTypedScope(r.registrationId, 'child:account:A', '{"notes":"N"}');
-                    await store.saveTypedScope(r.registrationId, 'child:other', '{"keep":true}');
-                    enter('main', 'PARENT'); enter('child', 'N');
-                    const operation = JSON.parse(await store.beginOperationIntent(
-                        r.registrationId, intent('account-save', ['child:account:A'])));
-                    await store.saveTypedScope(r.registrationId, 'child:account:A', '{"notes":"N+1"}');
-                    enter('child', 'N+1');
-                    await store.recordConfirmedOperation(r.registrationId, operation.revision);
-                    await store.commitOperation(r.registrationId, operation.revision, '{"serial":"PARENT"}');
-                    await store.unregister(r.registrationId);
-                    document.getElementById('main').value = 'DB';
-                    document.getElementById('child').value = 'DB';
-                    r = await register();
-                    await store.applyRaw(r.registrationId);
-                    assert(r.typedState === '{"serial":"PARENT"}', 'Child commit discarded parent typed state.');
-                    assert(r.typedScopes['child:account:A'] === '{"notes":"N+1"}', 'Late typed N+1 was discarded.');
-                    assert(r.typedScopes['child:other'] === '{"keep":true}', 'Unrelated scope was discarded.');
-                    assert(document.getElementById('main').value === 'PARENT', 'Parent raw was discarded.');
-                    assert(document.getElementById('child').value === 'N+1', 'Late raw N+1 was discarded.');
-                },
-                async exclusiveCreation() {
-                    mount(`
-                        <div class="equipment-form" data-owner="first"><input data-draft-key="main.serial"></div>
-                        <div class="equipment-form" data-owner="second"><input data-draft-key="main.serial"></div>`);
-                    const open = owner => store.register('equipment-ins', '7:0', '42', 1, `[data-owner='${owner}']`);
-                    const first = await open('first');
-                    sessionStorage.removeItem('clay-draft:42:equipment-ins:7:0');
-                    const second = await open('second');
-                    const start = reg => store.beginOperationIntent(reg.registrationId, JSON.stringify({
-                        ...JSON.parse(intent('equipment.create')), blockOtherDraftOperations: true
-                    }));
-                    const results = await Promise.allSettled([start(first), start(second)]);
-                    assert(results.filter(result => result.status === 'fulfilled').length === 1, 'Both registrations could dispatch.');
-                    const winner = results[0].status === 'fulfilled' ? first : second;
-                    const remaining = winner === first ? second : first;
-                    const operation = JSON.parse(results.find(result => result.status === 'fulfilled').value);
-                    await store.unknownOperation(winner.registrationId, operation.revision);
-                    await store.unregister(winner.registrationId);
-                    const candidates = await store.listRecoveryCandidates(remaining.registrationId);
-                    assert(candidates.length === 1 && candidates[0].hasOperation, 'Closed registration lost its durable attempt.');
-                    const check = await Promise.allSettled([start(remaining)]);
-                    assert(check[0].status === 'rejected' && !(await store.getHealth(remaining.registrationId)).hasOperation,
-                        'The discoverable orphan left another attempt ready for dispatch.');
                 },
                 async pendingRetry() {
                     mount(`
@@ -246,7 +178,7 @@ public sealed class Eq10DraftStoreBrowserTests
             (async () => {
                 const result = { passed: false, error: null };
                 try { await tests[scenario](); result.passed = true; }
-                catch (error) { result.error = String(error?.stack || error); }
+                catch (error) { result.error = String(window.__draftScriptError || error?.stack || error); }
                 const output = document.createElement('pre');
                 output.id = 'results';
                 output.textContent = JSON.stringify(result);

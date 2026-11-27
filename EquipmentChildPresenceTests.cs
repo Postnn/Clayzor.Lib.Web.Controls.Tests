@@ -93,7 +93,7 @@ public sealed class EquipmentChildPresenceAccessTests
         }
         var index = Assert.Single(periods).index;
         var parameters = connection.ParameterLog[index];
-        var sqlStart = EquipmentPeriodJournalWrite.NormalizeStartUtc(start);
+        var sqlStart = EquipmentPeriodWrite.NormalizeStartUtc(start);
         Assert.Equal(7, parameters["EquipmentId"]);
         Assert.Equal(sqlStart, parameters["FromUtc"]);
         Assert.Equal(true, parameters["RequireActive"]);

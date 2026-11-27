@@ -63,32 +63,20 @@ public sealed partial class NetFormTests
         AssertNoNetRawDispatch(fixture);
     }
 
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task NetRechecksReadinessBeforeDispatchEvenAfterBegin(bool postBegin)
+    [Fact]
+    public async Task NetRechecksReadinessBeforeDispatch()
     {
         using var fixture = new NetFixture();
         var context = fixture.Context;
         var page = context.Render<NetPage>();
         WaitForLoad(page);
         await page.Find("textarea[data-draft-key='net.description']").InputAsync("Изменённое описание");
-        var readiness = new ClayDraftRestoreReadiness(false, [], ["net-input"]);
-        if (postBegin)
-        {
-            context.JSInterop.Setup<ClayDraftRestoreReadiness>("clayDraftStore.getRestoreReadiness", _ =>
-                context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"].Count > 0).SetResult(readiness);
-        }
-        else
-            SetNetReadiness(context, readiness);
+        SetNetReadiness(context, new(false, [], ["net-input"]));
         fixture.Enqueue(Script.Rows(Script.Row(("КодСотрудника", 4), ("КодЛицаЗаказчика", 1))));
 
         await Invoke(page, "SaveAsync", false);
 
         Assert.Single(page.FindAll("[data-testid='net-input-notice']"));
-        Assert.Equal(postBegin ? 1 : 0, context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"].Count);
-        Assert.Equal(postBegin ? 1 : 0, context.JSInterop.Invocations["clayDraftStore.rejectOperation"].Count);
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
         AssertNoNetRawDispatch(fixture);
     }
 
@@ -109,39 +97,6 @@ public sealed partial class NetFormTests
         await confirmation.WaitAsync(TimeSpan.FromSeconds(5));
 
         Assert.True(NetReadinessButton(page, "Перезапустить PoE").HasAttribute("disabled"));
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
-        AssertNoNetRawDispatch(fixture);
-    }
-
-    [Fact]
-    public async Task NetLiveTypedRevisionIsRecheckedAfterAwaitingPostBeginReadiness()
-    {
-        using var fixture = new NetFixture();
-        var context = fixture.Context;
-        var page = context.Render<NetPage>();
-        WaitForLoad(page);
-        await page.Find("textarea[data-draft-key='net.description']").InputAsync("Подготовленное значение");
-        var afterBegin = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var readiness = context.JSInterop.Setup<ClayDraftRestoreReadiness>("clayDraftStore.getRestoreReadiness", _ =>
-        {
-            if (context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"].Count == 0)
-                return false;
-            afterBegin.TrySetResult();
-            return true;
-        });
-        fixture.Enqueue(Script.Rows(Script.Row(("КодСотрудника", 4), ("КодЛицаЗаказчика", 1))));
-        var saving = Invoke(page, "SaveAsync", false);
-        try
-        {
-            await afterBegin.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            await page.InvokeAsync(() => { Model(page.Instance).Description = "Поздний ввод"; });
-        }
-        finally { readiness.SetResult(new(true, [], [])); }
-        await saving.WaitAsync(TimeSpan.FromSeconds(5));
-
-        Assert.Equal("Поздний ввод", Model(page.Instance).Description);
-        Assert.Single(context.JSInterop.Invocations["clayDraftStore.rejectOperation"]);
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
         AssertNoNetRawDispatch(fixture);
     }
 
