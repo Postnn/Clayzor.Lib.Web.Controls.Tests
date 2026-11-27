@@ -134,6 +134,7 @@ public sealed class Eq10DraftStoreBrowserTests
                         r.registrationId, intent('account-save', ['child:account:A'])));
                     await store.saveTypedScope(r.registrationId, 'child:account:A', '{"notes":"N+1"}');
                     enter('child', 'N+1');
+                    await store.recordConfirmedOperation(r.registrationId, operation.revision);
                     await store.commitOperation(r.registrationId, operation.revision, '{"serial":"PARENT"}');
                     await store.unregister(r.registrationId);
                     document.getElementById('main').value = 'DB';
@@ -211,12 +212,16 @@ public sealed class Eq10DraftStoreBrowserTests
                 async readiness() {
                     mount(`
                         <div class="equipment-form" data-owner="root"><input id="main" data-draft-key="main.sn"></div>
-                        <div class="mud-dialog" data-owner="root" data-draft-scope="child:account:A"><input id="secret" type="password" data-draft-key="account.password"></div>`);
+                        <div class="mud-dialog" data-owner="root" data-draft-scope="child:account:A">
+                            <input id="notes" data-draft-key="account.notes">
+                            <input id="secret" type="password" data-draft-key="account.password">
+                        </div>`);
                     let r = await register();
-                    enter('main', 'SERIAL'); enter('secret', 'PROTECTED');
+                    enter('main', 'SERIAL'); enter('notes', 'NOTE'); enter('secret', 'PROTECTED');
                     await store.canReload();
                     await store.unregister(r.registrationId);
                     document.getElementById('main').value = 'DB';
+                    document.getElementById('notes').value = '';
                     document.getElementById('secret').value = '';
                     r = await register();
                     let readiness = await store.getRestoreReadiness(r.registrationId);
@@ -229,10 +234,13 @@ public sealed class Eq10DraftStoreBrowserTests
                     assert(!readiness.complete && readiness.failedScopes.includes('child:account:A'),
                         'Failed child readiness was reported as complete.');
                     assert(!JSON.stringify(readiness).includes('PROTECTED'), 'Readiness exposed a raw secret.');
-                    await store.applyRaw(r.registrationId, 'child:account:A');
+                    const restored = await store.applyRaw(r.registrationId, 'child:account:A');
                     readiness = await store.getRestoreReadiness(r.registrationId);
                     assert(readiness.complete && document.getElementById('main').value === 'SERIAL' &&
-                        document.getElementById('secret').value === 'PROTECTED', 'Scoped readiness retry did not finish exactly its scopes.');
+                        document.getElementById('notes').value === 'NOTE' &&
+                        document.getElementById('secret').value === '', 'Scoped readiness retry did not finish exactly its non-secret fields.');
+                    assert(restored.applied.length === 1 && restored.pending.length === 0,
+                        'Password input entered the raw capture or restore set.');
                 }
             };
             (async () => {

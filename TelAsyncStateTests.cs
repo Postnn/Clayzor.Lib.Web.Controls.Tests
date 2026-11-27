@@ -102,7 +102,8 @@ public sealed class TelAsyncStateTests
 
         await fixture.Invoke("SaveAsync", true);
 
-        Assert.Equal(["sync:old:True", "save", "sync:new:False"], fixture.Service.Calls);
+        Assert.Equal(["read", "sync:old:True", "save", "sync:new:False"], fixture.Service.Calls);
+        Assert.Equal(["begin:1", "pre:0", "ready:1", "post:0", "complete"], fixture.Service.WorkflowEvents);
         Assert.Equal(1, fixture.Service.Calls.Count(call => call == "sync:old:True"));
     }
 
@@ -116,7 +117,7 @@ public sealed class TelAsyncStateTests
 
         await fixture.Invoke("SaveAsync", true);
 
-        Assert.Equal(["sync:old:True", "save"], fixture.Service.Calls);
+        Assert.Equal(["read", "sync:old:True", "save"], fixture.Service.Calls);
         Assert.Contains("требует сверки", fixture.Get<string?>("_telJournalNotice"));
     }
 
@@ -130,7 +131,7 @@ public sealed class TelAsyncStateTests
 
         await fixture.Invoke("SaveAsync", true);
 
-        Assert.Equal(["sync:old:True"], fixture.Service.Calls);
+        Assert.Equal(["read", "sync:old:True"], fixture.Service.Calls);
         Assert.Empty(fixture.Service.SaveRequests);
         Assert.Contains("SQL не отправлен", fixture.Get<string?>("_validationMessage"));
     }
@@ -184,6 +185,7 @@ public sealed class TelAsyncStateTests
         await fixture.Invoke("DeleteConfirmedAsync");
 
         Assert.Equal(["read", "delete", "sync:7:False", "sync:8:False"], fixture.Service.Calls);
+        Assert.Equal([(false, 0), (false, 1)], fixture.Service.WorkflowOrdinals);
         Assert.DoesNotContain(fixture.Service.Calls, call => call.Contains("99"));
     }
 
@@ -386,7 +388,7 @@ public sealed class TelAsyncStateTests
         Assert.Empty(fixture.Service.Calls);
     }
 
-    /// <summary>Подтверждённый переход с черновиком и pending разрешается вторым NavigateTo.</summary>
+    /// <summary>Подтверждённый переход выполняется после удаления точной RAM-ревизии.</summary>
     [Fact]
     public async Task InternalNavigation_ConfirmedDraftAndPendingNavigates()
     {
@@ -551,11 +553,10 @@ public sealed class TelAsyncStateTests
 
     /// <summary>Явное закрытие отменяет точную ревизию родителя.</summary>
     [Fact]
-    public async Task CancelClose_DiscardsOnlyParentScope()
+    public async Task CancelClose_PhysicallyClosesTheAcceptedRamRevision()
     {
         await using var fixture = new TelFixture();
         fixture.PrepareCloseState(draft: true, pendingSync: false);
-        fixture.Context.JSInterop.Setup<bool>("clayDraftStore.replaceEditorScope", _ => true).SetResult(true);
 
         var cancel = fixture.Invoke("CancelAsync");
         var dialog = fixture.WaitForChild<ClayEditorCancelDialog>();
@@ -563,18 +564,18 @@ public sealed class TelAsyncStateTests
         await cancel.WaitAsync(TimeSpan.FromSeconds(3));
 
         Assert.True(fixture.Get<bool>("_allowNavigation"));
-        var replace = Assert.Single(fixture.Context.JSInterop.Invocations["clayDraftStore.replaceEditorScope"]);
-        Assert.Equal("tel-input", replace.Arguments[1]);
-        Assert.Equal(11L, replace.Arguments[2]);
-        Assert.Null(replace.Arguments[3]);
+        var close = Assert.Single(fixture.Context.JSInterop.Invocations["clayDraftStore.closeRam"]);
+        Assert.Equal("tel-fixture", close.Arguments[0]);
+        Assert.Equal(11L, close.Arguments[1]);
+        Assert.Empty(fixture.Context.JSInterop.Invocations["clayDraftStore.replaceEditorScope"]);
         Assert.Empty(fixture.Context.JSInterop.Invocations["clayDraftStore.discard"]);
     }
 
-    /// <summary>Переход и явное закрытие сохраняют журнал genuine Unknown даже без новых изменений.</summary>
+    /// <summary>Штатное закрытие удаляет RAM-черновик без повторной отправки или подтверждения Unknown.</summary>
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task UnknownCloseOrNavigation_PreservesJournalAndScope(bool navigate)
+    public async Task UnknownCloseOrNavigation_ClosesRamWithoutSettlingServerOperation(bool navigate)
     {
         await using var fixture = new TelFixture();
         fixture.PrepareCloseState(draft: false, pendingSync: false);
@@ -596,10 +597,80 @@ public sealed class TelAsyncStateTests
             Assert.True(fixture.Get<bool>("_allowNavigation"));
         }
 
+        Assert.Single(fixture.Context.JSInterop.Invocations["clayDraftStore.closeRam"]);
         Assert.Empty(fixture.Context.JSInterop.Invocations["clayDraftStore.replaceEditorScope"]);
         Assert.Empty(fixture.Context.JSInterop.Invocations["clayDraftStore.discard"]);
         Assert.Empty(fixture.Context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
         Assert.Empty(fixture.Context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
+    }
+
+    /// <summary>После подтверждения выхода новая ревизия оставляет номер и ввод открытыми.</summary>
+    [Fact]
+    public async Task TelCloseWithLateInputKeepsTheRamOwner()
+    {
+        await using var fixture = new TelFixture();
+        fixture.PrepareCloseState(draft: true, pendingSync: false);
+        fixture.Context.JSInterop.Setup<bool>("clayDraftStore.closeRam", _ => true).SetResult(false);
+
+        var cancel = fixture.Invoke("CancelAsync");
+        var dialog = fixture.WaitForChild<ClayEditorCancelDialog>();
+        await fixture.RespondToChildAsync(dialog, "Закрыть без сохранения");
+        await cancel.WaitAsync(TimeSpan.FromSeconds(3));
+
+        Assert.False(fixture.Get<bool>("_allowNavigation"));
+        Assert.Equal("draft", fixture.Model.Notes);
+        Assert.Contains("Ввод изменился", fixture.Get<string>("_telInputNotice"));
+        Assert.Equal(11L, Assert.Single(fixture.Context.JSInterop.Invocations["clayDraftStore.closeRam"]).Arguments[1]);
+    }
+
+    /// <summary>Создание и копирование проверяют общую область старых попыток до отдельной RAM-регистрации.</summary>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(17)]
+    public async Task TelCreationChecksLegacyAggregateBeforePrivateRamRegistration(int copyId)
+    {
+        await using var fixture = new TelFixture();
+        var id = Guid.NewGuid();
+        var interop = fixture.Context.JSInterop;
+        interop.Setup<ClayLegacyDraftOperationEvidence[]?>("clayDraftStore.beginLegacyOperationEvidenceTransfer",
+            call => Equals(call.Arguments[1], "new")).SetResult([new(id.ToString("N"), "tel.write", """{"PhoneId":0,"Deleting":false}""")]);
+        interop.Setup<ClayDraftRestore?>("clayDraftStore.registerRam",
+            call => Equals(call.Arguments[1], $"new:{copyId}") && fixture.Service.LegacyImports.Count > 0)
+            .SetResult(new ClayDraftRestore("tel-fixture", false, 0, null, null));
+
+        await fixture.LoadRoute(0, copyId);
+
+        var imported = Assert.Single(fixture.Service.LegacyImports);
+        Assert.Equal((0, id, false), imported);
+        Assert.Contains(interop.Invocations["clayDraftStore.beginLegacyOperationEvidenceTransfer"],
+            call => Equals(call.Arguments[0], "inventory.tel") && Equals(call.Arguments[1], "new"));
+        Assert.Contains(interop.Invocations["clayDraftStore.registerRam"],
+            call => Equals(call.Arguments[1], $"new:{copyId}") && Guid.TryParse(Assert.IsType<string>(call.Arguments[5]), out _));
+        var calls = interop.Invocations.ToList();
+        var retire = Assert.Single(calls, call => call.Identifier == "clayDraftStore.retireLegacyOperationEvidenceTransfer");
+        var registration = Assert.Single(calls, call => call.Identifier == "clayDraftStore.registerRam");
+        Assert.True(calls.IndexOf(registration) < calls.IndexOf(retire));
+        Assert.True(calls.IndexOf(retire) < calls.FindIndex(call => call.Identifier == "clayDraftStore.finishLegacyOperationEvidenceTransfer"));
+        Assert.Empty(interop.Invocations["clayDraftStore.listRecoveryCandidates"]);
+    }
+
+
+    /// <summary>При открытии без права редактирования старый ввод даже не запрашивается.</summary>
+    [Fact]
+    public async Task ReadOnlyTelReceivesDatabaseViewWithoutOpeningDraft()
+    {
+        await using var fixture = new TelFixture();
+        fixture.SetupEditorRestore(DraftJson(), hasRaw: true, rawPending: false);
+        fixture.Service.CurrentActor = () => new Employee { Id = 4 };
+        var interop = fixture.Context.JSInterop;
+        var initialRegistrations = interop.Invocations["clayDraftStore.registerRam"].Count;
+
+        await fixture.LoadRoute(1002, 0);
+
+        Assert.False(fixture.Get<bool>("_canEdit"));
+        Assert.DoesNotContain("Restored note", fixture.Model.Notes);
+        Assert.Equal(initialRegistrations, interop.Invocations["clayDraftStore.registerRam"].Count);
+        Assert.Empty(interop.Invocations["clayDraftStore.applyRaw"]);
     }
 
     /// <summary>Результат Finder подтверждается только после создания одной связи в фактической форме Tel.</summary>
@@ -799,7 +870,7 @@ public sealed class TelAsyncStateTests
 
         await fixture.Invoke("SaveAsync", false);
         await fixture.Invoke("DeleteConfirmedAsync");
-        Assert.Equal(["sync:old:True", "save"], fixture.Service.Calls);
+        Assert.Equal(["read", "sync:old:True", "save"], fixture.Service.Calls);
         Assert.Contains("Конфликт версий", fixture.Get<string?>("_validationMessage"));
         Assert.Contains("Предварительная синхронизация", fixture.Get<string?>("_warningMessage"));
         Assert.Equal("Local notes", fixture.Model.Notes);
@@ -816,7 +887,7 @@ public sealed class TelAsyncStateTests
 
         await fixture.Invoke("SaveAsync", true);
 
-        Assert.Equal(["sync:old:True", "save"], fixture.Service.Calls);
+        Assert.Equal(["read", "sync:old:True", "save"], fixture.Service.Calls);
     }
 
     private sealed class TelTestClock(DateTimeOffset now) : TimeProvider
@@ -851,7 +922,7 @@ public sealed class TelAsyncStateTests
             await fixture.Invoke("SaveAsync", true);
 
         Assert.Equal((@"DOMAIN\fixture", fixture.Service.Actor.Id), Assert.Single(fixture.Service.AtsActors));
-        Assert.Equal(path == "delete" ? ["read"] : [], fixture.Service.Calls);
+        Assert.Equal(path == "retry" ? [] : ["read"], fixture.Service.Calls);
         Assert.Empty(fixture.Service.SaveRequests);
         Assert.Equal(path == "retry" ? 1 : 0, fixture.PendingCount);
         Assert.Contains("Авторизация или цель АТС не подтверждены", fixture.Get<string?>("_validationMessage"));
@@ -919,6 +990,90 @@ public sealed class TelAsyncStateTests
         Assert.Empty(fixture.Context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
     }
 
+    /// <summary>Новая карточка без локальной операции показывает собственную серверную сводку и обновляет её чтением.</summary>
+    [Fact]
+    public async Task ServerOnlyWorkflowCanBeReadWithoutDispatching()
+    {
+        await using var fixture = new TelFixture();
+        var attemptId = Guid.NewGuid();
+        var summary = new TelWorkflowSummary(attemptId, false, 2, 1, null, 0, 1);
+        fixture.Service.LoadData = (id, _) => TelDraftPhone(id);
+        fixture.Service.ReadPendingWorkflow = id => id == 1002;
+        fixture.Service.ReadWorkflowSummary = _ => Task.FromResult<TelWorkflowSummary?>(summary);
+
+        await fixture.LoadRoute(1002, 0);
+
+        Assert.Contains(attemptId.ToString("D"), fixture.PageMarkup);
+        Assert.Contains("Подтверждение записи SQL ожидается", fixture.PageMarkup);
+        Assert.Contains("подтверждено 1 из 2", fixture.PageMarkup);
+        Assert.Contains("План команд АТС после SQL ещё не зафиксирован", fixture.PageMarkup);
+        Assert.DoesNotContain("Повторить неотправленные команды АТС", fixture.PageMarkup);
+        Assert.Equal((@"DOMAIN\fixture", 4, 1002), Assert.Single(fixture.Service.WorkflowSummaryReads));
+
+        summary = summary with { SqlConfirmed = true, PostStepCount = 3, ConfirmedPostSteps = 2 };
+        await fixture.ClickJournalButtonAsync("Прочитать состояние номера");
+        Assert.Contains("Запись SQL подтверждена", fixture.PageMarkup);
+        Assert.Contains("подтверждено 2 из 3", fixture.PageMarkup);
+        await fixture.ClickJournalButtonAsync("Обновить");
+
+        Assert.Equal(3, fixture.Service.WorkflowSummaryReads.Count);
+        Assert.Contains("подтверждено 2 из 3", fixture.PageMarkup);
+        Assert.Empty(fixture.Service.WorkflowEvents);
+        Assert.Empty(fixture.Context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
+        Assert.Empty(fixture.Context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
+    }
+
+    /// <summary>Чужой открытый слот блокирует повтор без раскрытия идентификатора или этапов.</summary>
+    [Fact]
+    public async Task ForeignServerWorkflowOnlyShowsGenericBlockingNotice()
+    {
+        await using var fixture = new TelFixture();
+        fixture.Service.LoadData = (id, _) => TelDraftPhone(id);
+        fixture.Service.ReadPendingWorkflow = id => id == 1002;
+
+        await fixture.LoadRoute(1002, 0);
+        await fixture.ClickJournalButtonAsync("Прочитать состояние номера");
+        await fixture.Invoke("SaveAsync", false);
+
+        Assert.Contains("Сервер обнаружил незавершённую запись", fixture.PageMarkup);
+        Assert.DoesNotContain("tel-workflow-summary", fixture.PageMarkup);
+        Assert.DoesNotContain("Команды АТС до SQL", fixture.PageMarkup);
+        Assert.Empty(fixture.Service.WorkflowEvents);
+        Assert.Empty(fixture.Service.SaveRequests);
+        Assert.Empty(fixture.Context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
+    }
+
+    /// <summary>Опоздавшая сводка запрошенного номера не появляется после перехода к другой карточке.</summary>
+    [Fact]
+    public async Task StaleServerWorkflowSummaryCannotAppearOnAnotherRoute()
+    {
+        await using var fixture = new TelFixture();
+        var attemptId = Guid.NewGuid();
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource<TelWorkflowSummary?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.Service.LoadData = (id, _) => TelDraftPhone(id);
+        fixture.Service.ReadPendingWorkflow = id => id == 1002;
+        fixture.Service.ReadWorkflowSummary = _ =>
+        {
+            started.TrySetResult();
+            return release.Task;
+        };
+
+        var first = fixture.LoadRoute(1002, 0);
+        try
+        {
+            await started.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            await fixture.LoadRoute(1003, 0);
+        }
+        finally { release.TrySetResult(new TelWorkflowSummary(attemptId, true, 1, 1, 1, 0, 1)); }
+        await first.WaitAsync(TimeSpan.FromSeconds(3));
+
+        Assert.Equal(1003, fixture.Model.Id);
+        Assert.DoesNotContain(attemptId.ToString("D"), fixture.PageMarkup);
+        Assert.DoesNotContain("tel-workflow-summary", fixture.PageMarkup);
+        Assert.Empty(fixture.Service.WorkflowEvents);
+    }
+
     /// <summary>Первый SQL commit и подтверждённый NotSent связываются с одним attempt при ручном повторе АТС.</summary>
     [Fact]
     public async Task ConfirmedSqlWithNotSentAts_ManualRetryDoesNotRepeatSql()
@@ -935,7 +1090,53 @@ public sealed class TelAsyncStateTests
         Assert.Equal(["save", "sync:pbx:False"], fixture.Service.Calls);
         Assert.Equal(2, fixture.Service.AtsAttemptIds.Count);
         Assert.Single(fixture.Service.AtsAttemptIds.Distinct());
+        Assert.Equal([(false, 0), (false, 0)], fixture.Service.WorkflowOrdinals);
         Assert.Single(fixture.Context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
+        Assert.Single(fixture.Context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
+    }
+
+    /// <summary>Без серверного доказательства отсутствия отправок браузер не отвергает попытку.</summary>
+    [Fact]
+    public async Task PreAtsNotSentWithoutServerAbandonProofKeepsMarker()
+    {
+        await using var fixture = new TelFixture();
+        fixture.PrepareXorcomStationChange();
+        fixture.Service.NextAtsPhase = PhoneSyncPhase.NotSent;
+        fixture.Service.AbandonWorkflow = false;
+
+        await fixture.Invoke("SaveAsync", false);
+
+        Assert.Equal(["begin:1", "pre:0", "abandon"], fixture.Service.WorkflowEvents);
+        Assert.Equal(["read"], fixture.Service.Calls);
+        Assert.Single(fixture.Context.JSInterop.Invocations["clayDraftStore.unknownOperation"]);
+        Assert.Empty(fixture.Context.JSInterop.Invocations["clayDraftStore.rejectOperation"]);
+    }
+
+    /// <summary>Браузер принимает ревизию только после серверного завершения всего workflow.</summary>
+    [Fact]
+    public async Task BrowserCleanupWaitsForDurableWorkflowCompletion()
+    {
+        await using var fixture = new TelFixture();
+        fixture.PrepareSameStation(33, "pbx");
+        fixture.Model.Notes = "Изменено";
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var released = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.Service.CompletingWorkflow = async () =>
+        {
+            started.TrySetResult();
+            await released.Task;
+        };
+
+        var pending = fixture.Invoke("SaveAsync", false);
+        try
+        {
+            await started.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            Assert.Equal(["begin:0", "ready:0", "complete"], fixture.Service.WorkflowEvents);
+            Assert.Empty(fixture.Context.JSInterop.Invocations["clayDraftStore.recordConfirmedOperation"]);
+            Assert.Empty(fixture.Context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
+        }
+        finally { released.TrySetResult(); }
+        await pending.WaitAsync(TimeSpan.FromSeconds(3));
         Assert.Single(fixture.Context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
     }
 
@@ -966,7 +1167,8 @@ public sealed class TelAsyncStateTests
 
         await fixture.Invoke("SaveAsync", true);
 
-        Assert.Empty(fixture.Service.Calls);
+        Assert.Equal(["read"], fixture.Service.Calls);
+        Assert.Empty(fixture.Service.WorkflowEvents);
         Assert.Contains("Операция не отправлена", fixture.Get<string?>("_telJournalNotice"));
         AssertTelBeginBlocksOtherDrafts(fixture.Context);
     }
@@ -1262,7 +1464,8 @@ public sealed class TelAsyncStateTests
 
         await fixture.Invoke("SaveAsync", false);
 
-        Assert.Empty(fixture.Service.Calls);
+        Assert.Equal(["read"], fixture.Service.Calls);
+        Assert.Empty(fixture.Service.WorkflowEvents);
         Assert.Contains("Ввод изменился до отправки", fixture.Get<string?>("_validationMessage"));
         Assert.Single(fixture.Context.JSInterop.Invocations["clayDraftStore.rejectOperation"]);
         Assert.Empty(fixture.Context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
@@ -1328,7 +1531,7 @@ public sealed class TelAsyncStateTests
             var editor = fixture.WaitForChild<EquipmentPhoneDialog>();
             Assert.Equal("Restored link", editor.Instance.Notes);
             Assert.NotEmpty(editor.FindAll($"input[data-draft-key='{scope}.notes']"));
-            await fixture.RespondToChildAsync(editor, "Отмена");
+            await fixture.CloseDirtyChildAsync(editor);
         }
         else
         {
@@ -1336,7 +1539,7 @@ public sealed class TelAsyncStateTests
             Assert.Equal("112", editor.Instance.Value.CallNumber);
             Assert.Equal(15, editor.Instance.Value.DelayBeforeCall);
             Assert.NotEmpty(editor.FindAll($"input[data-draft-key='{scope}.number']"));
-            await fixture.RespondToChildAsync(editor, "Отмена");
+            await fixture.CloseDirtyChildAsync(editor);
         }
         await dialog.WaitAsync(TimeSpan.FromSeconds(3));
 
@@ -1368,6 +1571,10 @@ public sealed class TelAsyncStateTests
 
         var dialog = fixture.Invoke("OpenParallelDialogAsync", new object?[] { null });
         var editor = fixture.WaitForChild<PhoneParallelCallDialog>();
+        var target = Assert.IsType<Clayzor.Lib.Web.Controls.Components.Presence.ClayPresenceTarget>(editor.Instance.PresenceTarget);
+        Assert.Equal(Clayzor.Lib.Web.Controls.Components.Presence.ClayPresenceKey.Create("inventory", "phone", 1002),
+            target.Key);
+        Assert.Same(target, editor.FindComponent<Clayzor.Lib.Web.Controls.Components.Presence.ClayPresencePanel>().Instance.Target);
         Assert.Empty(fixture.Get<PhoneRelationsSnapshot>("_relations").ParallelCalls);
         await fixture.RespondToChildAsync(editor, "OK");
         await dialog.WaitAsync(TimeSpan.FromSeconds(3));
@@ -1398,7 +1605,7 @@ public sealed class TelAsyncStateTests
         Assert.Equal("Child draft", editor.Instance.Notes);
         Assert.DoesNotContain(editor.FindAll("button"), button => button.TextContent.Trim() == "Повторить восстановление ввода");
         Assert.True(editor.FindAll("button").Single(button => button.TextContent.Trim() == "OK").HasAttribute("disabled"));
-        await fixture.RespondToChildAsync(editor, "Отмена");
+        await fixture.CloseDirtyChildAsync(editor);
         await dialog.WaitAsync(TimeSpan.FromSeconds(3));
         Assert.Equal("Base link", Assert.Single(fixture.Get<PhoneRelationsSnapshot>("_relations").Equipment).Notes);
         Assert.DoesNotContain(fixture.Context.JSInterop.Invocations["clayDraftStore.saveTypedScope"],
@@ -1431,7 +1638,7 @@ public sealed class TelAsyncStateTests
 
         interop.Setup<ClayDraftEditorScopeState>("clayDraftStore.readEditorScope", call => Equals(scope, call.Arguments[1]))
             .SetResult(new ClayDraftEditorScopeState(12, true, false));
-        await fixture.RespondToChildAsync(editor, "Отмена");
+        await fixture.CloseDirtyChildAsync(editor);
         await dialog.WaitAsync(TimeSpan.FromSeconds(3));
 
         var calls = interop.Invocations["clayDraftStore.replaceEditorScope"];
@@ -1464,11 +1671,52 @@ public sealed class TelAsyncStateTests
         Assert.DoesNotContain(fixture.Context.JSInterop.Invocations["clayDraftStore.saveTypedScope"],
             call => Equals(call.Arguments[1], "tel-input"));
         Assert.Empty(fixture.Context.JSInterop.Invocations["clayDraftStore.replaceEditorScope"]);
-        await fixture.RespondToChildAsync(editor, "Отмена");
+        await fixture.CloseDirtyChildAsync(editor);
         await dialog.WaitAsync(TimeSpan.FromSeconds(3));
         Assert.Empty(fixture.Service.SaveRequests);
     }
 
+
+    /// <summary>Сброс дочерней связи требует совпадения с принятой версией.</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task TelChildReset_ChecksFreshEquipmentLink(bool changed)
+    {
+        await using var fixture = new TelFixture();
+        const string scope = "tel-equipment-7-14";
+        fixture.SetupChildren(new Dictionary<string, string>
+        {
+            [scope] = ChildJson(new EquipmentPhoneReturnResult(null, "Base link"),
+                new EquipmentPhoneReturnResult(null, "Child input")),
+        });
+        fixture.Service.LoadData = (id, _) => TelWithEquipment(id);
+        await fixture.LoadRoute(1002, 0);
+
+        var relations = fixture.Get<PhoneRelationsSnapshot>("_relations");
+        var dialog = fixture.Invoke("EditEquipmentReturnAsync", Assert.Single(relations.Equipment));
+        var editor = fixture.WaitForChild<EquipmentPhoneDialog>();
+        Assert.Single(editor.FindAll("[data-clay-field-changed]"));
+        if (changed)
+            fixture.Service.LoadData = (id, _) =>
+            {
+                var fresh = TelWithEquipment(id);
+                fresh.Relations.Equipment.Clear();
+                return fresh;
+            };
+
+        var cancel = fixture.RespondToChildAsync(editor, "Отмена");
+        await fixture.RespondToChildAsync(fixture.WaitForChild<ClayEditorCancelDialog>(),
+            "Отменить мои изменения и загрузить из БД");
+        await cancel.WaitAsync(TimeSpan.FromSeconds(3));
+
+        Assert.False(dialog.IsCompleted);
+        Assert.Equal(changed ? "Child input" : "Base link", editor.Instance.Notes);
+        Assert.Equal(changed ? 1 : 0, editor.FindAll("[data-clay-field-changed]").Count);
+        Assert.Equal("Base link", Assert.Single(relations.Equipment).Notes);
+        Assert.Equal(changed ? 0 : 1, fixture.Context.JSInterop.Invocations["clayDraftStore.replaceEditorScope"].Count);
+        Assert.Empty(fixture.Service.SaveRequests);
+    }
 
     private static string ChildJson<T>(T original, T current) =>
         System.Text.Json.JsonSerializer.Serialize(new { Version = 1, Original = original, Current = current });
@@ -1668,8 +1916,9 @@ public sealed class TelAsyncStateTests
             {
                 ["tel-progress"] = System.Text.Json.JsonSerializer.Serialize(new
                 {
-                    AttemptId = "fixture-attempt", Deleting = false, PhoneId = Model.Id,
+                    AttemptId = FixtureAttemptId, Deleting = false, PhoneId = Model.Id,
                     Stage = stage, Pending = pending, SqlConfirmed = sqlConfirmed, Version = 1, SqlFingerprint = "fixture-sql",
+                    ServerWorkflow = true,
                 }),
             });
             await Invoke("AttachTelJournalAsync", Service.Actor, _tel.Id, _tel.CopyId, Get<int>("_operationVersion"));
@@ -1705,6 +1954,15 @@ public sealed class TelAsyncStateTests
             where T : Microsoft.AspNetCore.Components.IComponent =>
             dialog.InvokeAsync(() => dialog.FindAll("button").Single(button => button.TextContent.Trim() == text).ClickAsync());
 
+
+        internal async Task CloseDirtyChildAsync<T>(IRenderedComponent<T> editor)
+            where T : Microsoft.AspNetCore.Components.IComponent
+        {
+            var cancel = RespondToChildAsync(editor, "Отмена");
+            var confirmation = WaitForChild<ClayEditorCancelDialog>();
+            await RespondToChildAsync(confirmation, "Закрыть без сохранения");
+            await cancel.WaitAsync(TimeSpan.FromSeconds(3));
+        }
 
         internal void SetupEmptyEditorRegistration() => ConfigureTelJournal(_context);
 
@@ -1762,6 +2020,9 @@ public sealed class TelAsyncStateTests
 
         internal string CurrentUri =>
             _context.Services.GetRequiredService<Microsoft.AspNetCore.Components.NavigationManager>().Uri;
+        internal string PageMarkup => _page.Markup;
+        internal Task ClickJournalButtonAsync(string label) => _page.InvokeAsync(() =>
+            _page.FindAll("button").Single(button => button.TextContent.Trim() == label).ClickAsync());
 
         internal Task LoadRoute(int id, int copyId) => _context.Renderer.Dispatcher.InvokeAsync(() =>
         {
@@ -1854,6 +2115,14 @@ public sealed class TelAsyncStateTests
         internal bool DenyAts { get; set; }
         internal List<(string? Principal, int EmployeeId)> AtsActors { get; } = [];
         internal List<string> AtsAttemptIds { get; } = [];
+        internal List<string> WorkflowEvents { get; } = [];
+        internal List<(int PhoneId, Guid AttemptId, bool Deleting)> LegacyImports { get; } = [];
+        internal List<(bool Pre, int Index)> WorkflowOrdinals { get; } = [];
+        internal bool AbandonWorkflow { get; set; } = true;
+        internal Func<Task>? CompletingWorkflow { get; set; }
+        internal Func<int, bool>? ReadPendingWorkflow { get; set; }
+        internal Func<int, Task<TelWorkflowSummary?>>? ReadWorkflowSummary { get; set; }
+        internal List<(string? Principal, int EmployeeId, int PhoneId)> WorkflowSummaryReads { get; } = [];
         internal List<PhoneValidationIssue> ValidationIssues { get; } = [];
         internal string? SavedFullNumber { get; set; }
         internal PhoneDeleteSnapshot? PersistedSnapshot { get; set; }
@@ -1902,10 +2171,13 @@ public sealed class TelAsyncStateTests
         public override Task<IReadOnlyList<PhoneValidationIssue>> ValidateServerAsync(PhoneSaveRequest request) =>
             Task.FromResult<IReadOnlyList<PhoneValidationIssue>>(ValidationIssues);
 
-        public override async Task<PhoneSaveResult> SaveAsync(PhoneSaveRequest request, string? windowsPrincipal, int employeeId, TelSqlBoundary? boundary = null)
+        public override async Task<PhoneSaveResult> SaveAsync(PhoneSaveRequest request, string? windowsPrincipal, int employeeId,
+            Guid attemptId, TelSqlBoundary? boundary = null)
         {
+            if (SavedFullNumber is not null) request.Phone.FullNumber = SavedFullNumber;
             if (boundary is not null)
             {
+                Assert.True(boundary.WorkflowBound);
                 await boundary.Prepare();
                 boundary.Dispatch();
             }
@@ -1913,7 +2185,6 @@ public sealed class TelAsyncStateTests
             if (BeforeSaveReply is not null)
                 await BeforeSaveReply();
             if (ThrowOnSave) throw new InvalidOperationException("SQL Save failed");
-            if (SavedFullNumber is not null) request.Phone.FullNumber = SavedFullNumber;
             SaveRequests.Add(request);
             if (HasWriteConflict)
                 return new PhoneSaveResult
@@ -1930,10 +2201,35 @@ public sealed class TelAsyncStateTests
             return Task.FromResult(PersistedSnapshot);
         }
 
-        public override async Task DeleteAsync(int id, string? windowsPrincipal, int employeeId, TelSqlBoundary? boundary = null)
+        public override Task ValidateDeleteProposalAsync(Phone original, string? principal, int employeeId, CancellationToken ct) =>
+            Task.CompletedTask;
+
+        public override Task<bool> ReadSqlPendingAsync(string? principal, int employeeId, int phoneId, CancellationToken ct) =>
+            Task.FromResult(ReadPendingWorkflow?.Invoke(phoneId) == true);
+
+        internal override Task ImportLegacyTelOperationsAsync(string? principal, int employeeId, int phoneId,
+            IReadOnlyCollection<(Guid AttemptId, bool Deleting)> evidence, CancellationToken ct)
+        {
+            LegacyImports.AddRange(evidence.Select(item => (phoneId, item.AttemptId, item.Deleting)));
+            return Task.CompletedTask;
+        }
+
+        internal override Task<TelWorkflowSummary?> ReadActiveWorkflowAsync(string? principal, int employeeId, int phoneId,
+            CancellationToken ct)
+        {
+            WorkflowSummaryReads.Add((principal, employeeId, phoneId));
+            return ReadWorkflowSummary?.Invoke(phoneId) ?? Task.FromResult<TelWorkflowSummary?>(null);
+        }
+
+        public override Task<InventoryOperationReceipt?> ReadSqlReceiptAsync(string? principal, int employeeId, int phoneId,
+            bool deleting, Guid attemptId, CancellationToken ct) => Task.FromResult<InventoryOperationReceipt?>(null);
+
+        public override async Task DeleteAsync(Phone original, string? windowsPrincipal, int employeeId,
+            Guid attemptId, TelSqlBoundary? boundary = null)
         {
             if (boundary is not null)
             {
+                Assert.True(boundary.WorkflowBound);
                 await boundary.Prepare();
                 boundary.Dispatch();
             }
@@ -1942,6 +2238,43 @@ public sealed class TelAsyncStateTests
         }
 
         internal PhoneSyncPhase? NextAtsPhase { get; set; }
+
+        internal override Task BeginWorkflowAsync(string? principal, int employeeId, Guid attemptId, int phoneId,
+            bool deleting, IReadOnlyList<PhoneSyncOperation> prePlan, CancellationToken ct)
+        {
+            WorkflowEvents.Add($"begin:{prePlan.Count}");
+            return Task.CompletedTask;
+        }
+
+        internal override Task MarkWorkflowSqlReadyAsync(string? principal, int employeeId, Guid attemptId,
+            IReadOnlyList<PhoneSyncOperation> postPlan, CancellationToken ct)
+        {
+            WorkflowEvents.Add($"ready:{postPlan.Count}");
+            return Task.CompletedTask;
+        }
+
+        internal override async Task CompleteWorkflowAsync(string? principal, int employeeId, Guid attemptId, CancellationToken ct)
+        {
+            WorkflowEvents.Add("complete");
+            if (CompletingWorkflow is not null) await CompletingWorkflow();
+        }
+
+        internal override Task<bool> TryAbandonWorkflowAsync(string? principal, int employeeId, Guid attemptId, CancellationToken ct)
+        {
+            WorkflowEvents.Add("abandon");
+            return Task.FromResult(AbandonWorkflow);
+        }
+
+        internal override async Task<PhoneSyncOperationResult> SynchronizeWorkflowStepAsync(Guid attemptId, string? principal,
+            int employeeId, int phoneId, bool beforeSql, int stepIndex, PhoneSyncOperation operation, CancellationToken ct,
+            Func<PhoneSyncOperation, Task>? prepareDispatch = null)
+        {
+            WorkflowEvents.Add(beforeSql ? $"pre:{stepIndex}" : $"post:{stepIndex}");
+            WorkflowOrdinals.Add((beforeSql, stepIndex));
+            var results = await SynchronizeTelPhasedAsync(attemptId.ToString("N"), principal, employeeId, phoneId,
+                [operation], ct, prepareDispatch);
+            return results.Single();
+        }
 
         internal override async Task<IReadOnlyList<PhoneSyncOperationResult>> SynchronizeTelPhasedAsync(
             string attemptId, string? windowsPrincipal, int employeeId, int phoneId, IEnumerable<PhoneSyncOperation> operations,
@@ -1982,10 +2315,13 @@ public sealed class TelAsyncStateTests
 
     private static void ConfigureTelJournal(BunitContext context, string? status = null, IReadOnlyDictionary<string, string>? scopes = null)
     {
-        context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.register", _ => true)
+        context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.registerRam", _ => true)
             .SetResult(new ClayDraftRestore("tel-fixture", status is not null || scopes is { Count: > 0 }, 0, null,
                 status is null ? null : TelOperationJson(status), scopes));
-        context.JSInterop.Setup<ClayDraftRecoveryCandidate[]>("clayDraftStore.listRecoveryCandidates", _ => true).SetResult([]);
+        context.JSInterop.Setup<ClayLegacyDraftOperationEvidence[]?>("clayDraftStore.beginLegacyOperationEvidenceTransfer", _ => true).SetResult([]);
+        context.JSInterop.SetupVoid("clayDraftStore.finishLegacyOperationEvidenceTransfer", _ => true).SetVoidResult();
+        context.JSInterop.SetupVoid("clayDraftStore.retireLegacyOperationEvidenceTransfer", _ => true).SetVoidResult();
+        context.JSInterop.Setup<bool>("clayDraftStore.closeRam", call => call.Arguments.Count == 2).SetResult(true);
         context.JSInterop.Setup<ClayDraftStorageHealth>("clayDraftStore.getHealth", _ => true)
             .SetResult(new ClayDraftStorageHealth(true, 0, null, false, 1, 1));
         context.JSInterop.Setup<ClayDraftRestoreReadiness>("clayDraftStore.getRestoreReadiness", _ => true)
@@ -1996,8 +2332,10 @@ public sealed class TelAsyncStateTests
         context.JSInterop.Setup<string>("clayDraftStore.beginOperationIntent", _ => true).SetResult(TelOperationJson("running"));
     }
 
+    private const string FixtureAttemptId = "10000000000000000000000000000001";
+
     private static string TelOperationJson(string status) =>
-        $$"""{"version":1,"attemptId":"fixture-attempt","kind":"tel.write","status":"{{status}}","revision":9,"data":"fixture","scopes":[],"acceptLegacyTyped":false,"legacyTypedRevision":0}""";
+        $$"""{"version":1,"attemptId":"{{FixtureAttemptId}}","kind":"tel.write","status":"{{status}}","revision":9,"data":"fixture","scopes":[],"acceptLegacyTyped":false,"legacyTypedRevision":0}""";
 
     private sealed class TelJournalFixture(IJSRuntime inner) : IJSRuntime
     {

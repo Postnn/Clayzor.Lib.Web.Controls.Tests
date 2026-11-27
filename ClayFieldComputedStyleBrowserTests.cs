@@ -29,13 +29,20 @@ public sealed class ClayFieldComputedStyleBrowserTests
         var fixtureRoot = Path.Combine(root, "TestResults", "form03-form05-computed");
         Directory.CreateDirectory(fixtureRoot);
         var failures = new List<string>();
+        var fixtures = new List<(ClayThemePreference Theme, string File)>();
         foreach (var theme in ClayThemeCatalog.Available)
         {
             var layout = await RenderFieldsAsync(theme);
             var file = Path.Combine(fixtureRoot, theme.ToString() + ".html");
             await File.WriteAllTextAsync(file, "<!doctype html><meta charset=utf-8><style>" + mud +
                 "</style><style>" + clay + "</style>" + layout + Probe);
-            var result = await ReadChromeAsync(browser!, file);
+            fixtures.Add((theme, file));
+        }
+
+        var results = await ReadChromeAsync(browser!, fixtures.Select(fixture => fixture.File).ToArray());
+        foreach (var (theme, file) in fixtures)
+        {
+            var result = results[file];
             await File.WriteAllTextAsync(Path.ChangeExtension(file, ".json"), result);
             using var parsed = JsonDocument.Parse(result);
             failures.AddRange(parsed.RootElement.GetProperty("errors").EnumerateArray()
@@ -106,20 +113,26 @@ public sealed class ClayFieldComputedStyleBrowserTests
         }
         result.Append("<div data-case='toolbar' data-state='button'>");
         result.Append(ctx.Render<ClayToolbarButton>(a => a.Add(x => x.Options, new ClayToolbarButtonOptions { Text = "Действие" })).Markup);
-        result.Append("</div></main>");
+        result.Append("</div>");
+        result.Append("<div class='clay-field-change' data-clay-field-changed><div class='clay-collection-field' data-collection-probe>");
+        result.Append("<div class='clay-field-change' data-clean-field>");
+        result.Append(ctx.Render<ClayNumber>(a => a.Add(x => x.Value, 1m)).Markup);
+        result.Append("</div><div class='clay-field-change' data-clay-field-changed data-dirty-field>");
+        result.Append(ctx.Render<ClayNumber>(a => a.Add(x => x.Value, 2m)).Markup);
+        result.Append("</div></div></div></main>");
         return result.ToString();
     }
 
-    private static async Task<string> ReadChromeAsync(string chrome, string file)
+    private static async Task<Dictionary<string, string>> ReadChromeAsync(string chrome, IReadOnlyList<string> files)
     {
         var profile = Path.Combine(Path.GetTempPath(), "clay-fields-" + Guid.NewGuid().ToString("N"));
         var start = new ProcessStartInfo(chrome) { UseShellExecute = false };
         foreach (var option in new[] { "--headless=new", "--disable-background-networking", "--no-first-run",
             "--disable-gpu", "--remote-debugging-port=0", "--remote-debugging-address=127.0.0.1",
-            "--user-data-dir=" + profile, new Uri(file).AbsoluteUri })
+            "--user-data-dir=" + profile, "about:blank" })
             start.ArgumentList.Add(option);
         using var process = Process.Start(start)!;
-        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(90));
         try
         {
             var portFile = Path.Combine(profile, "DevToolsActivePort");
@@ -137,31 +150,58 @@ public sealed class ClayFieldComputedStyleBrowserTests
             }
             using var http = new HttpClient();
             string? socket = null;
-            var expected = new Uri(file).AbsoluteUri;
             while (socket is null)
             {
                 using var pages = JsonDocument.Parse(await http.GetStringAsync($"http://127.0.0.1:{port}/json/list", deadline.Token));
                 foreach (var page in pages.RootElement.EnumerateArray())
-                    if (page.GetProperty("type").GetString() == "page" && page.GetProperty("url").GetString() == expected)
+                    if (page.GetProperty("type").GetString() == "page" && page.GetProperty("url").GetString() == "about:blank")
                         socket = page.GetProperty("webSocketDebuggerUrl").GetString();
                 if (socket is null)
                     await Task.Delay(50, deadline.Token);
             }
             using var client = new ClientWebSocket();
-            await client.ConnectAsync(new Uri(socket), deadline.Token);
-            var request = JsonSerializer.SerializeToUtf8Bytes(new
-            {
-                id = 1,
-                method = "Runtime.evaluate",
-                @params = new
-                {
-                    expression = """document.getElementById("result")?.textContent || window.fixtureError || null""",
-                    returnByValue = true,
-                },
-            });
+            var messageId = 0;
             var buffer = new byte[8192];
-            while (true)
+            await client.ConnectAsync(new Uri(socket), deadline.Token);
+            var results = new Dictionary<string, string>();
+            foreach (var file in files)
             {
+                await SendCommandAsync("Page.navigate", new { url = new Uri(file).AbsoluteUri });
+                while (true)
+                {
+                    var evaluated = await SendCommandAsync("Runtime.evaluate", new
+                    {
+                        expression = """location.href === EXPECTED && typeof window.runFixture === "function" || window.fixtureError || null"""
+                            .Replace("EXPECTED", JsonSerializer.Serialize(new Uri(file).AbsoluteUri), StringComparison.Ordinal),
+                        returnByValue = true,
+                    });
+                    if (evaluated.GetProperty("result").TryGetProperty("value", out var value) &&
+                        value.ValueKind == JsonValueKind.True)
+                    {
+                        await SendCommandAsync("Input.dispatchKeyEvent", new
+                        {
+                            type = "keyDown", key = "Tab", code = "Tab", windowsVirtualKeyCode = 9, nativeVirtualKeyCode = 9,
+                        });
+                        await SendCommandAsync("Input.dispatchKeyEvent", new
+                        {
+                            type = "keyUp", key = "Tab", code = "Tab", windowsVirtualKeyCode = 9, nativeVirtualKeyCode = 9,
+                        });
+                        var probed = await SendCommandAsync("Runtime.evaluate", new
+                        {
+                            expression = "window.runFixture()", returnByValue = true,
+                        });
+                        results.Add(file, probed.GetProperty("result").GetProperty("value").GetString()!);
+                        break;
+                    }
+                    await Task.Delay(50, deadline.Token);
+                }
+            }
+            return results;
+
+            async Task<JsonElement> SendCommandAsync(string method, object parameters)
+            {
+                var id = ++messageId;
+                var request = JsonSerializer.SerializeToUtf8Bytes(new { id, method, @params = parameters });
                 await client.SendAsync(new ArraySegment<byte>(request), WebSocketMessageType.Text, true, deadline.Token);
                 while (true)
                 {
@@ -175,15 +215,12 @@ public sealed class ClayFieldComputedStyleBrowserTests
                         message.Write(buffer, 0, part.Count);
                     } while (!part.EndOfMessage);
                     using var response = JsonDocument.Parse(message.ToArray());
-                    if (!response.RootElement.TryGetProperty("id", out var id) || id.GetInt32() != 1)
+                    if (!response.RootElement.TryGetProperty("id", out var replyId) || replyId.GetInt32() != id)
                         continue;
-                    if (response.RootElement.TryGetProperty("result", out var evaluated) &&
-                        evaluated.GetProperty("result").TryGetProperty("value", out var value) &&
-                        value.ValueKind == JsonValueKind.String)
-                        return value.GetString()!;
-                    break;
+                    if (response.RootElement.TryGetProperty("error", out var error))
+                        throw new InvalidOperationException($"{method}: {error}");
+                    return response.RootElement.GetProperty("result").Clone();
                 }
-                await Task.Delay(50, deadline.Token);
             }
         }
         finally
@@ -226,6 +263,7 @@ public sealed class ClayFieldComputedStyleBrowserTests
     private const string Probe = """
         <script>
         window.addEventListener("error", event => window.fixtureError = event.message);
+        window.runFixture = () => {
         const samples = [], errors = [];
         function rgb(value) { return (value.match(/[\d.]+/g) || []).map(Number); }
         function luminance(value) {
@@ -269,10 +307,20 @@ public sealed class ClayFieldComputedStyleBrowserTests
             }
             samples.push({family,state,value,bg,keyboardVisible,outline,contrast});
         }
+        const collection = document.querySelector("[data-collection-probe]");
+        const collectionOutline = getComputedStyle(collection).outlineStyle;
+        const childBorder = name => getComputedStyle(
+            collection.querySelector("[" + name + "] .mud-input-outlined"), "::after").borderTopStyle;
+        if (collectionOutline !== "dashed" || childBorder("data-clean-field") === "dashed" ||
+            childBorder("data-dirty-field") !== "dashed") {
+            errors.push("collection: outline or individual field indicator differs from expected");
+        }
         const result = document.createElement("pre");
         result.id = "result";
         result.textContent = JSON.stringify({browser:navigator.userAgent,samples,errors},null,2);
         document.body.replaceChildren(result);
+        return result.textContent;
+        };
         </script>
         """;
 }

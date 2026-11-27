@@ -1,3 +1,4 @@
+using System.Data;
 using Clayzor.Lib.DALC;
 using Clayzor.Lib.Entities;
 using Clayzor.Lib.Entities.Inventory;
@@ -20,7 +21,7 @@ public sealed class ModelEquipmentWriteBoundaryTests
     {
         var (db, connection) = Create([]);
         var input = new EquipmentModel { EquipmentTypeId = typeId, Name = name, PartNumber = pn, NetworkInterfaces = net, NetworkName = netName };
-        await Assert.ThrowsAsync<InvalidOperationException>(() => input.SaveAsync(db, Principal, 4));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => input.SaveAsync(db, Principal, 4, Guid.NewGuid()));
         Assert.Empty(connection.CommandLog);
     }
 
@@ -37,13 +38,13 @@ public sealed class ModelEquipmentWriteBoundaryTests
             "mismatch" => [Actor(9), Roles(Роли.Специалист_по_инвентаризации_оборудования)],
             _ => Array.Empty<ScriptEntry>(),
         };
-        var (db, connection) = Create(mode == "anonymous" ? [] : [Type(5), Script.Scalar(0), .. identity]);
+        var (db, connection) = Create(identity);
         var model = new EquipmentModel { EquipmentTypeId = 5, Name = "Valid" };
 
         if (mode == "unavailable")
-            await Assert.ThrowsAsync<Microsoft.Data.SqlClient.SqlException>(() => model.SaveAsync(db, Principal, 4));
+            await Assert.ThrowsAsync<Microsoft.Data.SqlClient.SqlException>(() => model.SaveAsync(db, Principal, 4, Guid.NewGuid()));
         else
-            await Assert.ThrowsAsync<UnauthorizedAccessException>(() => model.SaveAsync(db, mode == "anonymous" ? null : Principal, 4));
+            await Assert.ThrowsAsync<UnauthorizedAccessException>(() => model.SaveAsync(db, mode == "anonymous" ? null : Principal, 4, Guid.NewGuid()));
 
         Assert.DoesNotContain(connection.CommandLog, IsWrite);
     }
@@ -81,14 +82,16 @@ public sealed class ModelEquipmentWriteBoundaryTests
     {
         var (db, connection) = Create(template
             ? [Model(7, (int)ТипыОборудования.IP_телефон), Actor(), Roles(Роли.Дежурный_инженер), Script.Scalar(1)]
-            : [Type(5), Script.Scalar(0), Actor(), Roles(Роли.Специалист_по_инвентаризации_оборудования), Script.Scalar(42)]);
+            : [Actor(), Roles(Роли.Специалист_по_инвентаризации_оборудования), Script.Rows(), Type(5), Script.Scalar(0),
+                Script.Rows(), NoPending(), Script.NonQuery(),
+                Actor(), Roles(Роли.Специалист_по_инвентаризации_оборудования), Type(5), Script.Scalar(0), Script.Scalar(42), Script.Scalar(1)]);
 
         if (template)
             await new EquipmentModel { Id = 7, PhoneTemplate = "cfg" }.SavePhoneTemplateAsync(db, Principal, 4, IpBaseline());
         else
-            Assert.Equal(42, await new EquipmentModel { EquipmentTypeId = 5, Name = "Valid" }.SaveAsync(db, Principal, 4));
+            Assert.Equal(42, await new EquipmentModel { EquipmentTypeId = 5, Name = "Valid" }.SaveAsync(db, Principal, 4, Guid.NewGuid()));
 
-        Assert.Equal(template ? SQLQueries.UPDATE_МоделиОборудования_ШаблонТелефона : SQLQueries.INSERT_МоделиОборудования,
+        Assert.Equal(template ? SQLQueries.UPDATE_МоделиОборудования_ШаблонТелефона : SQLQueries.INSERT_МоделиОборудования_Журнал,
             Assert.Single(connection.CommandLog, IsWrite));
     }
 
@@ -96,10 +99,11 @@ public sealed class ModelEquipmentWriteBoundaryTests
     [Fact]
     public async Task DirectSave_UnconfirmedUsedTypeChangeDoesNotWrite()
     {
-        var (db, connection) = Create([Type(5), Model(7, 9), Script.Rows(Script.Row(("N", 1), ("Списанного", 0)))]);
+        var (db, connection) = Create([Actor(), Roles(Роли.Специалист_по_инвентаризации_оборудования), Script.Rows(), Type(5),
+            Model(7, 9), Script.Rows(Script.Row(("N", 1), ("Списанного", 0)))]);
         var model = new EquipmentModel { Id = 7, EquipmentTypeId = 5, Name = "Valid" };
 
-        await Assert.ThrowsAsync<InvalidOperationException>(() => model.SaveAsync(db, Principal, 4, new EquipmentModelWriteBaseline(7, 9, null, null), confirmedTypeId: 8));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => model.SaveAsync(db, Principal, 4, Guid.NewGuid(), new EquipmentModelWriteBaseline(7, 9, null, null), confirmedTypeId: 8));
         Assert.DoesNotContain(connection.CommandLog, IsWrite);
     }
 
@@ -109,10 +113,11 @@ public sealed class ModelEquipmentWriteBoundaryTests
     [InlineData(true)]
     public async Task DirectSave_InvalidTypeOrDuplicateDoesNotWrite(bool duplicate)
     {
-        var (db, connection) = Create(duplicate ? [Type(5), Script.Scalar(1)] : [Script.Rows()]);
+        var (db, connection) = Create([Actor(), Roles(Роли.Специалист_по_инвентаризации_оборудования), Script.Rows(),
+            .. (duplicate ? new[] { Type(5), Script.Scalar(1) } : [Script.Rows()])]);
         var model = new EquipmentModel { EquipmentTypeId = 5, Name = "Valid" };
 
-        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => model.SaveAsync(db, Principal, 4));
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => model.SaveAsync(db, Principal, 4, Guid.NewGuid()));
 
         Assert.Contains(duplicate ? "уже существует" : "тип оборудования не найден", error.Message);
         Assert.DoesNotContain(connection.CommandLog, IsWrite);
@@ -122,7 +127,7 @@ public sealed class ModelEquipmentWriteBoundaryTests
     {
         DapperColumnMapper.Initialize();
         var connection = new ScriptedConnection(new Queue<ScriptEntry>(entries), emulateEquipmentIdentity: false);
-        return (new DbManager("Server=fixture", new FakeSqlErrorHandler(), () => connection), connection);
+        return (new DbManager("Server=fixture", new FakeSqlErrorHandler(), () => new EquipmentAccountTransactionConnection(connection)), connection);
     }
 
     internal static ScriptEntry Type(int id, byte maxNet = 0) =>
@@ -138,7 +143,26 @@ public sealed class ModelEquipmentWriteBoundaryTests
 
     private static EquipmentModelWriteBaseline IpBaseline() => new(7, (int)ТипыОборудования.IP_телефон, null, null);
 
-    internal static bool IsWrite(string sql) => sql == SQLQueries.INSERT_МоделиОборудования ||
+    internal static ScriptEntry NoPending() => Script.Rows(Script.Row(("Pending", false)));
+
+    internal static ScriptEntry ModelJournalReceipt(Guid attemptId, int scope, int resultId) => new()
+    {
+        ReaderFactory = () =>
+        {
+            var table = new DataTable();
+            table.Columns.Add("AttemptId", typeof(Guid));
+            table.Columns.Add("EmployeeId", typeof(int));
+            table.Columns.Add("ConflictKey", typeof(string));
+            table.Columns.Add("CommandKind", typeof(string));
+            table.Columns.Add("State", typeof(byte));
+            table.Columns.Add("ResultEntityId", typeof(int));
+            table.Rows.Add(attemptId, 4, scope > 0 ? $"model/{scope}" : "model/new",
+                "equipment-model.save", (byte)InventoryOperationState.Confirmed, resultId);
+            return table.CreateDataReader();
+        },
+    };
+
+    internal static bool IsWrite(string sql) => sql == SQLQueries.INSERT_МоделиОборудования_Журнал ||
         sql == SQLQueries.UPDATE_МоделиОборудования || sql == SQLQueries.UPDATE_МоделиОборудования_ОчиститьШаблон ||
         sql == SQLQueries.UPDATE_МоделиОборудования_ШаблонТелефона;
 }

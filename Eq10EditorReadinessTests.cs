@@ -16,9 +16,9 @@ namespace Clayzor.Lib.Web.Controls.Tests;
 /// <summary>Deferred readiness, scoped raw и guarded advisory на фактических редакторах.</summary>
 public sealed class Eq10EditorReadinessTests
 {
-    /// <summary>Denied Account не получает raw secret; разрешённый retry применяет его только после fresh read.</summary>
+    /// <summary>Отказ доступа блокирует восстановление примечания до успешного повторного чтения.</summary>
     [Fact]
-    public async Task AccountDeniedThenRetry_KeepsProtectedRawUntilAllowed()
+    public async Task AccountDeniedThenRetry_RestoresOrdinaryRawOnlyAfterFreshRead()
     {
         var service = new DeferredEquipmentService();
         var denied = NewRead<string>();
@@ -41,9 +41,9 @@ public sealed class Eq10EditorReadinessTests
             RawRestore = async () =>
             {
                 rawCalls++;
-                var password = dialog!.FindAll("input")[1];
-                if (!password.HasAttribute("disabled"))
-                    await password.InputAsync("raw-test-value");
+                var notes = dialog!.Find("input[data-draft-key='account.notes']");
+                if (!notes.HasAttribute("disabled"))
+                    await notes.InputAsync("raw-test-note");
             },
             ReadinessChanged = readiness =>
             {
@@ -74,7 +74,7 @@ public sealed class Eq10EditorReadinessTests
 
         denied.SetException(new UnauthorizedAccessException("denied-test"));
         await failed.Task.WaitAsync(TimeSpan.FromSeconds(2));
-        dialog.WaitForAssertion(() => Assert.True(dialog.FindAll("input")[1].HasAttribute("disabled")));
+        dialog.WaitForAssertion(() => Assert.True(dialog.Find("input[type='password']").HasAttribute("disabled")));
         Assert.Empty(dialog.Instance.Password);
         Assert.Equal(0, rawCalls);
         Assert.Equal(0, saveCalls);
@@ -86,7 +86,12 @@ public sealed class Eq10EditorReadinessTests
         allowed.SetResult("db-test-value");
         await retryClick.WaitAsync(TimeSpan.FromSeconds(2));
         await ready.Task.WaitAsync(TimeSpan.FromSeconds(2));
-        dialog.WaitForAssertion(() => Assert.Equal("raw-test-value", dialog.Instance.Password));
+        dialog.WaitForAssertion(() =>
+        {
+            Assert.Equal("db-test-value", dialog.Instance.Password);
+            Assert.Equal("raw-test-note", dialog.Instance.Notes);
+            Assert.False(dialog.Find("input[type='password']").HasAttribute("data-draft-key"));
+        });
         Assert.Equal(1, rawCalls);
         Assert.All(service.AccountEquipmentIds, id => Assert.Equal(7, id));
 
@@ -135,7 +140,7 @@ public sealed class Eq10EditorReadinessTests
             RawRestore = () =>
             {
                 rawCalls++;
-                provider.FindComponent<EquipmentSimDialog>().Instance.Secrets.Pin = "raw-test-pin";
+                provider.FindComponent<EquipmentSimDialog>().Instance.PhoneNumber = "79000000002";
                 return Task.CompletedTask;
             },
             ReadinessChanged = readiness =>
@@ -178,7 +183,12 @@ public sealed class Eq10EditorReadinessTests
             service.SimRead.SetResult(new EquipmentSimSecrets { Pin = "db-test-pin" });
         await ready.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
-        dialog.WaitForAssertion(() => Assert.Equal("raw-test-pin", dialog.Instance.Secrets.Pin));
+        dialog.WaitForAssertion(() =>
+        {
+            Assert.Equal("db-test-pin", dialog.Instance.Secrets.Pin);
+            Assert.Equal("79000000002", dialog.Instance.PhoneNumber);
+            Assert.All(dialog.FindAll("input[type='password']"), input => Assert.False(input.HasAttribute("data-draft-key")));
+        });
         Assert.Equal(11, dialog.Instance.ContractId);
         Assert.Equal(99, dialog.Instance.PersonalDataPersonId);
         Assert.Equal(11, personalDataSource.ContractId);

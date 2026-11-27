@@ -102,6 +102,8 @@ public sealed class ClayRequiredFieldStyleTests
         var input = field.Find(".clay-required-editable .mud-input-control .mud-input input[readonly]");
         Assert.Equal("2026-11-26", input.GetAttribute("value"));
         Assert.Equal(" ", input.GetAttribute("placeholder"));
+        Assert.True(input.HasAttribute("data-clay-focus-editor"));
+        Assert.True(input.HasAttribute("data-clay-enter-native"));
 
         field.Render(parameters => parameters.Add(component => component.Value, (DateTime?)null));
         var emptyInput = Assert.IsAssignableFrom<AngleSharp.Html.Dom.IHtmlInputElement>(
@@ -114,8 +116,21 @@ public sealed class ClayRequiredFieldStyleTests
                 Required = true,
                 Disabled = true,
             }));
-        Assert.NotNull(field.Find("input[disabled]"));
+        Assert.False(field.Find("input[disabled]").HasAttribute("data-clay-focus-editor"));
         Assert.Empty(field.FindAll(".clay-required-editable"));
+    }
+
+    [Fact]
+    public async Task ClockRemainsATabTargetWithNativeKeyboardWhenPopupOnly()
+    {
+        await using var context = CreateContext();
+        var field = context.Render<ClayTime>(p =>
+            p.Add(x => x.Options, new ClayTimeOptions { Editable = false }));
+        var input = field.Find("input[readonly]");
+        Assert.True(input.HasAttribute("data-clay-focus-editor"));
+        Assert.True(input.HasAttribute("data-clay-enter-native"));
+        field.Render(p => p.Add(x => x.Options, new ClayTimeOptions { ReadOnly = true }));
+        Assert.False(field.Find("input[readonly]").HasAttribute("data-clay-focus-editor"));
     }
 
     /// <summary>Поисковая строка не заменяет значение, выбранное в обязательном селекторе.</summary>

@@ -19,29 +19,22 @@ public sealed class EquipmentNetworkPersistenceTests
         Assert.Contains("Открыто <> 0", connection.CommandLog[0]);
     }
 
-    /// <summary>Attach и detach используют подтверждённые SQL-операции.</summary>
-    [Fact]
-    public async Task AttachAndDetach_UseConfirmedSql()
+    /// <summary>Оба направления проверяют исходное состояние и фиксируют результат вместе с SQL.</summary>
+    [Theory]
+    [InlineData(true, 0, 1, "INSERT vwЛокальнаяСетьПрисоединениеРабочейСети")]
+    [InlineData(false, 2, 0, "UPDATE vwЛокальнаяСетьПрисоединениеРабочейСети")]
+    public async Task AttachmentIsConfirmedByTheExactAttempt(bool attach, int expected, int result, string command)
     {
-        DapperColumnMapper.Initialize();
-        var connection = new ScriptedConnection(new Queue<ScriptEntry>([
-            Script.Rows(Script.Row(("КодОборудования", 7), ("КодТипаОборудования", 1))),
-            Script.Rows(Script.Row(("КодТипаОборудования", 1), ("ЕстьХарактеристикиКомпьютера", (byte)1))),
-            Script.Scalar(1), Script.NonQuery(),
-            Script.Rows(Script.Row(("КодОборудования", 7), ("КодТипаОборудования", 1))),
-            Script.Rows(Script.Row(("КодТипаОборудования", 1), ("ЕстьХарактеристикиКомпьютера", (byte)1))),
-            Script.Scalar(1), Script.NonQuery(), Script.Scalar(0),
-        ]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
+        var (service, connection, journal) = JournaledService([
+            Actor, GlobalGrant, Actor, GlobalGrant, Computer, Script.Scalar(expected), Script.NonQuery(), Script.Scalar(result),
+        ]);
+        var attemptId = Guid.NewGuid();
 
-        await service.AttachNetworkAsync(7);
-        await service.DetachNetworkAsync(7);
-        var count = await service.GetNetworkAttachmentCountAsync(7);
+        await service.SetNetworkAttachmentAsync(7, 4, attemptId, attach, expected, default);
 
-        Assert.Contains("INSERT vwЛокальнаяСетьПрисоединениеРабочейСети", connection.CommandLog[3]);
-        Assert.Contains("UPDATE vwЛокальнаяСетьПрисоединениеРабочейСети", connection.CommandLog[7]);
-        Assert.Contains("Открыто > 0", connection.CommandLog[7]);
-        Assert.Equal(0, count);
+        Assert.Single(connection.CommandLog, sql => sql.Contains(command, StringComparison.Ordinal));
+        Assert.Equal(InventoryOperationState.Confirmed, journal.StateFor(attemptId));
+        Assert.Equal(2, connection.CommandLog.Count(sql => sql.Contains("Открыто <> 0", StringComparison.Ordinal)));
     }
 
     /// <summary>Read-модель обратной ссылки заполняет ID, сетевое имя и порт из русских колонок.</summary>
@@ -63,19 +56,76 @@ public sealed class EquipmentNetworkPersistenceTests
         Assert.Equal("clay-test-net_12", link.DisplayName);
     }
 
-    /// <summary>Без роли 103 сетевое подключение не выполняется.</summary>
+    /// <summary>Неактуальные права и исходные данные не позволяют отправить запись.</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AttachRejectsRevokedRoleOrStaleCount(bool grantInside)
+    {
+        var (service, connection, journal) = JournaledService(grantInside
+            ? [Actor, GlobalGrant, Actor, GlobalGrant, Computer, Script.Scalar(1)]
+            : [Actor, GlobalGrant, Actor, Script.Rows(Script.Row(("RoleId", 103), ("PersonId", 1)))]);
+        var attemptId = Guid.NewGuid();
+        var error = await Assert.ThrowsAsync<EquipmentOperationException>(() =>
+            service.SetNetworkAttachmentAsync(7, 4, attemptId, true, 0, default));
+
+        Assert.Equal(EquipmentWritePhase.Rejected, error.Phase);
+        Assert.Equal(InventoryOperationState.Rejected, journal.StateFor(attemptId));
+        Assert.DoesNotContain(connection.CommandLog, sql => sql.Contains("INSERT vwЛокальнаяСетьПрисоединениеРабочейСети"));
+    }
+
+    /// <summary>После потери ответа сверка читает исходный GUID и повтор не выполняет DML.</summary>
     [Fact]
-    public async Task AttachWithoutSupportRole_DoesNotWrite()
+    public async Task AttachLostCommitReplyUsesDurableReceiptWithoutAnotherWrite()
+    {
+        var (service, connection, journal) = JournaledService([
+            Actor, GlobalGrant, Actor, GlobalGrant, Computer, Script.Scalar(0), Script.NonQuery(), Script.Scalar(1),
+            Actor, GlobalGrant, Actor, GlobalGrant,
+        ]);
+        var attemptId = Guid.NewGuid();
+        journal.LoseNextConfirmedCommitReply = true;
+
+        var error = await Assert.ThrowsAsync<EquipmentOperationException>(() =>
+            service.SetNetworkAttachmentAsync(7, 4, attemptId, true, 0, default));
+        Assert.Equal(EquipmentWritePhase.Unknown, error.Phase);
+        var receipt = await service.ReadNetworkWriteReceiptAsync(7, 4, attemptId, true, default);
+        Assert.Equal(new InventoryOperationReceipt(attemptId, InventoryOperationState.Confirmed, 7), receipt);
+        await service.SetNetworkAttachmentAsync(7, 4, attemptId, true, 0, default);
+        Assert.Single(connection.CommandLog, sql => sql.Contains("INSERT vwЛокальнаяСетьПрисоединениеРабочейСети"));
+    }
+
+    /// <summary>Другая незавершённая попытка блокирует отправку до резерва нового GUID.</summary>
+    [Fact]
+    public async Task OccupiedEquipmentScopeLeavesNewWorkNetCommandNotSent()
+    {
+        var (service, connection, journal) = JournaledService([Actor, GlobalGrant]);
+        var older = InventoryOperationJournal.ForEmployee(new Employee { Id = 4 }, Guid.NewGuid(),
+            "equipment/7", "equipment-save");
+        var db = new DbManager("Server=test", new FakeSqlErrorHandler(), () => journal);
+        await InventoryOperationJournal.ImportLegacyAsync(db, [older], default);
+        var attemptId = Guid.NewGuid();
+
+        var error = await Assert.ThrowsAsync<EquipmentOperationException>(() =>
+            service.SetNetworkAttachmentAsync(7, 4, attemptId, true, 0, default));
+
+        Assert.Equal(EquipmentWritePhase.NotSent, error.Phase);
+        Assert.True(journal.HasLegacyEvidence(older.AttemptId));
+        Assert.Null(journal.StateFor(attemptId));
+        Assert.DoesNotContain(connection.CommandLog, sql => sql.Contains("INSERT vwЛокальнаяСетьПрисоединениеРабочейСети"));
+    }
+
+    private static ScriptEntry Actor => Script.Rows(Script.Row(("КодСотрудника", 4)));
+    private static ScriptEntry GlobalGrant => Script.Rows(Script.Row(("RoleId", 103), ("PersonId", 0)));
+    private static ScriptEntry Computer => Script.Rows(Script.Row(("КодТипаОборудования", 1), ("ЕстьХарактеристикиКомпьютера", (byte)1)));
+
+    private static (EquipmentFormService Service, ScriptedConnection Connection, NetFormTests.NetJournalConnection Journal)
+        JournaledService(IEnumerable<ScriptEntry> commands)
     {
         DapperColumnMapper.Initialize();
-        var connection = new ScriptedConnection(new Queue<ScriptEntry>([
-            Script.Rows(Script.Row(("КодОборудования", 7), ("КодТипаОборудования", 1))),
-            Script.Rows(Script.Row(("КодТипаОборудования", 1), ("ЕстьХарактеристикиКомпьютера", (byte)1))),
-            Script.Scalar(0),
-        ]));
-        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection), new TestAuthenticationStateProvider());
-
-        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.AttachNetworkAsync(7));
-        Assert.DoesNotContain(connection.CommandLog, sql => sql.Contains("INSERT"));
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>(commands), emulateEquipmentIdentity: false);
+        var journal = new NetFormTests.NetJournalConnection(connection);
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => journal),
+            new TestAuthenticationStateProvider());
+        return (service, connection, journal);
     }
 }

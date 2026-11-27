@@ -64,13 +64,19 @@ public sealed class Eq9PhoneSyncTrustTests
     [Fact]
     public async Task ConfigureWrongOwner_DoesNotReachAts()
     {
-        var connection = CreateConnection(
+        var employee = Script.Rows(Script.Row(("КодСотрудника", 4)));
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>([
+            employee, employee, Script.Rows(Script.Row(("RoleId", 43), ("PersonId", 2))),
             Script.Rows(Script.Row(("КодОборудования", 7), ("КодЛицаВладельца", 1), ("КодТипаОборудования", 30))),
-            Script.Scalar(0));
-        var service = CreateService(connection);
+        ]), emulateEquipmentIdentity: false);
+        DapperColumnMapper.Initialize();
+        var tracked = new EquipmentAccountTransactionConnection(connection);
+        var service = new EquipmentFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => tracked),
+            new TestAuthenticationStateProvider());
 
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.ConfigurePhoneEquipmentAsync(7));
 
+        Assert.Contains(connection.CommandLog, sql => sql.Contains("vwОборудование", StringComparison.Ordinal));
         Assert.DoesNotContain(connection.CommandLog, sql => sql.Contains("PhoneSync", StringComparison.Ordinal));
     }
 

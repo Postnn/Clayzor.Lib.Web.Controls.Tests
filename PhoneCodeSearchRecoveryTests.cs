@@ -32,6 +32,11 @@ public sealed class PhoneCodeSearchRecoveryTests
             Script.Rows(Script.Row(("RoleId", (int)Роли.Администратор_тарифов_связи), ("PersonId", 0))),
             Script.Rows(Script.Row(("TerritoryUpdate", false), ("PhoneInsert", true), ("PhoneUpdate", true), ("PhoneDelete", true))),
             Script.Rows(),
+            Script.Rows(Script.Row(("КодСотрудника", 4), ("Сотрудник", "fixture"))),
+            Script.Rows(Script.Row(("RoleId", (int)Роли.Администратор_тарифов_связи), ("PersonId", 0))),
+            Script.Rows(Script.Row(("PhoneInsert", true), ("PhoneUpdate", true), ("PhoneDelete", true))),
+            Script.Rows(),
+            Script.Rows(Script.Row(("Pending", false))),
         ]);
         using var connection = new ScriptedConnection(script, emulateEquipmentIdentity: false);
         context.Services.AddSingleton(_ => new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
@@ -54,7 +59,9 @@ public sealed class PhoneCodeSearchRecoveryTests
         const string leaseScope = "phone-code.territory-search";
         var restore = new ClayDraftRestore("phone-code", true, 8, null, null,
             new Dictionary<string, string> { ["main"] = snapshot, [leaseScope] = lease });
-        context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.register", _ => true).SetResult(restore);
+        context.JSInterop.Setup<ClayLegacyDraftOperationEvidence[]?>("clayDraftStore.beginLegacyOperationEvidenceTransfer", _ => true)
+            .SetResult([]);
+        context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.registerRam", _ => true).SetResult(restore);
         context.JSInterop.Setup<ClayDraftRawApplyResult>("clayDraftStore.applyRaw", _ => true).SetResult(new ClayDraftRawApplyResult([], []));
         context.JSInterop.Setup<ClayDraftRestoreReadiness>("clayDraftStore.getRestoreReadiness", _ => true)
             .SetResult(new ClayDraftRestoreReadiness(true, [], []));
@@ -66,6 +73,11 @@ public sealed class PhoneCodeSearchRecoveryTests
 
         var form = context.Render<PhoneCodeEntityForm>();
         form.WaitForAssertion(() => Assert.NotEmpty(form.FindAll("[data-draft-scope='main']")));
+        var transfer = Assert.Single(context.JSInterop.Invocations["clayDraftStore.beginLegacyOperationEvidenceTransfer"]);
+        Assert.Equal(new object?[] { "phone-code-form", "new", "4" }, transfer.Arguments.Take(3));
+        Assert.Equal(transfer.Arguments[3],
+            Assert.Single(context.JSInterop.Invocations["clayDraftStore.finishLegacyOperationEvidenceTransfer"]).Arguments[0]);
+        Assert.Equal("new:", Assert.Single(context.JSInterop.Invocations["clayDraftStore.registerRam"]).Arguments[1]);
         // Проверяем завершившийся цикл готовности, в котором форма может вызвать перепривязку.
         await form.InvokeAsync(() => Task.CompletedTask);
 

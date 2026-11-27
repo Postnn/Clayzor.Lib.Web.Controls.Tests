@@ -81,7 +81,30 @@ public sealed partial class MaintenanceTests
         Assert.Equal(leaves, await navigating.WaitAsync(TimeSpan.FromSeconds(5)));
         Assert.Equal("http://localhost/Maintenance", navigation.Uri);
         Assert.Equal(choice == "continue" ? 0 : 1, context.JSInterop.Invocations["clayDraftStore.replaceEditorScope"].Count);
+        Assert.Equal(leaves ? 1 : 0, context.JSInterop.Invocations["clayDraftStore.closeRam"].Count);
         AssertNoCancellationWrite(db, context);
+    }
+
+    [Fact]
+    public async Task MaintenanceStaysOnPageUntilDraftDeletionIsConfirmed()
+    {
+        var navigation = new MaintenanceGuardNavigation();
+        await using var context = CreateContext(out var db, navigation: navigation);
+        var allowDelete = false;
+        context.JSInterop.SetupVoid("clayDraftStore.closeRam", _ => !allowDelete)
+            .SetException(new Microsoft.JSInterop.JSException("delete transaction aborted"));
+        context.JSInterop.SetupVoid("clayDraftStore.closeRam", _ => allowDelete).SetVoidResult();
+        var page = context.Render<MaintenancePage>();
+        page.WaitForAssertion(() => Assert.False(Action(page).Instance.Disabled));
+
+        Assert.False(await page.InvokeAsync(() => navigation.CanNavigateAsync("http://localhost/Inventory")));
+        Assert.Contains("Повторите переход", page.Markup);
+        Assert.True(Action(page).Instance.Disabled);
+
+        allowDelete = true;
+        Assert.True(await page.InvokeAsync(() => navigation.CanNavigateAsync("http://localhost/Inventory")));
+        Assert.Equal(2, context.JSInterop.Invocations["clayDraftStore.closeRam"].Count);
+        Assert.Equal(0, db.InsertCount);
     }
 
     [Theory]
@@ -92,19 +115,9 @@ public sealed partial class MaintenanceTests
         var operation = $$"""{"version":1,"attemptId":"fixture-maintenance-outcome","kind":"maintenance.complete","status":"{{state}}","revision":3,"data":"17","scopes":[],"acceptLegacyTyped":false,"legacyTypedRevision":0}""";
         await using var context = CreateContext(out var db, restoredOperation: operation, restoredConfirmation: 17);
         var page = context.Render<MaintenancePage>();
-        if (state == "unknown")
-        {
-            page.WaitForAssertion(() => Assert.Contains("Исход выполнения требует проверки", page.Markup));
-            AssertNoCancellationWrite(db, context);
-        }
-        else
-        {
-            page.WaitForAssertion(() => Assert.Single(context.JSInterop.Invocations["clayDraftStore.commitOperation"]));
-            Assert.Equal(0, db.InsertCount);
-            Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
-            Assert.Empty(context.JSInterop.Invocations["clayDraftStore.discard"]);
-            Assert.Empty(context.JSInterop.Invocations["clayDraftStore.discardScope"]);
-        }
+        page.WaitForAssertion(() => Assert.Contains("Исход выполнения требует проверки", page.Markup));
+        AssertNoCancellationWrite(db, context);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
 
         Assert.DoesNotContain("Отменить вопрос", page.Markup);
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.replaceEditorScope"]);

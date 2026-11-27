@@ -14,27 +14,28 @@ public sealed class EquipmentModelPersistenceTests
     [Fact]
     public async Task Insert_ReturnsCreatedId()
     {
-        var connection = new ScriptedConnection(new Queue<ScriptEntry>([Type(5), Script.Scalar(0), Roles(Роли.Специалист_по_инвентаризации_оборудования), Script.Scalar(42)]));
+        var connection = ModelWriteConnection(Script.Scalar(42));
         var model = new EquipmentModel { EquipmentTypeId = 5, Name = "Created", PartNumber = "PN-1" };
 
-        var id = await model.SaveAsync(CreateDb(connection), @"DOMAIN\fixture", 4);
+        var id = await model.SaveAsync(CreateDb(connection), @"DOMAIN\fixture", 4, Guid.NewGuid());
 
         Assert.Equal(42, id);
         Assert.Equal(42, model.Id);
         var sql = Assert.Single(connection.CommandLog, IsWrite);
         Assert.Contains("INSERT INTO МоделиОборудования", sql);
         Assert.Contains("@EquipmentTypeId", sql);
-        Assert.Contains("CAST(@@IDENTITY AS int)", sql);
+        Assert.Contains("CAST(SCOPE_IDENTITY() AS int)", sql);
     }
 
     /// <summary>Нулевой или отсутствующий ID после INSERT считается ошибкой, а не успешным сохранением.</summary>
     [Fact]
     public async Task InsertWithoutCreatedId_Throws()
     {
-        var connection = new ScriptedConnection(new Queue<ScriptEntry>([Type(5), Script.Scalar(0), Roles(Роли.Специалист_по_инвентаризации_оборудования), Script.Scalar(0)]));
+        var connection = ModelWriteConnection(Script.Scalar(0));
         var model = new EquipmentModel { EquipmentTypeId = 5, Name = "Created", PartNumber = "PN-1" };
 
-        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => model.SaveAsync(CreateDb(connection), @"DOMAIN\fixture", 4));
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            model.SaveAsync(CreateDb(connection), @"DOMAIN\fixture", 4, Guid.NewGuid()));
 
         Assert.Contains("не вернула идентификатор", error.Message);
         Assert.Equal(0, model.Id);
@@ -44,10 +45,10 @@ public sealed class EquipmentModelPersistenceTests
     [Fact]
     public async Task Update_UsesParameterizedUpdate()
     {
-        var connection = new ScriptedConnection(new Queue<ScriptEntry>([Type(5), Model(7, 5), Script.Scalar(0), Roles(Роли.Специалист_по_инвентаризации_оборудования), Script.Scalar(1)]));
+        var connection = ModelWriteConnection(Script.Scalar(1), id: 7);
         var model = new EquipmentModel { Id = 7, EquipmentTypeId = 5, Name = "Updated", PartNumber = "PN-2" };
 
-        var id = await model.SaveAsync(CreateDb(connection), @"DOMAIN\fixture", 4, model.CaptureWriteBaseline());
+        var id = await model.SaveAsync(CreateDb(connection), @"DOMAIN\fixture", 4, Guid.NewGuid(), model.CaptureWriteBaseline());
 
         Assert.Equal(7, id);
         var sql = Assert.Single(connection.CommandLog, IsWrite);
@@ -103,6 +104,16 @@ public sealed class EquipmentModelPersistenceTests
     private static DbManager CreateDb(ScriptedConnection connection)
     {
         DapperColumnMapper.Initialize();
-        return new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection);
+        return new DbManager("Server=test", new FakeSqlErrorHandler(), () => new EquipmentAccountTransactionConnection(connection));
+    }
+
+    private static ScriptedConnection ModelWriteConnection(ScriptEntry result, int id = 0)
+    {
+        var role = Roles(Роли.Специалист_по_инвентаризации_оборудования);
+        ScriptEntry[] proposal = id == 0 ? [Type(5), Script.Scalar(0)] : [Type(5), Model(id, 5), Script.Scalar(0)];
+        return new ScriptedConnection(new Queue<ScriptEntry>([
+            role, Script.Rows(), .. proposal, Script.Rows(), NoPending(), Script.NonQuery(),
+            role, .. proposal, result, Script.Scalar(1),
+        ]));
     }
 }

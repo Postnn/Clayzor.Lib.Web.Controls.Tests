@@ -219,6 +219,38 @@ public sealed class PingHostTests
         Assert.Equal("время<1мс", page.Find("[role=log]").TextContent.Trim());
         Assert.Equal(0, transport.Resolutions);
         Assert.Equal(0, transport.Sends);
+        var calls = context.JSInterop.Invocations.ToList();
+        var lease = Assert.Single(calls, call => call.Identifier == "clayDraftStore.beginLegacyOperationEvidenceTransfer");
+        var retirement = Assert.Single(calls, call => call.Identifier == "clayDraftStore.retireLegacyOperationEvidenceTransfer");
+        Assert.Equal(new object?[] { "ping-host", "localhost" }, lease.Arguments.Take(2));
+        Assert.Equal(lease.Arguments[3], retirement.Arguments[0]);
+        Assert.True(calls.FindIndex(call => call.Identifier == "clayDraftStore.registerRam") < calls.IndexOf(retirement));
+    }
+
+    /// <summary>Закрытие ждёт подтверждения удаления. Повтор очистки не запускает диагностику.</summary>
+    [Fact]
+    public async Task CloseRetriesRamCleanupBeforeClosingWindow()
+    {
+        const string saved = """{"Heading":"Прежняя проверка","Error":false,"Running":false,"Lines":[]}""";
+        var transport = new Probe();
+        await using var context = Configure(transport, new ManualClock(), saved);
+        var permitDelete = false;
+        context.JSInterop.SetupVoid("clayDraftStore.closeRam", _ => !permitDelete)
+            .SetException(new Microsoft.JSInterop.JSException("delete transaction aborted"));
+        context.JSInterop.SetupVoid("clayDraftStore.closeRam", _ => permitDelete).SetVoidResult();
+        var page = context.Render<PingHostPage>();
+        page.WaitForAssertion(() => Assert.Contains("Прежняя проверка", page.Markup));
+
+        await Button(page, "Закрыть").ClickAsync(new MouseEventArgs());
+        Assert.Empty(context.JSInterop.Invocations["clayModelEquipmentForm.close"]);
+        Assert.Contains("Повторите закрытие", page.Markup);
+        Assert.True(Button(page, "Запустить").HasAttribute("disabled"));
+
+        permitDelete = true;
+        await Button(page, "Закрыть").ClickAsync(new MouseEventArgs());
+        Assert.Equal(2, context.JSInterop.Invocations["clayDraftStore.closeRam"].Count);
+        Assert.Single(context.JSInterop.Invocations["clayModelEquipmentForm.close"]);
+        Assert.Equal(0, transport.Resolutions);
     }
 
     /// <summary>Разрыв circuit прекращает диагностический запуск.</summary>
@@ -318,7 +350,9 @@ public sealed class PingHostTests
     {
         var context = new BunitContext();
         context.JSInterop.Mode = JSRuntimeMode.Loose;
-        context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.register", _ => true)
+        context.JSInterop.Setup<ClayLegacyDraftOperationEvidence[]?>("clayDraftStore.beginLegacyOperationEvidenceTransfer", _ => true)
+            .SetResult([]);
+        context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.registerRam", _ => true)
             .SetResult(new ClayDraftRestore("ping-test", saved is not null, 0, null, null,
                 saved is null ? null : new Dictionary<string, string> { ["journal"] = saved }));
         DapperColumnMapper.Initialize();

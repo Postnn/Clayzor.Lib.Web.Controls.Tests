@@ -14,6 +14,7 @@ public sealed partial class EquipmentFormTests
     private const string CloseMainWithoutSaving = "Закрыть без сохранения";
     private const string ResetMainAndStay = "Отменить мои изменения и загрузить из БД";
     private const string ReplaceMainScope = "clayDraftStore.replaceEditorScope";
+    private const string CloseRam = "clayDraftStore.closeRam";
 
     [Fact]
     public async Task MainCancel_ContinueKeepsTypedInputWithoutReadingOrReplacing()
@@ -30,11 +31,12 @@ public sealed partial class EquipmentFormTests
         WaitForSn(page, "CLAY_TEST_LOCAL");
         Assert.Single(fixture.Service.Requests);
         Assert.Empty(context.JSInterop.Invocations[ReplaceMainScope]);
+        Assert.Empty(context.JSInterop.Invocations[CloseRam]);
         Assert.Empty(context.JSInterop.Invocations["clayModelEquipmentForm.close"]);
     }
 
     [Fact]
-    public async Task MainCancel_RawOnlyClosesByReplacingExactMainScopeWithoutResaving()
+    public async Task MainCancel_RawOnlyClosesWholeRegistrationAtExactRevisionWithoutResaving()
     {
         var fixture = CreateFixture(mainScope: new ClayDraftEditorScopeState(21, true, false));
         await using var context = fixture.Context;
@@ -44,17 +46,16 @@ public sealed partial class EquipmentFormTests
 
         await ChooseMainCancelAsync(page, dialogs, CloseMainWithoutSaving);
 
-        var replace = Assert.Single(context.JSInterop.Invocations[ReplaceMainScope]);
-        Assert.Equal("test-registration", replace.Arguments[0]);
-        Assert.Equal("main", replace.Arguments[1]);
-        Assert.Equal(21L, replace.Arguments[2]);
-        Assert.Null(replace.Arguments[3]);
+        var close = Assert.Single(context.JSInterop.Invocations[CloseRam]);
+        Assert.Equal("test-registration", close.Arguments[0]);
+        Assert.Equal(21L, close.Arguments[1]);
+        Assert.Empty(context.JSInterop.Invocations[ReplaceMainScope]);
         Assert.Single(context.JSInterop.Invocations["clayModelEquipmentForm.close"]);
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.discard"]);
         await InvokeHandler(page, "PersistDraftAsync");
         var calls = context.JSInterop.Invocations.ToList();
-        var replaceIndex = calls.FindIndex(call => call.Identifier == ReplaceMainScope);
-        Assert.DoesNotContain(calls.Skip(replaceIndex + 1), call => call.Identifier == "clayDraftStore.saveTyped");
+        var closeIndex = calls.FindIndex(call => call.Identifier == CloseRam);
+        Assert.DoesNotContain(calls.Skip(closeIndex + 1), call => call.Identifier == "clayDraftStore.saveTyped");
         Assert.Equal(0, fixture.Service.UpdateCalls);
     }
 
@@ -113,11 +114,14 @@ public sealed partial class EquipmentFormTests
     }
 
     [Fact]
-    public async Task MainCancel_OperationInBrowserKeepsJournalAndLocalInputOnClose()
+    public async Task MainCancel_OperationInBrowserTransfersEvidenceBeforePhysicalClose()
     {
         var fixture = CreateFixture(mainScope: new ClayDraftEditorScopeState(21, true, true));
         await using var context = fixture.Context;
         var dialogs = context.Render<MudDialogProvider>();
+        var evidence = new ClayLegacyDraftOperationEvidence(Guid.NewGuid().ToString("N"), "equipment-save", "{}");
+        context.JSInterop.Setup<ClayLegacyDraftOperationEvidence>("clayDraftStore.readCloseOperationEvidence", _ => true)
+            .SetResult(evidence);
         var page = context.Render<EquipmentForm>();
         WaitForSn(page, "CLAY_TEST_7");
         await page.InvokeAsync(() => FindSn(page).Input("CLAY_TEST_LOCAL"));
@@ -126,7 +130,123 @@ public sealed partial class EquipmentFormTests
 
         Assert.Empty(context.JSInterop.Invocations[ReplaceMainScope]);
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.discard"]);
+        Assert.Equal(evidence, Assert.Single(fixture.Service.ImportedEquipmentEvidence));
+        Assert.Single(context.JSInterop.Invocations[CloseRam]);
         Assert.Single(context.JSInterop.Invocations["clayModelEquipmentForm.close"]);
+        Assert.Equal(0, fixture.Service.UpdateCalls);
+    }
+
+    [Fact]
+    public async Task MainCancel_FailedEvidenceTransferKeepsRegistrationAndInput()
+    {
+        var fixture = CreateFixture(mainScope: new ClayDraftEditorScopeState(21, true, true));
+        await using var context = fixture.Context;
+        var dialogs = context.Render<MudDialogProvider>();
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        await page.InvokeAsync(() => FindSn(page).Input("CLAY_TEST_LOCAL"));
+        context.JSInterop.Setup<ClayLegacyDraftOperationEvidence>("clayDraftStore.readCloseOperationEvidence", _ => true)
+            .SetResult(new ClayLegacyDraftOperationEvidence(Guid.NewGuid().ToString("N"), "equipment-save", "{}"));
+        fixture.Service.LegacyEquipmentImportError = new UnauthorizedAccessException();
+
+        await ChooseMainCancelAsync(page, dialogs, CloseMainWithoutSaving);
+
+        WaitForSn(page, "CLAY_TEST_LOCAL");
+        Assert.Empty(context.JSInterop.Invocations[CloseRam]);
+        Assert.Empty(context.JSInterop.Invocations["clayModelEquipmentForm.close"]);
+        Assert.Equal(0, fixture.Service.UpdateCalls);
+    }
+
+    [Fact]
+    public async Task MainOk_RetriesFailedCleanupOnSameHandleWithoutSavingTwice()
+    {
+        var fixture = CreateFixture();
+        await using var context = fixture.Context;
+        context.JSInterop.Setup<bool>(CloseRam, _ => true).SetException(new Microsoft.JSInterop.JSException("delete refused"));
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        await page.InvokeAsync(() => FindSn(page).Input("CLAY_TEST_CHANGED"));
+
+        await InvokeHandler(page, "SaveAsync", true);
+        var failed = Assert.Single(context.JSInterop.Invocations[CloseRam]);
+        Assert.Empty(context.JSInterop.Invocations["clayModelEquipmentForm.close"]);
+        Assert.Equal(1, fixture.Service.UpdateCalls);
+        context.JSInterop.Setup<bool>(CloseRam, _ => true).SetResult(true);
+
+        await InvokeHandler(page, "CancelAsync");
+
+        var retry = context.JSInterop.Invocations[CloseRam].Last().Arguments.ToArray();
+        Assert.Equal(failed.Arguments.ToArray(), retry);
+        Assert.Equal(2, context.JSInterop.Invocations[CloseRam].Count);
+        Assert.Single(context.JSInterop.Invocations["clayModelEquipmentForm.close"]);
+        Assert.Equal(1, fixture.Service.UpdateCalls);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task MainOk_LeavesNestedInputAfterSuccessfulSave(bool rawOnly)
+    {
+        var closeState = new ClayDraftEditorCloseState(21, rawOnly, false,
+            rawOnly ? [] : ["child:EquipmentUpsDialog:2:root"]);
+        var fixture = CreateFixture(closeState: closeState);
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        await page.InvokeAsync(() => FindSn(page).Input("CLAY_TEST_CHANGED"));
+
+        await InvokeHandler(page, "SaveAsync", true);
+
+        Assert.Equal(1, fixture.Service.UpdateCalls);
+        Assert.Empty(context.JSInterop.Invocations[CloseRam]);
+        Assert.Empty(context.JSInterop.Invocations["clayModelEquipmentForm.close"]);
+    }
+
+    [Fact]
+    public async Task MainNavigation_ClosesTheExactRegistrationBeforeAcceptingChange()
+    {
+        var fixture = CreateFixture();
+        await using var context = fixture.Context;
+        var dialogs = context.Render<MudDialogProvider>();
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        await page.InvokeAsync(() => FindSn(page).Input("CLAY_TEST_LOCAL"));
+
+        var navigation = new Microsoft.AspNetCore.Components.Routing.LocationChangingContext
+        {
+            TargetLocation = "http://localhost/Equipment/EquipmentForm?id=8",
+        };
+        var change = InvokeHandler(page, "BeforeInternalNavigationAsync", navigation);
+        dialogs.WaitForAssertion(() => Assert.Contains(CloseMainWithoutSaving, dialogs.Markup));
+        await ClickMainDialogButtonAsync(dialogs, CloseMainWithoutSaving);
+        await change;
+        await page.InvokeAsync(() => fixture.Navigation.NavigateTo(navigation.TargetLocation));
+        WaitForSn(page, "CLAY_TEST_8");
+        page.WaitForAssertion(() => Assert.Equal(2, context.JSInterop.Invocations[RegisterEquipmentRam].Count));
+
+        var close = Assert.Single(context.JSInterop.Invocations[CloseRam]);
+        var registrations = context.JSInterop.Invocations[RegisterEquipmentRam];
+        Assert.Equal(2, registrations.Count);
+        Assert.Equal("test-registration", close.Arguments[0]);
+        Assert.Equal(21L, close.Arguments[1]);
+        Assert.Equal("7", registrations[0].Arguments[1]);
+        Assert.Equal("8", registrations[1].Arguments[1]);
+        Assert.NotEqual(registrations[0].Arguments[5], registrations[1].Arguments[5]);
+        Assert.Empty(context.JSInterop.Invocations["clayModelEquipmentForm.close"]);
+    }
+
+    [Fact]
+    public async Task MainDispose_DetachesWithoutDeletingRamDraft()
+    {
+        var fixture = CreateFixture();
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        await page.InvokeAsync(() => FindSn(page).Input("CLAY_TEST_LOCAL"));
+        await page.InvokeAsync(() => page.Instance.DisposeAsync().AsTask());
+
+        Assert.Single(context.JSInterop.Invocations["clayDraftStore.unregister"]);
+        Assert.Empty(context.JSInterop.Invocations[CloseRam]);
         Assert.Equal(0, fixture.Service.UpdateCalls);
     }
 

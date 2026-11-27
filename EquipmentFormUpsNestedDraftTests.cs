@@ -2,6 +2,7 @@ using System.Reflection;
 using System.Text.Json;
 using Bunit;
 using Clayzor.Lib.Entities.Inventory;
+using Clayzor.Lib.Web.Controls.Components.Presence;
 using Clayzor.Lib.Web.Controls.Services;
 using Kesco.App.Web.Inventory.Components.Pages.Equipment;
 using Kesco.App.Web.Inventory.Components.Pages.Equipment.Details;
@@ -33,17 +34,20 @@ public sealed partial class EquipmentFormTests
             var opening = InvokeHandler(page, "OpenUpsDialogAsync", new UpsServerLink { UpsEquipmentId = 42 });
             var outerReference = await outerAdded.Task.WaitAsync(TimeSpan.FromSeconds(3));
             var outer = provider.FindComponent<EquipmentUpsDialog>();
+            Assert.Equal(ClayPresenceKey.Create("inventory", "equipment", 42), outer.Instance.PresenceTarget?.Key);
             var innerAdded = TrackNextDialog(first.Context);
             var edit = typeof(EquipmentUpsDialog).GetMethod("EditTest", BindingFlags.Instance | BindingFlags.NonPublic)!;
             var innerTask = outer.InvokeAsync(() => (Task)edit.Invoke(outer.Instance, [outer.Instance.Tests[0]])!);
             var innerReference = await innerAdded.Task.WaitAsync(TimeSpan.FromSeconds(3));
             var inner = provider.FindComponent<EquipmentUpsTestDialog>();
+            Assert.Equal(ClayPresenceKey.Create("inventory", "ups-test", 42, 1), inner.Instance.PresenceTarget?.Key);
             inner.WaitForAssertion(() => Assert.StartsWith("equipment-draft-dialog-",
                 inner.Find($"[data-draft-scope='{UpsNestedScope}']").GetAttribute("class")));
             await inner.Find("textarea[data-draft-key='ups-test.issues']").InputAsync("Незавершённый текст");
             inner.WaitForAssertion(() =>
             {
                 using var document = JsonDocument.Parse(SerializeEquipmentDraft(page));
+                Assert.DoesNotContain("PresenceTarget", document.RootElement.GetRawText(), StringComparison.Ordinal);
                 var draft = document.RootElement.GetProperty("ActiveUpsTest");
                 Assert.Equal("Незавершённый текст", draft.GetProperty("Issues").GetString());
                 Assert.Equal(10, draft.GetProperty("Original").GetProperty("BatteryTime").GetInt32());
@@ -76,10 +80,16 @@ public sealed partial class EquipmentFormTests
             restored.WaitForAssertion(() => Assert.Contains("Восстановление ввода теста UPS не завершено", restored.Markup));
             Assert.True(restored.FindAll("button").Single(button => button.TextContent.Trim() == "OK").HasAttribute("disabled"));
         }
-        var closeButton = accept ? "OK" : "Отмена";
-        await restored.FindAll("button").Single(button => button.TextContent.Trim() == closeButton).ClickAsync();
+        if (accept)
+            await restored.FindAll("button").Single(button => button.TextContent.Trim() == "OK").ClickAsync();
+        else
+        {
+            var nestedDialog = (IMudDialogInstance)typeof(EquipmentUpsTestDialog)
+                .GetProperty("Dialog", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(restored.Instance)!;
+            await secondProvider.InvokeAsync(() => nestedDialog.Close(DialogResult.Cancel()));
+        }
 
-        if (unknown || pending)
+        if (!accept)
         {
             Assert.Empty(context.JSInterop.Invocations["clayDraftStore.replaceEditorScope"]);
             Assert.Equal(1, ((EquipmentUpsTestDraft)GetPrivate(reopened.Instance, "_upsTestDraft")!).Original.Id);
@@ -92,12 +102,16 @@ public sealed partial class EquipmentFormTests
         }
         var parent = secondProvider.FindComponent<EquipmentUpsDialog>();
         Assert.Equal(accept ? "Незавершённый текст" : string.Empty, parent.Instance.Tests[0].Issues);
+        var testList = parent.FindAll(".clay-field-change").Single(element =>
+            element.FirstElementChild?.ClassList.Contains("clay-collection-field") == true &&
+            element.TextContent.Contains("Батарея", StringComparison.Ordinal));
+        Assert.Equal(accept, testList.HasAttribute("data-clay-field-changed"));
         Assert.Null(second.Service.LastUpsCurrentTests);
         var parentDialog = (IMudDialogInstance)typeof(EquipmentEditorDialogBase<EquipmentUpsDialogResult>)
             .GetProperty("Dialog", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(parent.Instance)!;
         await secondProvider.InvokeAsync(() => parentDialog.Close(DialogResult.Cancel()));
         await reopening.WaitAsync(TimeSpan.FromSeconds(3));
-        if (unknown || pending)
+        if (!accept)
         {
             Assert.NotNull(GetPrivate(reopened.Instance, "_upsTestDraft"));
             Assert.Empty(context.JSInterop.Invocations["clayDraftStore.discardScope"]);

@@ -115,6 +115,44 @@ public sealed class ClaySelectConfirmedFocusTests
         finally { finish.TrySetResult(); }
     }
 
+    [Theory]
+    [InlineData("item", 1, true)]
+    [InlineData("id", 2, true)]
+    [InlineData("unresolved", 9, false)]
+    [InlineData("cancel", null, false)]
+    public async Task CreatedSelectionAdvancesOnlyAfterMatchingItemIsApplied(string result,
+        int? value, bool advances)
+    {
+        await using var fixture = NewContext();
+        var selection = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var received = new TaskCompletionSource<int?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var field = Render(fixture, selected =>
+        {
+            received.TrySetResult(selected);
+            return selection.Task;
+        }, create: _ => Task.FromResult<ClaySelectExternalResult<Item, int?>?>(result switch
+        {
+            "item" => ClaySelectExternalResult<Item, int?>.FromItem(Items[0]),
+            "cancel" => null,
+            _ => ClaySelectExternalResult<Item, int?>.FromValue(value),
+        }));
+        field.Find("button.clay-select-button").Click();
+        var action = field.Find("button.clay-select-create").ClickAsync();
+        try
+        {
+            if (value is not null)
+            {
+                Assert.Equal(value, await received.Task.WaitAsync(TimeSpan.FromSeconds(2)));
+                Assert.Empty(fixture.JSInterop.Invocations["completeSelectionAdvance"]);
+            }
+            selection.SetResult();
+            await action;
+            Assert.Equal(value, field.Instance.Value);
+            Assert.Equal(advances ? 1 : 0, fixture.JSInterop.Invocations["completeSelectionAdvance"].Count);
+        }
+        finally { selection.TrySetResult(); }
+    }
+
     private static BunitContext NewContext()
     {
         var context = new BunitContext();
@@ -148,13 +186,15 @@ public sealed class ClaySelectConfirmedFocusTests
 
     private static IRenderedComponent<ClaySelect<Item, int?>> Render(BunitContext context, Func<int?, Task> selected,
         Func<ClaySelectAdvancedSearchContext, Task<ClaySelectExternalResult<Item, int?>?>>? advanced = null,
-        bool enabled = true) =>
+        bool enabled = true,
+        Func<ClaySelectAdvancedSearchContext, Task<ClaySelectExternalResult<Item, int?>?>>? create = null) =>
         context.Render<ClaySelect<Item, int?>>(parameters => parameters
             .Add(field => field.Options, new ClaySelectOptions { AdvanceFocusOnSelection = enabled, AlwaysShowAdvancedSearch = true })
             .Add(field => field.Items, Items)
             .Add(field => field.ValueSelector, item => item.Id)
             .Add(field => field.TextSelector, item => item.Name)
             .Add(field => field.AdvancedSearch, advanced)
+            .Add(field => field.CreateItem, create)
             .Add(field => field.ValueChanged, EventCallback.Factory.Create<int?>(new object(), selected)));
 
     private static Task ChooseAsync(IRenderedComponent<ClaySelect<Item, int?>> field, bool keyboard) => keyboard

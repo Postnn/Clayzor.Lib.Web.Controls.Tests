@@ -21,7 +21,7 @@ public sealed partial class EquipmentFormTests
     {
         var fixture = CreateFixture();
         await using var context = fixture.Context;
-        context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.register", _ => true)
+        context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.registerRam", _ => true)
             .SetResult(new ClayDraftRestore("test-registration", true, 19, null, null));
         context.JSInterop.Setup<ClayDraftRawApplyResult>(PendingApply, _ => true)
             .SetResult(new ClayDraftRawApplyResult([], failed ? [] : ["data:equipment.writeoff:0"]));
@@ -61,7 +61,7 @@ public sealed partial class EquipmentFormTests
     {
         var fixture = CreateFixture();
         await using var context = fixture.Context;
-        context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.register", _ => true)
+        context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.registerRam", _ => true)
             .SetResult(new ClayDraftRestore("test-registration", true, 19, null, null));
         context.JSInterop.Setup<ClayDraftRawApplyResult>(PendingApply, _ => true)
             .SetResult(new ClayDraftRawApplyResult([], ["data:equipment.writeoff:0"]));

@@ -33,7 +33,7 @@ public sealed partial class ModelEquipmentFormTests
             SetupRestore(context, "unknown");
         else if (state == "pending")
         {
-            context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.register", _ => true)
+            context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.registerRam", _ => true)
                 .SetResult(new ClayDraftRestore("model-fixture", true, 10, null, null));
             context.JSInterop.Setup<ClayDraftEditorScopeState>("clayDraftStore.readEditorScope", _ => true)
                 .SetResult(new ClayDraftEditorScopeState(10, true, false));
@@ -101,6 +101,7 @@ public sealed partial class ModelEquipmentFormTests
         fixture.Commands.Clear();
         fixture.Enqueue(ModelRow(new EquipmentModel { Id = 8, EquipmentTypeId = 5, Name = "Другая модель" }),
             Roles(Роли.Специалист_по_инвентаризации_оборудования), Usage());
+        fixture.Enqueue(ModelServerSnapshot());
         await page.InvokeAsync(() => fixture.Navigation.NavigateTo("http://localhost/Equipment/ModelEquipmentForm?id=8"));
         page.WaitForAssertion(() =>
         {

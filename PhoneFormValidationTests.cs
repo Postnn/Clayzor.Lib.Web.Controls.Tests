@@ -176,7 +176,7 @@ public sealed class PhoneFormValidationTests
         ]), emulateEquipmentIdentity: false);
         var service = new PhoneFormService(new DbManager("Server=test", new FakeSqlErrorHandler(), () => connection));
 
-        await Assert.ThrowsAsync<Microsoft.Data.SqlClient.SqlException>(() => service.SaveAsync(ValidRequest(), @"DOMAIN\fixture", 4));
+        await Assert.ThrowsAsync<Microsoft.Data.SqlClient.SqlException>(() => service.SaveAsync(ValidRequest(), @"DOMAIN\fixture", 4, Guid.NewGuid()));
 
         Assert.Equal(3, connection.CommandLog.Count);
         Assert.DoesNotContain(connection.CommandLog, sql => sql.Contains("UPDATE ") || sql.Contains("INSERT "));

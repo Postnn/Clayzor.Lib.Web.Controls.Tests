@@ -130,7 +130,8 @@ public sealed class EquipmentRemainingRawRestoreTests
         var typed = JsonSerializer.Serialize(new { Version = 1, Original = original, Current = original, OriginalChangedAtUtc = originalDate });
         var accepted = 0;
         var session = new TelRelationDraftSession<EquipmentPhoneReturnResult>(registration, scope, "fixture-root", default,
-            () => true, _ => { }, _ => { accepted++; return Task.FromResult(1L); }, typed, true, original, originalDate);
+            () => true, _ => { }, _ => { accepted++; return Task.FromResult(1L); }, typed, true, original, originalDate,
+            context.Services.GetRequiredService<IDialogService>(), () => throw new InvalidOperationException(), false);
         var dialogs = context.Render<MudDialogProvider>();
         var reference = await context.Services.GetRequiredService<IDialogService>()
             .ShowAsync<EquipmentPhoneDialog>("Срок возврата", new DialogParameters<EquipmentPhoneDialog>

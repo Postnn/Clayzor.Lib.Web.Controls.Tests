@@ -4,6 +4,8 @@ using System.Security.Claims;
 using System.Text.Json;
 using Bunit;
 using Clayzor.Lib.DALC;
+using Clayzor.Lib.Entities;
+using Clayzor.Lib.Entities.Inventory;
 using Clayzor.Lib.Entities.MedicalTests;
 using Clayzor.Lib.Entities.TerritorialEntity;
 using Clayzor.Lib.Web.Controls.Services;
@@ -13,6 +15,7 @@ using Microsoft.AspNetCore.Components.Authorization;
 using Microsoft.AspNetCore.Components.Web;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.JSInterop;
 using MudBlazor;
 using MudBlazor.Services;
 
@@ -52,7 +55,7 @@ public sealed class TerritorialEntityCancelTests
         Assert.Equal(missing || !accepted ? 1 : 0, fixture.Card.FindAll("[data-clay-field-changed]").Count);
     }
 
-    /// <summary>Продолжение работы не перечитывает БД, закрытие отбрасывает только принятую область.</summary>
+    /// <summary>Продолжение работы не перечитывает БД, закрытие удаляет только принятую RAM-ревизию.</summary>
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -74,9 +77,10 @@ public sealed class TerritorialEntityCancelTests
             return;
         }
 
-        var discard = Assert.Single(replacing);
-        Assert.Equal("main", discard.Arguments[1]);
-        Assert.Null(discard.Arguments[3]);
+        Assert.Empty(replacing);
+        var discard = Assert.Single(fixture.Context.JSInterop.Invocations["clayDraftStore.closeRam"]);
+        Assert.Equal("territory-cancel", discard.Arguments[0]);
+        Assert.Equal(7L, discard.Arguments[1]);
         Assert.Single(fixture.Context.JSInterop.Invocations["clayModelEquipmentForm.close"]);
     }
 
@@ -134,11 +138,41 @@ public sealed class TerritorialEntityCancelTests
         Assert.False(Button(fixture.Card, "Обновить").HasAttribute("disabled"));
         var commands = fixture.Connection.CommandLog;
         Assert.Equal(3, commands.Count(sql => sql.Contains("FROM dbo.Территории t ", StringComparison.Ordinal)));
-        Assert.DoesNotContain(commands, sql => sql.TrimStart().StartsWith("UPDATE", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(commands, sql => sql == TerritorialEntitySql.TerritoryUpdate);
+        Assert.Single(commands, sql => sql == SQLQueries.UPDATE_ClayzorOperationScope);
+        var transition = commands.IndexOf(SQLQueries.UPDATE_ClayzorOperationJournalState);
+        Assert.True(transition >= 0);
+        Assert.Equal((byte)InventoryOperationState.Rejected, fixture.Connection.ParameterLog[transition]["NextState"]);
         Assert.Single(fixture.Context.JSInterop.Invocations["clayDraftStore.rejectOperation"]);
         Assert.Empty(fixture.Context.JSInterop.Invocations["clayDraftStore.unknownOperation"]);
         Assert.Empty(fixture.Context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
         Assert.Empty(fixture.Context.JSInterop.Invocations["clayDraftStore.replaceEditorScope"]);
+    }
+
+    /// <summary>Повтор после сбоя отметки подтверждения завершает журнал обычного обновления.</summary>
+    [Fact]
+    public async Task KnownTerritoryUpdateRetriesMarkerWithoutRepeatingWrite()
+    {
+        await using var fixture = new Fixture(simulateWriteSuccess: true);
+        var failRecording = true;
+        fixture.Context.JSInterop.SetupVoid("clayDraftStore.recordConfirmedOperation", _ => failRecording)
+            .SetException(new JSException("Тестовый отказ записи подтверждения."));
+
+        await Button(fixture.Card, "Применить").ClickAsync(new MouseEventArgs());
+
+        Assert.Single(fixture.Connection.CommandLog, sql => sql == TerritorialEntitySql.TerritoryUpdate);
+        Assert.Single(fixture.Context.JSInterop.Invocations["clayDraftStore.recordConfirmedOperation"]);
+        Assert.Empty(fixture.Context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
+
+        failRecording = false;
+        await Button(fixture.Card, "Обновить").ClickAsync(new MouseEventArgs());
+
+        var cleanup = Assert.Single(fixture.Context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
+        var confirmations = fixture.Context.JSInterop.Invocations["clayDraftStore.recordConfirmedOperation"];
+        Assert.Equal(2, confirmations.Count);
+        Assert.All(confirmations, call => Assert.Equal(cleanup.Arguments[1], call.Arguments[1]));
+        Assert.Single(fixture.Connection.CommandLog, sql => sql == TerritorialEntitySql.TerritoryUpdate);
+        Assert.Empty(fixture.Context.JSInterop.Invocations["clayDraftStore.unknownOperation"]);
     }
 
 
@@ -147,7 +181,8 @@ public sealed class TerritorialEntityCancelTests
 
     private sealed class Fixture : IAsyncDisposable
     {
-        public Fixture(bool missing = false, bool acceptsRevision = true, string freshName = "FreshName", bool simulateWriteConflict = false)
+        public Fixture(bool missing = false, bool acceptsRevision = true, string freshName = "FreshName",
+            bool simulateWriteConflict = false, bool simulateWriteSuccess = false)
         {
             Context.JSInterop.Mode = JSRuntimeMode.Loose;
             DapperColumnMapper.Initialize();
@@ -159,20 +194,35 @@ public sealed class TerritorialEntityCancelTests
                 ChangedAt = new DateTime(2026, 11, 25)
             };
             var fresh = missing ? Script.Rows() : Territory(freshName, old.ChangedAt.AddDays(1));
+            var noPending = Script.Rows(Script.Row(("Pending", false)));
             var script = new Queue<ScriptEntry>([
-                employee, Script.Rows(), access, Territory("OldName", old.ChangedAt), Script.Rows()
+                employee, Script.Rows(), access, Territory("OldName", old.ChangedAt), Script.Rows(), noPending
             ]);
-            if (simulateWriteConflict)
+            if (simulateWriteConflict || simulateWriteSuccess)
             {
-                foreach (var entry in new[] { employee, Script.Rows(), access, fresh })
+                foreach (var entry in new[]
+                {
+                    noPending,                             // Проверка дерева перед Begin.
+                    employee, access, Script.Rows(),        // Права и точный результат попытки.
+                    Script.Rows(), noPending, noPending,    // Резервирование карточки и дерева.
+                    Script.NonQuery(), Script.Scalar(1),
+                    employee, access, simulateWriteSuccess ? Territory("OldName", old.ChangedAt) : fresh,
+                })
                     script.Enqueue(entry);
+                if (simulateWriteSuccess)
+                {
+                    script.Enqueue(Script.NonQuery());
+                    script.Enqueue(Territory("LocalName", old.ChangedAt.AddDays(1)));
+                }
+                script.Enqueue(Script.Scalar(1));
+                script.Enqueue(Script.Scalar(1));
             }
-            foreach (var entry in new[] { employee, Script.Rows(), access, fresh, Script.Rows() })
+            foreach (var entry in new[] { employee, Script.Rows(), access, fresh, Script.Rows(), noPending })
                 script.Enqueue(entry);
             Connection = new ScriptedConnection(script, emulateEquipmentIdentity: false);
             Context.Services.AddSingleton<DbManager>(_ => new DbManager("Server=test", new FakeSqlErrorHandler(),
-                () => simulateWriteConflict ? new TransactionConnection(Connection) : Connection));
-            Context.Services.AddScoped<ClayDraftService>();
+                () => simulateWriteConflict || simulateWriteSuccess ? new TransactionConnection(Connection, () => { }) : Connection));
+            Context.Services.AddScoped(_ => new ClayDraftService(new JournalRuntime(Context.JSInterop.JSRuntime)));
             Context.Services.AddScoped<ClayFormWindowService>();
             Context.Services.AddSingleton<IConfiguration>(new ConfigurationBuilder().Build());
             Context.Services.AddSingleton<AuthenticationStateProvider, FixtureAuthentication>();
@@ -182,7 +232,12 @@ public sealed class TerritorialEntityCancelTests
                 Original = new TerritorialEntityForm.FormState(old, null),
                 Current = new TerritorialEntityForm.FormState(old with { Name = "LocalName" }, null)
             });
-            Context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.register", _ => true)
+            Context.JSInterop.Setup<ClayLegacyDraftOperationEvidence[]?>(
+                "clayDraftStore.beginLegacyOperationEvidenceTransfer", _ => true).SetResult([]);
+            Context.JSInterop.SetupVoid("clayDraftStore.finishLegacyOperationEvidenceTransfer", _ => true).SetVoidResult();
+            Context.JSInterop.SetupVoid("clayDraftStore.retireLegacyOperationEvidenceTransfer", _ => true).SetVoidResult();
+            Context.JSInterop.Setup<bool>("clayDraftStore.closeRam", call => call.Arguments.Count == 2).SetResult(true);
+            Context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.registerRam", _ => true)
                 .SetResult(new ClayDraftRestore("territory-cancel", true, 7, null, null,
                     new Dictionary<string, string> { ["main"] = stored }));
             Context.JSInterop.Setup<ClayDraftRawApplyResult>("clayDraftStore.applyRaw", _ => true)
@@ -215,6 +270,36 @@ public sealed class TerritorialEntityCancelTests
                 ("CountryCode", "1"), ("Direction", "Север"), ("ChangedAt", changed)));
 
         public ValueTask DisposeAsync() => Context.DisposeAsync();
+    }
+
+    private sealed class JournalRuntime(IJSRuntime inner) : IJSRuntime
+    {
+        public ValueTask<T> InvokeAsync<T>(string identifier, object?[]? args) =>
+            InvokeAsync<T>(identifier, CancellationToken.None, args);
+
+        public async ValueTask<T> InvokeAsync<T>(string identifier, CancellationToken ct, object?[]? args)
+        {
+            var result = await inner.InvokeAsync<T>(identifier, ct, args);
+            if (identifier != "clayDraftStore.beginOperationIntent")
+                return result;
+
+            using var wire = JsonDocument.Parse((string)args![1]!);
+            var intent = wire.RootElement;
+            var attemptId = intent.GetProperty("attemptId").GetString();
+            Assert.True(Guid.TryParseExact(attemptId, "N", out _));
+            return (T)(object)JsonSerializer.Serialize(new
+            {
+                version = 1,
+                attemptId,
+                kind = intent.GetProperty("kind").GetString(),
+                status = "running",
+                revision = 8,
+                data = intent.GetProperty("data").GetString(),
+                scopes = new[] { new { name = "main", typedRevision = 7, rawRevisions = new Dictionary<string, long>() } },
+                acceptLegacyTyped = false,
+                legacyTypedRevision = 0,
+            });
+        }
     }
 
     internal sealed class TransactionConnection(ScriptedConnection script, Action? commit = null) : DbConnection

@@ -26,7 +26,7 @@ public sealed partial class EquipmentFormTests
             WaitForSn(page, "CLAY_TEST_7");
             SetPrivate(page.Instance, "_canManageUps", true);
             var opening = TrackNextDialog(first.Context);
-            var dialogTask = InvokeHandler(page, "OpenUpsDialogAsync", new UpsServerLink { UpsEquipmentId = upsId });
+            var dialogTask = InvokeHandler(page, "OpenUpsDialogAsync", new UpsServerLink { UpsEquipmentId = upsId, ServerEquipmentId = 7 });
             var reference = await opening.Task.WaitAsync(TimeSpan.FromSeconds(3));
             var dialog = provider.FindComponent<EquipmentUpsDialog>();
             await dialog.InvokeAsync(() => dialog.Instance.Tests[0].BatteryTime = 11);
@@ -52,7 +52,7 @@ public sealed partial class EquipmentFormTests
         await InvokeHandler(reopened, "RestoreDraftAsync", saved);
 
         var onOpened = TrackNextDialog(context);
-        var reopenTask = InvokeHandler(reopened, "OpenUpsDialogAsync", new UpsServerLink { UpsEquipmentId = upsId });
+        var reopenTask = InvokeHandler(reopened, "OpenUpsDialogAsync", new UpsServerLink { UpsEquipmentId = upsId, ServerEquipmentId = 7 });
         await onOpened.Task.WaitAsync(TimeSpan.FromSeconds(3));
         var restored = secondProvider.FindComponent<EquipmentUpsDialog>();
         await restored.FindAll("button").Single(button => button.TextContent.Trim() == "OK").ClickAsync();
@@ -92,7 +92,7 @@ public sealed partial class EquipmentFormTests
         });
         await InvokeHandler(page, "RestoreDraftAsync", saved);
         var opening = TrackNextDialog(context);
-        var dialogTask = InvokeHandler(page, "OpenUpsDialogAsync", new UpsServerLink { UpsEquipmentId = upsId });
+        var dialogTask = InvokeHandler(page, "OpenUpsDialogAsync", new UpsServerLink { UpsEquipmentId = upsId, ServerEquipmentId = 7 });
         var reference = await opening.Task.WaitAsync(TimeSpan.FromSeconds(3));
         var dialog = provider.FindComponent<EquipmentUpsDialog>();
         var retained = Assert.Single(dialog.Instance.Tests);

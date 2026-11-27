@@ -6,6 +6,7 @@ using Kesco.App.Web.Inventory.Components.Pages.Duty;
 using Microsoft.AspNetCore.Components;
 using Microsoft.AspNetCore.Components.Authorization;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.JSInterop;
 using MudBlazor;
 using MudBlazor.Extensions;
 using Xunit;
@@ -36,22 +37,18 @@ public sealed partial class DutyTests
 
         var replacements = context.JSInterop.Invocations["clayDraftStore.replaceEditorScope"];
         Assert.Equal(action == "close" ? 1 : 0, context.JSInterop.Invocations["clayModelEquipmentForm.close"].Count);
-        if (action == "continue")
-            Assert.Empty(replacements);
-        else
+        Assert.Equal(action == "close" ? 1 : 0, context.JSInterop.Invocations["clayDraftStore.closeRam"].Count);
+        if (action == "reset")
         {
             var replace = Assert.Single(replacements);
             Assert.Equal("main", replace.Arguments[1]);
             Assert.Equal(15L, replace.Arguments[2]);
-            if (action == "reset")
-            {
-                using var accepted = JsonDocument.Parse(Assert.IsType<string>(replace.Arguments[3]));
-                Assert.Equal(JsonValueKind.Null, accepted.RootElement.GetProperty("Original").ValueKind);
-                Assert.Equal(DateOnly.FromDateTime(day), ReadDutyWorkingCopy(page).Date);
-            }
-            else
-                Assert.Null(replace.Arguments[3]);
+            using var accepted = JsonDocument.Parse(Assert.IsType<string>(replace.Arguments[3]));
+            Assert.Equal(JsonValueKind.Null, accepted.RootElement.GetProperty("Original").ValueKind);
+            Assert.Equal(DateOnly.FromDateTime(day), ReadDutyWorkingCopy(page).Date);
         }
+        else
+            Assert.Empty(replacements);
         AssertNoDutyExitWrite(db, context);
     }
 
@@ -122,6 +119,7 @@ public sealed partial class DutyTests
         await page.InvokeAsync(() => DutyAction(page, "Отмена").ClickAsync());
 
         Assert.Single(context.JSInterop.Invocations["clayModelEquipmentForm.close"]);
+        Assert.Single(context.JSInterop.Invocations["clayDraftStore.closeRam"]);
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.replaceEditorScope"]);
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
         AssertNoDutyExitWrite(db, context);
@@ -145,7 +143,8 @@ public sealed partial class DutyTests
         await SelectDutyExitAsync(dialogs, discard ? "Закрыть без сохранения" : "Продолжить редактирование");
 
         Assert.Equal(discard, await moving.WaitAsync(TimeSpan.FromSeconds(5)));
-        Assert.Equal(discard ? 1 : 0, context.JSInterop.Invocations["clayDraftStore.replaceEditorScope"].Count);
+        Assert.Equal(discard ? 1 : 0, context.JSInterop.Invocations["clayDraftStore.closeRam"].Count);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.replaceEditorScope"]);
         Assert.Empty(context.JSInterop.Invocations["clayModelEquipmentForm.close"]);
         AssertNoDutyExitWrite(db, context);
     }
@@ -181,6 +180,53 @@ public sealed partial class DutyTests
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.replaceEditorScope"]);
         AssertNoDutyExitWrite(db, context);
     }
+
+    [Fact]
+    public async Task DutyRamCloseFailureRetainsHandleAndRetryDoesNotSendDml()
+    {
+        using var db = new Probe();
+        await using var context = EditorContext(db, EmptyDutyCancelRestore(), rawReady: true);
+        var first = true;
+        context.JSInterop.SetupVoid("clayDraftStore.closeRam", call =>
+        {
+            if (!first || call.Arguments.Count != 1) return false;
+            first = false;
+            return true;
+        }).SetException(new JSException("Тестовый отказ удаления"));
+        var page = context.Render<DutyEditor>();
+        page.WaitForAssertion(() => Assert.False(DutyAction(page, "Сохранить").HasAttribute("disabled")));
+
+        await page.InvokeAsync(() => DutyAction(page, "Отмена").ClickAsync());
+        page.WaitForAssertion(() => Assert.Contains("Повторите закрытие", page.Markup));
+        Assert.Empty(context.JSInterop.Invocations["clayModelEquipmentForm.close"]);
+
+        await page.InvokeAsync(() => DutyAction(page, "Отмена").ClickAsync());
+        Assert.Single(context.JSInterop.Invocations["clayModelEquipmentForm.close"]);
+        Assert.Equal(2, context.JSInterop.Invocations["clayDraftStore.closeRam"].Count);
+        AssertNoDutyExitWrite(db, context);
+    }
+
+    [Fact]
+    public async Task DutySaveKeepsFormWhenInputChangesAfterAcceptedRevision()
+    {
+        var start = EditableDutyRow();
+        using var db = new Probe { Row = start };
+        await using var context = EditorContext(db, EmptyDutyCancelRestore(), rawReady: true);
+        context.JSInterop.Setup<ClayDraftStorageHealth>("clayDraftStore.getHealth", _ => true)
+            .SetResult(new ClayDraftStorageHealth(true, 0, null, false, 1, 1));
+        context.JSInterop.Setup<string>("clayDraftStore.beginOperationIntent", _ => true)
+            .SetResult("""{"version":1,"attemptId":"fixture","kind":"duty.save","status":"running","revision":9,"data":"{}","scopes":[],"acceptLegacyTyped":false,"legacyTypedRevision":0}""");
+        context.JSInterop.Setup<bool>("clayDraftStore.closeRam", call => call.Arguments.Count == 2).SetResult(false);
+        var page = context.Render<DutyEditor>(p => p.Add(component => component.RouteId, "20261125"));
+        page.WaitForAssertion(() => Assert.False(DutyAction(page, "Сохранить").HasAttribute("disabled")));
+        await page.InvokeAsync(() => DutyAction(page, "Сохранить").ClickAsync());
+
+        Assert.Equal(1, db.ScheduleWrites);
+        Assert.Contains("Более поздний ввод остался", page.Markup);
+        Assert.Equal(15L, Assert.Single(context.JSInterop.Invocations["clayDraftStore.closeRam"]).Arguments[1]);
+        Assert.Empty(context.JSInterop.Invocations["clayModelEquipmentForm.close"]);
+    }
+
 
     private static ClayDraftRestore EmptyDutyCancelRestore() => new("duty-cancel-fixture", false, 0, null, null);
 

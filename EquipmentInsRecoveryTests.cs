@@ -7,55 +7,47 @@ namespace Clayzor.Lib.Web.Controls.Tests;
 
 public sealed partial class EquipmentInsTests
 {
-    private const string RecoveryListing = "clayDraftStore.listRecoveryCandidates";
-    private const string RecoverStored = "clayDraftStore.recoverListedDraft";
-
     [Fact]
-    public async Task CopyWithLostPointerRestoresItsOwnUnknownAndDoesNotCreateAgain()
+    public async Task LegacyEvidenceAcrossSourcesBlocksWithoutRestoringEarlierInput()
     {
-        const string draftId = "420d5270-6413-4983-86c6-e805838c7984";
+        var firstId = Guid.NewGuid();
+        var secondId = Guid.NewGuid();
         var fixture = CreateFixture("http://localhost/Equipment/EquipmentIns?copyId=7");
         await using var context = fixture.Context;
-        context.JSInterop.Setup<ClayDraftRecoveryCandidate[]>(RecoveryListing, _ => true)
-            .SetResult([new(draftId, 7, true, true)]);
-        var recovery = context.JSInterop.Setup<ClayDraftRestore?>(RecoverStored, _ => true);
-        recovery.SetResult(new ClayDraftRestore("equipment-ins-test", true, 7, null, """
-            {"version":1,"attemptId":"e26d97000ad94a298c974a2a218b29870","kind":"equipment.create",
-             "status":"unknown","revision":7,"data":"{}","scopes":[],"acceptLegacyTyped":false,"legacyTypedRevision":0}
-            """));
+        context.JSInterop.Setup<ClayLegacyDraftOperationEvidence[]?>("clayDraftStore.beginLegacyOperationEvidenceTransfer", _ => true)
+            .SetResult([new(firstId.ToString("N"), "equipment.create", "7:0"),
+                new(secondId.ToString("N"), "equipment.create", "0:-2147483648")]);
+        context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.register", _ => true)
+            .SetResult(new ClayDraftRestore("previous-input", true, 7, null, null));
         var page = context.Render<EquipmentIns>();
-        page.WaitForAssertion(() => Assert.Contains("Исход попытки", page.Markup));
+        page.WaitForAssertion(() => Assert.Contains("В серверном журнале есть незавершённое создание", page.Markup));
         Assert.True(FindButton(page, "Применить").HasAttribute("disabled"));
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.saveTypedScope"]);
         await InvokeSave(page, false);
         Assert.Equal(0, fixture.Service.CreateCalls);
 
-        Assert.DoesNotContain("Открыть сохранённую попытку", page.Markup);
-
-        Assert.Equal(draftId, Assert.Single(recovery.Invocations).Arguments[1]);
-        Assert.Contains("Исход попытки", page.Markup);
-        Assert.True(FindButton(page, "Применить").HasAttribute("disabled"));
+        Assert.True(fixture.Service.ImportedCreationAttempts.SetEquals([firstId, secondId]));
+        Assert.Equal("new", Assert.Single(context.JSInterop.Invocations["clayDraftStore.beginLegacyOperationEvidenceTransfer"]).Arguments[1]);
+        Assert.Equal("7:0", Assert.Single(context.JSInterop.Invocations["clayDraftStore.registerRam"]).Arguments[1]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.register"]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.recoverListedDraft"]);
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.applyRaw"]);
-        Assert.Equal(0, fixture.Service.CreateCalls);
     }
 
     [Fact]
-    public async Task AmbiguousRecoveryDoesNotChooseAnAttempt()
+    public async Task InvalidLegacyCreationSourcePreventsRamRegistration()
     {
         var fixture = CreateFixture("http://localhost/Equipment/EquipmentIns?copyId=7");
         await using var context = fixture.Context;
-        context.JSInterop.Setup<ClayDraftRecoveryCandidate[]>(RecoveryListing, _ => true)
-            .SetResult([
-                new("420d5270-6413-4983-86c6-e805838c7984", 7, true, true),
-                new("21cc4bdf-a41b-4aa2-ae64-9a69d63ed307", 8, true, true),
-            ]);
+        context.JSInterop.Setup<ClayLegacyDraftOperationEvidence[]?>("clayDraftStore.beginLegacyOperationEvidenceTransfer", _ => true)
+            .SetResult([new(Guid.NewGuid().ToString("N"), "equipment.create", "7:+0")]);
 
         var page = context.Render<EquipmentIns>();
-        page.WaitForAssertion(() => Assert.Contains("Есть незавершённая попытка создания", page.Markup));
+        page.WaitForAssertion(() => Assert.Contains("Не удалось проверить защищённый черновик", page.Markup));
         Assert.True(FindButton(page, "Применить").HasAttribute("disabled"));
         Assert.DoesNotContain("Открыть сохранённую попытку", page.Markup);
-        Assert.Empty(context.JSInterop.Invocations[RecoverStored]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.registerRam"]);
+        Assert.Empty(fixture.Service.ImportedCreationAttempts);
         Assert.Equal(0, fixture.Service.CreateCalls);
     }
 
@@ -67,13 +59,12 @@ public sealed partial class EquipmentInsTests
         var page = context.Render<EquipmentIns>();
         page.WaitForAssertion(() => Assert.False(FindButton(page, "Применить").HasAttribute("disabled")));
         await page.InvokeAsync(() => page.Find("textarea[data-draft-key='ins.notes']").InputAsync("Текущий ввод"));
-        context.JSInterop.Setup<ClayDraftRecoveryCandidate[]>(RecoveryListing, _ => true)
-            .SetResult([new("420d5270-6413-4983-86c6-e805838c7984", 7, true, true)]);
+        fixture.Service.ServerCreationPending = true;
 
         await InvokeSave(page, false);
 
         Assert.Equal("Текущий ввод", CurrentModel(page.Instance).Description);
-        Assert.Contains("Есть незавершённая попытка создания", page.Markup);
+        Assert.Contains("В серверном журнале есть незавершённое создание", page.Markup);
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
         Assert.Equal(0, fixture.Service.CreateCalls);
     }

@@ -4,10 +4,12 @@ using System.Security.Claims;
 using System.Text.Json;
 using Bunit;
 using Clayzor.Lib.DALC;
+using Clayzor.Lib.Entities;
 using Clayzor.Lib.Entities.Inventory;
 using Clayzor.Lib.Entities.MedicalTests;
 using Clayzor.Lib.Web.Controls.Components;
 using Clayzor.Lib.Web.Controls.Components.Form;
+using Clayzor.Lib.Web.Controls.Components.Presence;
 using Clayzor.Lib.Web.Controls.Components.Select;
 using Clayzor.Lib.Web.Controls.Services;
 using Clayzor.Lib.Web.Controls.Themes;
@@ -37,6 +39,32 @@ public sealed class LocationFactRecoveryTests
     private static readonly LocationFactSnapshot Snapshot = new(new(10, "Тестовый склад", true),
         new(17, 4, "Владелец", "Тестовое устройство", "", 10, "Тестовый склад", null, new DateTime(2026, 11, 20)),
         null, false, "");
+    private static readonly DateTime CheckedAtUtc = new(2026, 11, 26, 14, 0, 0, DateTimeKind.Utc);
+
+    /// <summary>Присутствие появляется в открытой записи и проверяет право вставки и актуальность оборудования.</summary>
+    [Fact]
+    public async Task ManualPresenceUsesEquipmentIdentityAndFreshAccess()
+    {
+        using var connection = new FactConnection();
+        await using var context = Configure(connection);
+        var dialogs = context.Render<MudDialogProvider>();
+        var page = context.Render<LocationFact>();
+        WaitForButton(page, dialogs, "Подтвердить");
+        var panel = Assert.Single(page.FindComponents<ClayPresencePanel>().Concat(dialogs.FindComponents<ClayPresencePanel>()));
+        Assert.Equal(ClayPresenceKey.Create("inventory", "equipment", 17), panel.Instance.Target?.Key);
+
+        using var db = new DbManager("Server=fixture", new FakeSqlErrorHandler(), () => connection);
+        var actor = await LocationFactData.RequirePresenceEditorAsync(db, "fixture", 4, Snapshot, default);
+        Assert.Equal(4, actor.Id);
+        connection.AllowConfirmation = false;
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
+            LocationFactData.RequirePresenceEditorAsync(db, "fixture", 4, Snapshot, default));
+        connection.AllowConfirmation = true;
+        await Assert.ThrowsAsync<LocationFactConflict>(() =>
+            LocationFactData.RequirePresenceEditorAsync(db, "fixture", 4,
+                Snapshot with { Equipment = Snapshot.Equipment with { OwnerId = 99 } }, default));
+        Assert.Equal(0, connection.Inserts);
+    }
 
     /// <summary>После подтверждения БД повтор браузерного commit использует ту же ревизию без INSERT.</summary>
     [Fact]
@@ -61,6 +89,7 @@ public sealed class LocationFactRecoveryTests
         Assert.Equal(1, db.SentBroken);
         var begin = Assert.Single(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
         using var wire = JsonDocument.Parse((string)begin.Arguments[1]!);
+        Assert.Equal(Guid.Parse(wire.RootElement.GetProperty("attemptId").GetString()!), Assert.Single(db.Journal.Keys));
         using var intent = JsonDocument.Parse(wire.RootElement.GetProperty("data").GetString()!);
         Assert.Equal(Notes, intent.RootElement.GetProperty("Notes").GetString());
         Assert.True(intent.RootElement.GetProperty("Broken").GetBoolean());
@@ -110,11 +139,13 @@ public sealed class LocationFactRecoveryTests
     public async Task ConfirmedReceiptRestoresCleanupOnlyAfterRemount()
     {
         using var db = new FactConnection();
+        var attemptId = Guid.NewGuid();
+        db.Journal[attemptId] = new FactReceipt(4, 17, 10, InventoryOperationState.Confirmed, CheckedAtUtc);
         var command = JsonSerializer.Serialize(new { Expected = Snapshot, Notes, Broken = true, Move = false });
         var receipt = JsonSerializer.Serialize(new
         {
-            version = 1, attemptId = "previous-fact", kind = "confirm-location", status = "confirmed", revision = 6,
-            data = command, scopes = Array.Empty<object>(), acceptLegacyTyped = false, legacyTypedRevision = 0,
+            version = 1, attemptId = attemptId.ToString("N"), kind = "confirm-location", status = "confirmed", revision = 6,
+            data = command, scopes = FactScope(), acceptLegacyTyped = false, legacyTypedRevision = 0,
         });
         await using var context = Configure(db, restoredOperation: receipt);
         var dialogs = context.Render<MudDialogProvider>();
@@ -129,6 +160,150 @@ public sealed class LocationFactRecoveryTests
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.recordConfirmedOperation"]);
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.unknownOperation"]);
+    }
+
+    /// <summary>Совпадение со старой записью в браузере само по себе не подтверждает команду.</summary>
+    [Fact]
+    public async Task BrowserConfirmedWithoutServerProofCannotCleanOrWrite()
+    {
+        using var db = new FactConnection();
+        var receipt = JsonSerializer.Serialize(new
+        {
+            version = 1, attemptId = Guid.NewGuid().ToString("N"), kind = "confirm-location", status = "confirmed", revision = 6,
+            data = JsonSerializer.Serialize(new { Expected = Snapshot, Notes, Broken = true, Move = false }),
+            scopes = FactScope(), acceptLegacyTyped = false, legacyTypedRevision = 0,
+        });
+        await using var context = Configure(db, restoredOperation: receipt);
+        var dialogs = context.Render<MudDialogProvider>();
+        var page = context.Render<LocationFact>();
+        Assert.True(WaitForButton(page, dialogs, "Подтвердить").HasAttribute("disabled"));
+        Assert.Contains("Исход попытки", page.Markup);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
+        Assert.Equal(0, db.Inserts);
+    }
+
+    /// <summary>Потерянный ответ COMMIT допускает только сверку серверной попытки и чистку браузерной ревизии.</summary>
+    [Fact]
+    public async Task LostCommitReplyUsesExactServerFactWithoutSecondInsert()
+    {
+        using var db = new FactConnection { LoseCommitResponse = true };
+        await using var context = Configure(db);
+        var dialogs = context.Render<MudDialogProvider>();
+        var page = context.Render<LocationFact>();
+        await WaitForButton(page, dialogs, "Подтвердить").ClickAsync(new MouseEventArgs());
+        Assert.Equal(1, db.Inserts);
+        Assert.Equal(1, db.Commits);
+        Assert.Equal(CheckedAtUtc, Assert.Single(db.Journal.Values).CheckedAt);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
+
+        await WaitForButton(page, dialogs, "Сверить с базой").ClickAsync(new MouseEventArgs());
+
+        Assert.Equal(1, db.Inserts);
+        Assert.Equal(6L, Assert.Single(context.JSInterop.Invocations["clayDraftStore.commitOperation"]).Arguments[1]);
+        Assert.Single(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
+    }
+
+    /// <summary>Чужая незавершённая операция блокирует подтверждение при новом открытии.</summary>
+    [Fact]
+    public async Task FreshEditorCannotBeginWhileEquipmentHasDurablePendingOperation()
+    {
+        using var db = new FactConnection();
+        db.Journal[Guid.NewGuid()] = new FactReceipt(9, 17, null, InventoryOperationState.Reserved, null);
+        await using var context = Configure(db);
+        var dialogs = context.Render<MudDialogProvider>();
+        var page = context.Render<LocationFact>();
+        Assert.True(WaitForButton(page, dialogs, "Подтвердить").HasAttribute("disabled"));
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
+        Assert.Equal(0, db.Inserts);
+    }
+
+    /// <summary>Перенос старой попытки блокирует выбранное оборудование без восстановления её полей.</summary>
+    [Fact]
+    public async Task LegacyTransferImportsOnlyTargetBeforeCreatingRamRegistration()
+    {
+        using var db = new FactConnection();
+        var attemptId = Guid.NewGuid();
+        var workplace = JsonSerializer.Serialize(new { SiteId = 10 });
+        await using var context = Configure(db, includeEditor: false, workplaceJson: workplace,
+            evidence: [new(attemptId.ToString("N"), "confirm-location", """{"SiteId":10,"EquipmentId":17}""")]);
+        var dialogs = context.Render<MudDialogProvider>();
+        var page = context.Render<LocationFact>();
+        await WaitForButton(page, dialogs, "Тестовое устройство").ClickAsync(new MouseEventArgs());
+
+        Assert.True(WaitForButton(page, dialogs, "Подтвердить").HasAttribute("disabled"));
+        Assert.DoesNotContain(Notes, page.Markup);
+        Assert.Equal(17, Assert.Single(db.LegacyJournal).Value.EquipmentId);
+        Assert.Equal(attemptId, Assert.Single(db.LegacyJournal.Keys));
+        var transfer = Assert.Single(context.JSInterop.Invocations["clayDraftStore.beginLegacyOperationEvidenceTransfer"]);
+        Assert.Equal(new object?[] { "location-fact", "workplace", "4" }, transfer.Arguments.Take(3));
+        Assert.Equal(transfer.Arguments[3],
+            Assert.Single(context.JSInterop.Invocations["clayDraftStore.finishLegacyOperationEvidenceTransfer"]).Arguments[0]);
+        Assert.Single(context.JSInterop.Invocations["clayDraftStore.registerRam"]);
+        var calls = context.JSInterop.Invocations.ToList();
+        var retire = Assert.Single(calls, call => call.Identifier == "clayDraftStore.retireLegacyOperationEvidenceTransfer");
+        Assert.Equal(transfer.Arguments[3], retire.Arguments[0]);
+        Assert.True(calls.FindIndex(call => call.Identifier == "clayDraftStore.registerRam") < calls.IndexOf(retire));
+        Assert.True(calls.IndexOf(retire) < calls.FindIndex(call => call.Identifier == "clayDraftStore.finishLegacyOperationEvidenceTransfer"));
+        Assert.Empty(db.Journal);
+        Assert.Equal(0, db.Inserts);
+    }
+
+    /// <summary>Неподтверждённый формат не доходит до серверного импорта и RAM-регистрации.</summary>
+    [Fact]
+    public async Task InvalidLegacyTargetReleasesTransferWithoutOpeningRam()
+    {
+        using var db = new FactConnection();
+        await using var context = Configure(db, includeEditor: false,
+            evidence: [new(Guid.NewGuid().ToString("N"), "confirm-location", """{"SiteId":10,"EquipmentId":0}""")]);
+        var page = context.Render<LocationFact>();
+        page.WaitForAssertion(() =>
+            Assert.Single(context.JSInterop.Invocations["clayDraftStore.finishLegacyOperationEvidenceTransfer"]));
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.registerRam"]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.retireLegacyOperationEvidenceTransfer"]);
+        Assert.Empty(db.LegacyJournal);
+        Assert.Equal(0, db.Inserts);
+    }
+
+    /// <summary>Переход ждёт удаления той же ревизии и на ошибке не покидает форму.</summary>
+    [Fact]
+    public async Task ControlledPageExitRetriesTheSameRamHandleWithoutFactWrites()
+    {
+        using var db = new FactConnection();
+        var navigation = new FactNavigation();
+        await using var context = Configure(db, includeEditor: false, navigation: navigation);
+        context.JSInterop.Setup<ClayDraftEditorScopeState>("clayDraftStore.readEditorScope", _ => true)
+            .SetResult(new ClayDraftEditorScopeState(19, false, false));
+        var acceptClose = false;
+        context.JSInterop.Setup<bool>("clayDraftStore.closeRam", _ => !acceptClose).SetResult(false);
+        var page = context.Render<LocationFact>();
+        page.WaitForAssertion(() => Assert.Single(context.JSInterop.Invocations["clayDraftStore.registerRam"]));
+        Assert.False(await page.InvokeAsync(navigation.CanLeaveAsync));
+        Assert.Contains("Ввод изменился", page.Markup);
+
+        acceptClose = true;
+        Assert.True(await page.InvokeAsync(navigation.CanLeaveAsync));
+        var closes = context.JSInterop.Invocations["clayDraftStore.closeRam"];
+        Assert.Equal(2, closes.Count);
+        Assert.All(closes, call => Assert.Equal(new object?[] { "fact-test", 19L }, call.Arguments));
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
+        Assert.Equal(0, db.Inserts);
+    }
+
+    /// <summary>Техническое освобождение прекращает регистрацию без удаления ввода и без записи факта.</summary>
+    [Fact]
+    public async Task TechnicalDisposeUnregistersRamWithoutClosingIt()
+    {
+        using var db = new FactConnection();
+        await using var context = Configure(db, includeEditor: false);
+        var page = context.Render<LocationFact>();
+        page.WaitForAssertion(() => Assert.Single(context.JSInterop.Invocations["clayDraftStore.registerRam"]));
+        page.WaitForAssertion(() => Assert.False(page.Find("[data-draft-scope=workplace]").HasAttribute("inert")));
+
+        await page.InvokeAsync(async () => await page.Instance.DisposeAsync());
+
+        Assert.Equal("fact-test", Assert.Single(context.JSInterop.Invocations["clayDraftStore.unregister"]).Arguments[0]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.closeRam"]);
+        Assert.Equal(0, db.Inserts);
     }
 
     /// <summary>Ошибка ответа Begin не запускает SQL, повтор исправляет только известную неотправленную попытку.</summary>
@@ -168,7 +343,11 @@ public sealed class LocationFactRecoveryTests
         var page = context.Render<LocationFact>();
         await WaitForButton(page, dialogs, "Подтвердить").ClickAsync(new MouseEventArgs());
 
-        Assert.Contains("fact-test-attempt", page.Markup);
+        var begin = Assert.Single(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
+        using var intent = JsonDocument.Parse(Assert.IsType<string>(begin.Arguments[1]));
+        var attemptId = intent.RootElement.GetProperty("attemptId").GetString();
+        Assert.True(Guid.TryParseExact(attemptId, "N", out _));
+        Assert.Contains(attemptId!, page.Markup);
         Assert.Equal(1, db.Inserts);
         Assert.Single(context.JSInterop.Invocations["clayDraftStore.unknownOperation"]);
         var checkbox = BrokenControl(page, dialogs);
@@ -283,37 +462,23 @@ public sealed class LocationFactRecoveryTests
         Assert.Equal(0, db.Inserts);
     }
 
-    /// <summary>Старый raw без снимка оборудования сохраняется, а новый факт блокируется до миграции.</summary>
+    /// <summary>Raw текущего RAM-экземпляра без контекста оборудования не применяется к рабочему месту.</summary>
     [Fact]
-    public async Task LegacyOrphanRawRemainsProtected()
+    public async Task UnboundLiveRawIsNotExposedOrSubmitted()
     {
         using var db = new FactConnection();
         var workplace = JsonSerializer.Serialize(new { SiteId = 10, ItOnly = false, Scanner = false });
-        await using var context = Configure(db, includeEditor: false, workplaceJson: workplace, legacyRaw: true);
+        await using var context = Configure(db, includeEditor: false, workplaceJson: workplace, unboundRaw: true);
         var page = context.Render<LocationFact>();
-        page.WaitForAssertion(() => Assert.Contains("Черновик прежней версии", page.Markup));
+        page.WaitForAssertion(() => Assert.Contains("Не удалось связать ввод с подтверждением оборудования", page.Markup));
 
-        Assert.Contains("Черновик прежней версии", page.Markup);
-        Assert.DoesNotContain(page.FindAll("button"), button => button.TextContent.Trim() == "Тестовое устройство");
-        var fields = page.WaitForElements("[aria-label='Ввод из прежнего черновика'] [data-draft-key][readonly]", 4);
-        string[] keys = ["fact.location", "fact.notes", "fact.responsible", "fact.search"];
-        Assert.Equal(keys, fields.Select(field => field.GetAttribute("data-draft-key")).Order(StringComparer.Ordinal));
-        Assert.All(fields, field => Assert.False(field.HasAttribute("disabled")));
-        foreach (var key in keys) Assert.Single(page.FindAll($"[data-draft-key='{key}']"));
-        Assert.Empty(page.FindAll("[data-draft-scope=workplace]"));
-        page.WaitForAssertion(() => Assert.Single(context.JSInterop.Invocations["clayDraftStore.applyRaw"],
-            call => Equals(call.Arguments[1], "main")));
-
-        await page.FindAll("button").Single(button => button.TextContent.Trim() == "Вернуться к рабочему месту")
-            .ClickAsync(new MouseEventArgs());
         Assert.Equal(10, page.FindComponent<ClaySelect<LocationLookup, int?>>().Instance.Value);
+        Assert.DoesNotContain(page.FindAll("button"), button => button.TextContent.Trim() == "Тестовое устройство");
         Assert.Empty(page.FindAll("[aria-label='Ввод из прежнего черновика']"));
-        Assert.True(page.Find("[data-draft-scope=workplace]").HasAttribute("inert"));
-        page.WaitForAssertion(() => Assert.Single(context.JSInterop.Invocations["clayDraftStore.applyRaw"],
-            call => Equals(call.Arguments[1], "workplace")));
-        Assert.Contains("Черновик прежней версии", page.Markup);
+        Assert.DoesNotContain(context.JSInterop.Invocations["clayDraftStore.applyRaw"], call => Equals(call.Arguments[1], "main"));
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.discardScope"]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.closeRam"]);
         Assert.Equal(0, db.Inserts);
     }
 
@@ -482,8 +647,9 @@ public sealed class LocationFactRecoveryTests
     }
 
     private static BunitContext Configure(FactConnection connection, bool failBegin = false,
-        bool includeEditor = true, string? workplaceJson = null, Func<bool>? searchReady = null, bool legacyRaw = false, string? restoredOperation = null,
-        Action<IRenderedComponent<MudPopoverProvider>>? onPopoversRendered = null, bool scannerEditor = false)
+        bool includeEditor = true, string? workplaceJson = null, Func<bool>? searchReady = null, bool unboundRaw = false, string? restoredOperation = null,
+        Action<IRenderedComponent<MudPopoverProvider>>? onPopoversRendered = null, bool scannerEditor = false,
+        ClayLegacyDraftOperationEvidence[]? evidence = null, NavigationManager? navigation = null)
     {
         var context = new BunitContext();
         context.JSInterop.Mode = JSRuntimeMode.Loose;
@@ -491,8 +657,12 @@ public sealed class LocationFactRecoveryTests
         var scopes = new Dictionary<string, string>();
         if (includeEditor) scopes["main"] = restored;
         if (workplaceJson is not null) scopes["workplace"] = workplaceJson;
-        context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.register", _ => true)
+        context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.registerRam", _ => true)
             .SetResult(new ClayDraftRestore("fact-test", true, 5, null, restoredOperation, scopes));
+        context.JSInterop.Setup<ClayLegacyDraftOperationEvidence[]?>("clayDraftStore.beginLegacyOperationEvidenceTransfer", _ => true)
+            .SetResult(evidence ?? []);
+        context.JSInterop.Setup<bool>("clayDraftStore.closeRam", _ => true).SetResult(true);
+        if (navigation is not null) context.Services.AddSingleton<NavigationManager>(navigation);
         bool SearchPending() => searchReady?.Invoke() == false;
         context.JSInterop.Setup<ClayDraftRawApplyResult>("clayDraftStore.applyRaw", call => SearchPending() && Equals(call.Arguments[1], "workplace"))
             .SetResult(new ClayDraftRawApplyResult([], ["data:fact.search"]));
@@ -501,7 +671,7 @@ public sealed class LocationFactRecoveryTests
         context.JSInterop.Setup<ClayDraftRestoreReadiness>("clayDraftStore.getRestoreReadiness", _ => SearchPending())
             .SetResult(new ClayDraftRestoreReadiness(false, ["workplace"], []));
         context.JSInterop.Setup<ClayDraftRestoreReadiness>("clayDraftStore.getRestoreReadiness", _ => !SearchPending())
-            .SetResult(new ClayDraftRestoreReadiness(!legacyRaw, legacyRaw ? ["main"] : [], []));
+            .SetResult(new ClayDraftRestoreReadiness(!unboundRaw, unboundRaw ? ["main"] : [], []));
         context.JSInterop.Setup<ClayDraftEditorScopeState>("clayDraftStore.readEditorScope", _ => true)
             .SetResult(new ClayDraftEditorScopeState(19, true, false));
         context.JSInterop.Setup<bool>("clayDraftStore.replaceEditorScope", _ => true).SetResult(true);
@@ -513,7 +683,7 @@ public sealed class LocationFactRecoveryTests
         context.ComponentFactories.AddStub<InventoryMainMenu>();
         DapperColumnMapper.Initialize();
         context.Services.AddScoped(_ => new DbManager("Server=fixture", new FakeSqlErrorHandler(), () => connection));
-        context.Services.AddScoped<ClayDraftService>();
+        context.Services.AddScoped(_ => new ClayDraftService(new FactJournalRuntime(context.JSInterop.JSRuntime)));
         context.Services.AddScoped<ClayFormWindowService>();
         context.Services.AddScoped<ClayErrorService>();
         context.Services.AddSingleton(new Clayzor.Lib.Web.Settings.ClayAppSettings { UriWikiHelp = WikiBase });
@@ -534,13 +704,50 @@ public sealed class LocationFactRecoveryTests
             new AuthenticationState(new ClaimsPrincipal(new ClaimsIdentity([new Claim(ClaimTypes.Name, "fixture")], "test"))));
     }
 
+    private sealed class FactNavigation : NavigationManager
+    {
+        internal FactNavigation() => Initialize("http://localhost/", "http://localhost/Inv/LocationFact");
+        protected override void SetNavigationLockState(bool value) { }
+        internal Task<bool> CanLeaveAsync() => NotifyLocationChangingAsync("http://localhost/Other", null, false).AsTask();
+    }
+
+    private static object[] FactScope() =>
+        [new { name = "main", typedRevision = 5, rawRevisions = new Dictionary<string, long>() }];
+
+    private sealed class FactJournalRuntime(IJSRuntime inner) : IJSRuntime
+    {
+        public ValueTask<T> InvokeAsync<T>(string identifier, object?[]? args) =>
+            InvokeAsync<T>(identifier, CancellationToken.None, args);
+
+        public async ValueTask<T> InvokeAsync<T>(string identifier, CancellationToken ct, object?[]? args)
+        {
+            var result = await inner.InvokeAsync<T>(identifier, ct, args);
+            if (identifier != "clayDraftStore.beginOperationIntent")
+                return result;
+            using var wire = JsonDocument.Parse((string)args![1]!);
+            var intent = wire.RootElement;
+            return (T)(object)JsonSerializer.Serialize(new
+            {
+                version = 1, attemptId = intent.GetProperty("attemptId").GetString(), kind = intent.GetProperty("kind").GetString(),
+                status = "running", revision = 6, data = intent.GetProperty("data").GetString(),
+                scopes = FactScope(), acceptLegacyTyped = false, legacyTypedRevision = 0,
+            });
+        }
+    }
+
+    private sealed record FactReceipt(int Actor, int EquipmentId, int? LocationId, InventoryOperationState State, DateTime? CheckedAt);
+
     private sealed class FactConnection : DbConnection
     {
         internal int ActorId { get; set; } = 4;
+        internal bool AllowConfirmation { get; set; } = true;
         internal int EquipmentId { get; set; } = 17;
         internal int Inserts { get; private set; }
         internal bool LoseInsertResponse { get; init; }
+        internal bool LoseCommitResponse { get; init; }
         internal int Commits { get; private set; }
+        internal Dictionary<Guid, FactReceipt> Journal { get; set; } = [];
+        internal Dictionary<Guid, FactReceipt> LegacyJournal { get; set; } = [];
         internal string? SentNotes { get; private set; }
         internal int SentBroken { get; private set; }
         internal int? ResponsibleOnLastList { get; private set; }
@@ -557,9 +764,19 @@ public sealed class LocationFactRecoveryTests
 
         private sealed class Transaction(FactConnection owner, IsolationLevel level) : DbTransaction
         {
+            internal Dictionary<Guid, FactReceipt> Journal { get; } = new(owner.Journal);
+            internal Dictionary<Guid, FactReceipt> LegacyJournal { get; } = new(owner.LegacyJournal);
+            internal bool BusinessWrite { get; set; }
             public override IsolationLevel IsolationLevel => level;
             protected override DbConnection DbConnection => owner;
-            public override void Commit() => owner.Commits++;
+            public override void Commit()
+            {
+                owner.Journal = Journal;
+                owner.LegacyJournal = LegacyJournal;
+                if (!BusinessWrite) return;
+                owner.Commits++;
+                if (owner.LoseCommitResponse) throw new TimeoutException("Тестовая потеря ответа COMMIT");
+            }
             public override void Rollback() { }
         }
 
@@ -576,8 +793,47 @@ public sealed class LocationFactRecoveryTests
             protected override DbParameter CreateDbParameter() => new FakeParameter();
             public override void Prepare() { }
             public override void Cancel() { }
-            public override object ExecuteScalar() => throw new NotSupportedException();
-            public override int ExecuteNonQuery() => throw new NotSupportedException();
+            private Dictionary<Guid, FactReceipt> Journal => DbTransaction is Transaction tx ? tx.Journal : owner.Journal;
+
+            public override object ExecuteScalar()
+            {
+                Assert.Equal(SQLQueries.UPDATE_ClayzorOperationJournalState, CommandText);
+                var attempt = (Guid)Param("AttemptId")!;
+                var state = (InventoryOperationState)(byte)Param("NextState")!;
+                Assert.Equal((byte)Journal[attempt].State, Param("ExpectedState"));
+                if (state == InventoryOperationState.Confirmed)
+                {
+                    Assert.True(Assert.IsType<Transaction>(DbTransaction).BusinessWrite);
+                    Assert.NotNull(Journal[attempt].CheckedAt);
+                    Assert.Equal(Journal[attempt].EquipmentId, Param("ResultEntityId"));
+                }
+                Journal[attempt] = Journal[attempt] with { State = state };
+                return 1;
+            }
+
+            public override int ExecuteNonQuery()
+            {
+                var tx = Assert.IsType<Transaction>(DbTransaction);
+                var attempt = (Guid)Param("AttemptId")!;
+                if (CommandText == SQLQueries.INSERT_ClayzorOperationJournalAttempt)
+                {
+                    Assert.Equal($"equipment/{owner.EquipmentId}", Param("ConflictKey"));
+                    Assert.Equal("confirm-location", Param("CommandKind"));
+                    Assert.DoesNotContain(Parameters.Cast<DbParameter>(), parameter => parameter.ParameterName == "Notes");
+                    tx.Journal.Add(attempt, new FactReceipt((int)Param("EmployeeId")!, owner.EquipmentId, null,
+                        InventoryOperationState.Reserved, null));
+                    return 1;
+                }
+                Assert.Equal(SQLQueries.INSERT_ClayzorLocationFactReceipt, CommandText);
+                Assert.True(tx.BusinessWrite);
+                Assert.Equal(tx.Journal[attempt].EquipmentId, Param("EquipmentId"));
+                tx.Journal[attempt] = tx.Journal[attempt] with
+                {
+                    LocationId = (int)Param("LocationId")!,
+                    CheckedAt = (DateTime)Param("CheckedAtUtc")!,
+                };
+                return 1;
+            }
 
             protected override DbDataReader ExecuteDbDataReader(CommandBehavior behavior)
             {
@@ -586,10 +842,42 @@ public sealed class LocationFactRecoveryTests
                 if (CommandText.Contains("fn_ТекущиеРоли"))
                     return Row(("RoleId", (int)LocationFactData.RequiredRole), ("PersonId", 0));
                 if (CommandText.Contains("AS CanConfirm"))
-                    return Row(("NowUtc", new DateTime(2026, 11, 26, 14, 0, 0)), ("CanConfirm", true), ("CanMove", true));
+                    return Row(("NowUtc", CheckedAtUtc), ("CanConfirm", owner.AllowConfirmation), ("CanMove", true));
+                if (CommandText == SQLQueries.SELECT_ClayzorOperationJournalAttemptForUpdate)
+                    return Journal.TryGetValue((Guid)Param("AttemptId")!, out var exact)
+                        ? Row(("AttemptId", Param("AttemptId")), ("EmployeeId", exact.Actor),
+                            ("ConflictKey", $"equipment/{exact.EquipmentId}"), ("CommandKind", "confirm-location"),
+                            ("State", (byte)exact.State), ("ResultEntityId", exact.EquipmentId))
+                        : EmptyRows();
+                if (CommandText == SQLQueries.SELECT_ClayzorLocationFactReceipt)
+                    return Journal.TryGetValue((Guid)Param("AttemptId")!, out var confirmed) &&
+                        confirmed.EquipmentId == (int)Param("EquipmentId")! && confirmed.LocationId == (int)Param("LocationId")! &&
+                        confirmed.CheckedAt is { } result
+                        ? Row(("CheckedAtUtc", result)) : EmptyRows();
+                if (CommandText == SQLQueries.SELECT_ClayzorLocationFactLatestReceipt)
+                {
+                    var latest = Journal.Values.Where(row => row.Actor == (int)Param("EmployeeId")! &&
+                        row.EquipmentId == (int)Param("EquipmentId")! && row.LocationId == (int)Param("LocationId")! &&
+                        row.State == InventoryOperationState.Confirmed).Max(row => row.CheckedAt);
+                    return latest is { } time ? Row(("CheckedAtUtc", time)) : EmptyRows();
+                }
+                if (CommandText == SQLQueries.SELECT_ClayzorOperationJournalOpenSlot ||
+                    CommandText == SQLQueries.SELECT_ClayzorOperationJournalOpenSlotForUpdate)
+                    return Row(("Pending", Journal.Values.Concat(owner.LegacyJournal.Values).Any(row => row.State == InventoryOperationState.Reserved &&
+                        string.Equals($"equipment/{row.EquipmentId}", (string?)Param("ConflictKey"), StringComparison.Ordinal))));
+                if (CommandText == SQLQueries.INSERT_ClayzorLegacyOperationEvidence)
+                {
+                    var tx = Assert.IsType<Transaction>(DbTransaction);
+                    Assert.Equal($"equipment/{owner.EquipmentId}", Param("ConflictKey"));
+                    Assert.Equal("confirm-location", Param("CommandKind"));
+                    tx.LegacyJournal[(Guid)Param("AttemptId")!] = new FactReceipt((int)Param("EmployeeId")!,
+                        owner.EquipmentId, null, InventoryOperationState.Reserved, null);
+                    return Row(("Owned", true));
+                }
                 if (CommandText.StartsWith("INSERT dbo.vwРеальноеРасположение", StringComparison.Ordinal))
                 {
                     Assert.Equal(IsolationLevel.Serializable, DbTransaction!.IsolationLevel);
+                    Assert.IsType<Transaction>(DbTransaction).BusinessWrite = true;
                     owner.Inserts++;
                     owner.SentNotes = (string)Param("Notes")!;
                     owner.SentBroken = (int)Param("Broken")!;
