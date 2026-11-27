@@ -60,7 +60,7 @@ public sealed class CardRouteRaceProposalTests
         await using var context = new BunitContext();
         ConfigureContext(context);
         context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.register", i => Equals(i.Arguments[1], "A"))
-            .SetResult(new ClayDraftRestore("register-A", true, 0, null, null,
+            .SetResult(new ClayDraftRestore("register-A", true, 0, null,
                 new Dictionary<string, string> { ["main"] = """{"Original":{"Value":"A"},"Current":{"Value":"A"}}""" }));
         context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.register", i => Equals(i.Arguments[1], "B"))
             .SetResult(new ClayDraftRestore("register-B", false, 0, null, null));

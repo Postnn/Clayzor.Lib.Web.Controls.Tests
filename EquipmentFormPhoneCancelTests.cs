@@ -41,7 +41,6 @@ public sealed partial class EquipmentFormTests
         Assert.Equal(changed ? 0 : 1, context.JSInterop.Invocations["clayDraftStore.replaceNestedEditorScope"].Count);
         Assert.Equal("old", row.Notes);
         Assert.Equal(0, fixture.Service.SyncCalls);
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
         await dialogs.InvokeAsync(() => reference.Close(DialogResult.Cancel()));
         await opening.WaitAsync(TimeSpan.FromSeconds(4));
     }

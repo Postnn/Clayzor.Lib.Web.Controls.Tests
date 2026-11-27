@@ -35,7 +35,6 @@ public sealed partial class EquipmentInsTests
             await InvokeSave(page, false);
         }
         Assert.Equal(0, fixture.Service.CreateCalls);
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
     }
 
     [Theory]
@@ -64,29 +63,18 @@ public sealed partial class EquipmentInsTests
         Assert.Equal(0, fixture.Service.CreateCalls);
     }
 
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task CreationRechecksMainBeforeDispatchAfterLocalAcknowledgement(bool postBegin)
+    [Fact]
+    public async Task CreationRechecksMainBeforeDispatch()
     {
         var fixture = CreateFixture("http://localhost/Equipment/EquipmentIns?copyId=7");
         await using var context = fixture.Context;
         var page = context.Render<EquipmentIns>();
         page.WaitForAssertion(() => Assert.False(FindButton(page, "Применить").HasAttribute("disabled")));
-        var failed = new ClayDraftRestoreReadiness(false, [], ["main"]);
-        if (postBegin)
-            context.JSInterop.Setup<ClayDraftRestoreReadiness>("clayDraftStore.getRestoreReadiness", _ =>
-                context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"].Count > 0).SetResult(failed);
-        else
-            SetCreationReadiness(context, failed);
+        SetCreationReadiness(context, new(false, [], ["main"]));
 
         await page.InvokeAsync(() => FindButton(page, "Применить").ClickAsync());
 
         Assert.Equal(0, fixture.Service.CreateCalls);
-        Assert.Equal(postBegin ? 1 : 0, context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"].Count);
-        Assert.Equal(postBegin ? 1 : 0, context.JSInterop.Invocations["clayDraftStore.rejectOperation"].Count);
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.unknownOperation"]);
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
         Assert.Contains("Не удалось восстановить", page.Find("[data-testid='ins-input-readiness']").TextContent);
     }
 
@@ -110,37 +98,6 @@ public sealed partial class EquipmentInsTests
         Assert.Contains("Локальная правка", page.Markup);
         Assert.True(FindButton(page, "Применить").HasAttribute("disabled"));
         Assert.Equal(0, fixture.Service.CreateCalls);
-    }
-
-    [Fact]
-    public async Task CreationKeepsLateTypedInputAfterAcknowledgement()
-    {
-        var fixture = CreateFixture("http://localhost/Equipment/EquipmentIns?copyId=7");
-        await using var context = fixture.Context;
-        var page = context.Render<EquipmentIns>();
-        page.WaitForAssertion(() => Assert.False(FindButton(page, "Применить").HasAttribute("disabled")));
-        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var readiness = context.JSInterop.Setup<ClayDraftRestoreReadiness>("clayDraftStore.getRestoreReadiness", _ =>
-        {
-            if (context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"].Count == 0)
-                return false;
-            entered.TrySetResult();
-            return true;
-        });
-
-        var saving = page.InvokeAsync(() => FindButton(page, "Применить").ClickAsync());
-        try
-        {
-            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            await page.InvokeAsync(() => { CurrentModel(page.Instance).Description = "Поздний текст"; });
-        }
-        finally { readiness.SetResult(new(true, [], [])); }
-        await saving.WaitAsync(TimeSpan.FromSeconds(5));
-
-        Assert.Equal("Поздний текст", CurrentModel(page.Instance).Description);
-        Assert.Equal(0, fixture.Service.CreateCalls);
-        Assert.Single(context.JSInterop.Invocations["clayDraftStore.rejectOperation"]);
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.unknownOperation"]);
     }
 
     private static void SetCreationReadiness(BunitContext context, ClayDraftRestoreReadiness state) =>

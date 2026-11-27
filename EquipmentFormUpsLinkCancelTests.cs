@@ -51,7 +51,6 @@ public sealed partial class EquipmentFormTests
         Assert.Equal(7, access.ServerId);
         Assert.True(access.EmployeeId > 0);
         Assert.Equal(0, fixture.Service.UpsWriteCalls);
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.discardScope"]);
 
         await dialogs.InvokeAsync(() => reference.Close(DialogResult.Cancel()));

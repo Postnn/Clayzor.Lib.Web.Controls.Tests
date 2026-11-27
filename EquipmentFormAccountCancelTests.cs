@@ -57,7 +57,6 @@ public sealed partial class EquipmentFormTests
                 Assert.DoesNotContain(editedPassword, value);
                 Assert.DoesNotContain(freshPassword, value);
             }
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
         await dialogs.InvokeAsync(() => reference.Close(DialogResult.Cancel()));
         await opening.WaitAsync(TimeSpan.FromSeconds(4));
     }

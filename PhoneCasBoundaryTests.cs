@@ -16,7 +16,7 @@ public sealed class PhoneCasBoundaryTests
     [Fact]
     public async Task UnchangedVersion_UsesOriginalStampAndPreservesTransactionOrder()
     {
-        var (service, connection, journal) = Create(Script.Scalar(5));
+        var (service, connection) = Create(Script.Scalar(5));
         var request = Request(5);
         var attemptId = Guid.NewGuid();
 
@@ -33,7 +33,8 @@ public sealed class PhoneCasBoundaryTests
         Assert.Contains("WITH (UPDLOCK, HOLDLOCK)", sql);
         Assert.DoesNotContain("BEGIN TRANSACTION", sql);
         Assert.DoesNotContain("COMMIT TRANSACTION", sql);
-        Assert.Equal(InventoryOperationState.Confirmed, journal.StateFor(attemptId));
+        Assert.DoesNotContain(connection.CommandLog, command => command.Contains("dbo.Clayzor", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal(1, connection.CommittedTransactions);
         Assert.True(sql.IndexOf("IF NOT EXISTS", StringComparison.Ordinal) < sql.IndexOf("INSERT INTO ТелефонныеНомераГруппы", StringComparison.Ordinal));
         Assert.True(sql.IndexOf("INSERT INTO ТелефонныеНомераГруппы", StringComparison.Ordinal) < sql.IndexOf("UPDATE vwТелефонныеНомераИзменение", StringComparison.Ordinal));
         Assert.Matches(@"WHERE КодТелефонногоНомера = @Id\s*;\s*IF @@ROWCOUNT <> 1", sql);
@@ -45,7 +46,7 @@ public sealed class PhoneCasBoundaryTests
     [InlineData("update zero")]
     public async Task ReturnedRollbackCode_IsConflict(string source)
     {
-        var (service, connection, journal) = Create(Script.Scalar(-1));
+        var (service, connection) = Create(Script.Scalar(-1));
         var attemptId = Guid.NewGuid();
         var result = await service.SaveAsync(Request(5), Principal, 4, attemptId);
         var sql = connection.CommandLog.Last();
@@ -55,7 +56,7 @@ public sealed class PhoneCasBoundaryTests
 
         Assert.True(guard >= 0 && guard < status && status < exit);
         Assert.DoesNotContain("ROLLBACK TRANSACTION", sql);
-        Assert.Equal(InventoryOperationState.Rejected, journal.StateFor(attemptId));
+        Assert.Equal(0, connection.CommittedTransactions);
         if (source == "stale or missing")
             Assert.True(exit < sql.IndexOf("INSERT INTO ТелефонныеНомераГруппы", StringComparison.Ordinal));
         else
@@ -70,17 +71,17 @@ public sealed class PhoneCasBoundaryTests
     [Fact]
     public async Task LostResponse_IsNotConfirmedRollback()
     {
-        var (service, _, journal) = Create(Script.Error(SqlExceptionFactory.Create(53, "fixture disconnected")));
+        var (service, connection) = Create(Script.Error(SqlExceptionFactory.Create(53, "fixture disconnected")));
         var attemptId = Guid.NewGuid();
         await Assert.ThrowsAsync<Microsoft.Data.SqlClient.SqlException>(() => service.SaveAsync(Request(5), Principal, 4, attemptId));
-        Assert.Equal(InventoryOperationState.Reserved, journal.StateFor(attemptId));
+        Assert.Equal(0, connection.CommittedTransactions);
     }
 
     /// <summary>Новая запись не требует исходной версии и сохраняет legacy @@IDENTITY.</summary>
     [Fact]
     public async Task Insert_PreservesIdentityAndDoesNotBindOriginalVersion()
     {
-        var (service, connection, journal) = Create(Script.Scalar(42), phoneId: 0);
+        var (service, connection) = Create(Script.Scalar(42), phoneId: 0);
         var attemptId = Guid.NewGuid();
         var result = await service.SaveAsync(Request(0), Principal, 4, attemptId);
 
@@ -89,33 +90,16 @@ public sealed class PhoneCasBoundaryTests
         Assert.Equal(42, result.PhoneId);
         Assert.Contains("SET @PhoneId = CONVERT(int, @@IDENTITY)", connection.CommandLog.Last());
         Assert.DoesNotContain("ExpectedChangedAt", connection.ParameterLog.Last().Keys);
-        Assert.Equal(InventoryOperationState.Confirmed, journal.StateFor(attemptId));
-    }
-
-    /// <summary>Точный receipt нового номера доступен после потери ответа COMMIT, повтор DML отсутствует.</summary>
-    [Fact]
-    public async Task Insert_LostCommitResponseCanBeReadByExactAttempt()
-    {
-        var (service, connection, journal) = Create(Script.Scalar(42), phoneId: 0, readReceiptAfterWrite: true);
-        journal.LoseNextConfirmedCommitReply = true;
-        var attemptId = Guid.NewGuid();
-
-        await Assert.ThrowsAsync<TimeoutException>(() => service.SaveAsync(Request(0), Principal, 4, attemptId));
-        var receipt = await service.ReadSqlReceiptAsync(Principal, 4, 0, false, attemptId, default);
-
-        Assert.NotNull(receipt);
-        Assert.Equal(InventoryOperationState.Confirmed, receipt.State);
-        Assert.Equal(42, receipt.ResultEntityId);
-        Assert.Single(connection.CommandLog, sql => sql.Contains("SET @PhoneId = CONVERT(int, @@IDENTITY)", StringComparison.Ordinal));
+        Assert.Equal(1, connection.CommittedTransactions);
     }
 
     /// <summary>Удаление проверяет зависимости в транзакции и подтверждает точную строку.</summary>
     [Theory]
     [InlineData(0, true)]
     [InlineData(1, false)]
-    public async Task Delete_ChecksDependentsAndCasInJournalTransaction(int dependents, bool accepted)
+    public async Task Delete_ChecksDependentsAndCasInTransaction(int dependents, bool accepted)
     {
-        var (service, connection, journal) = Create(Script.Scalar(5), dependents: dependents);
+        var (service, connection) = Create(Script.Scalar(5), dependents: dependents);
         var attemptId = Guid.NewGuid();
         var original = Request(5).OriginalPhone;
         if (accepted)
@@ -123,7 +107,7 @@ public sealed class PhoneCasBoundaryTests
         else
             await Assert.ThrowsAsync<TelSqlRejectedException>(() => service.DeleteAsync(original, Principal, 4, attemptId));
 
-        Assert.Equal(accepted ? InventoryOperationState.Confirmed : InventoryOperationState.Rejected, journal.StateFor(attemptId));
+        Assert.Equal(accepted ? 1 : 0, connection.CommittedTransactions);
         Assert.Single(connection.CommandLog, sql => sql.Contains("WHERE ВедомыйОт = @Id", StringComparison.Ordinal));
         var deletes = connection.CommandLog.Where(sql => sql.Contains("DELETE FROM vwТелефонныеНомераИзменение", StringComparison.Ordinal));
         if (accepted)
@@ -186,8 +170,8 @@ public sealed class PhoneCasBoundaryTests
         };
     }
 
-    private static (PhoneFormService Service, ScriptedConnection Connection, NetFormTests.NetJournalConnection Journal) Create(
-        ScriptEntry result, int phoneId = 5, int? dependents = null, bool readReceiptAfterWrite = false)
+    private static (PhoneFormService Service, ScriptedConnection Connection) Create(
+        ScriptEntry result, int phoneId = 5, int? dependents = null)
     {
         DapperColumnMapper.Initialize();
         var actor = Script.Rows(Script.Row(("КодСотрудника", 4)));
@@ -199,14 +183,8 @@ public sealed class PhoneCasBoundaryTests
         script.Enqueue(roles);
         if (dependents is { } count) script.Enqueue(Script.Scalar(count));
         script.Enqueue(result);
-        if (readReceiptAfterWrite)
-        {
-            script.Enqueue(actor);
-            script.Enqueue(roles);
-        }
-        var connection = new ScriptedConnection(script, emulateEquipmentIdentity: false);
-        var journal = new NetFormTests.NetJournalConnection(connection);
-        return (new CasPhoneService(new DbManager("Server=fixture", new FakeSqlErrorHandler(), () => journal)), connection, journal);
+        var connection = new ScriptedConnection(script, emulateEquipmentIdentity: false) { AllowTransactions = true };
+        return (new CasPhoneService(new DbManager("Server=fixture", new FakeSqlErrorHandler(), () => connection)), connection);
     }
 
     private sealed class CasPhoneService(DbManager db) : PhoneFormService(db)

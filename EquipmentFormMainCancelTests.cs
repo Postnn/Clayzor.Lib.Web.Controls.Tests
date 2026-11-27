@@ -38,7 +38,7 @@ public sealed partial class EquipmentFormTests
     [Fact]
     public async Task MainCancel_RawOnlyClosesWholeRegistrationAtExactRevisionWithoutResaving()
     {
-        var fixture = CreateFixture(mainScope: new ClayDraftEditorScopeState(21, true, false));
+        var fixture = CreateFixture(mainScope: new ClayDraftEditorScopeState(21, true));
         await using var context = fixture.Context;
         var dialogs = context.Render<MudDialogProvider>();
         var page = context.Render<EquipmentForm>();
@@ -64,7 +64,7 @@ public sealed partial class EquipmentFormTests
     [InlineData(false)]
     public async Task MainCancel_ResetReadsFreshBeforeCasAndPublishesOnlyIfAccepted(bool acceptRevision)
     {
-        var fixture = CreateFixture(mainScope: new ClayDraftEditorScopeState(21, true, false), acceptMainReplacement: acceptRevision);
+        var fixture = CreateFixture(mainScope: new ClayDraftEditorScopeState(21, true), acceptMainReplacement: acceptRevision);
         await using var context = fixture.Context;
         var dialogs = context.Render<MudDialogProvider>();
         var page = context.Render<EquipmentForm>();
@@ -78,6 +78,7 @@ public sealed partial class EquipmentFormTests
         var replace = Assert.Single(context.JSInterop.Invocations[ReplaceMainScope]);
         Assert.Equal(21L, replace.Arguments[2]);
         Assert.Contains("CLAY_TEST_FRESH", Assert.IsType<string>(replace.Arguments[3]));
+        Assert.Equal(acceptRevision ? "CLAY_TEST_FRESH" : "CLAY_TEST_LOCAL", CurrentModel(page.Instance).SerialNumber);
         WaitForSn(page, acceptRevision ? "CLAY_TEST_FRESH" : "CLAY_TEST_LOCAL");
         if (!acceptRevision)
             Assert.Contains("Черновик изменился во время подтверждения", page.Markup);
@@ -91,7 +92,7 @@ public sealed partial class EquipmentFormTests
     [InlineData("batch")]
     public async Task MainCancel_FailedFreshReadKeepsInputAndNeverCallsCas(string failure)
     {
-        var fixture = CreateFixture(mainScope: new ClayDraftEditorScopeState(21, true, false));
+        var fixture = CreateFixture(mainScope: new ClayDraftEditorScopeState(21, true));
         await using var context = fixture.Context;
         var dialogs = context.Render<MudDialogProvider>();
         var page = context.Render<EquipmentForm>();
@@ -113,49 +114,7 @@ public sealed partial class EquipmentFormTests
         Assert.Equal(0, fixture.Service.UpdateCalls);
     }
 
-    [Fact]
-    public async Task MainCancel_OperationInBrowserTransfersEvidenceBeforePhysicalClose()
-    {
-        var fixture = CreateFixture(mainScope: new ClayDraftEditorScopeState(21, true, true));
-        await using var context = fixture.Context;
-        var dialogs = context.Render<MudDialogProvider>();
-        var evidence = new ClayLegacyDraftOperationEvidence(Guid.NewGuid().ToString("N"), "equipment-save", "{}");
-        context.JSInterop.Setup<ClayLegacyDraftOperationEvidence>("clayDraftStore.readCloseOperationEvidence", _ => true)
-            .SetResult(evidence);
-        var page = context.Render<EquipmentForm>();
-        WaitForSn(page, "CLAY_TEST_7");
-        await page.InvokeAsync(() => FindSn(page).Input("CLAY_TEST_LOCAL"));
 
-        await ChooseMainCancelAsync(page, dialogs, CloseMainWithoutSaving);
-
-        Assert.Empty(context.JSInterop.Invocations[ReplaceMainScope]);
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.discard"]);
-        Assert.Equal(evidence, Assert.Single(fixture.Service.ImportedEquipmentEvidence));
-        Assert.Single(context.JSInterop.Invocations[CloseRam]);
-        Assert.Single(context.JSInterop.Invocations["clayModelEquipmentForm.close"]);
-        Assert.Equal(0, fixture.Service.UpdateCalls);
-    }
-
-    [Fact]
-    public async Task MainCancel_FailedEvidenceTransferKeepsRegistrationAndInput()
-    {
-        var fixture = CreateFixture(mainScope: new ClayDraftEditorScopeState(21, true, true));
-        await using var context = fixture.Context;
-        var dialogs = context.Render<MudDialogProvider>();
-        var page = context.Render<EquipmentForm>();
-        WaitForSn(page, "CLAY_TEST_7");
-        await page.InvokeAsync(() => FindSn(page).Input("CLAY_TEST_LOCAL"));
-        context.JSInterop.Setup<ClayLegacyDraftOperationEvidence>("clayDraftStore.readCloseOperationEvidence", _ => true)
-            .SetResult(new ClayLegacyDraftOperationEvidence(Guid.NewGuid().ToString("N"), "equipment-save", "{}"));
-        fixture.Service.LegacyEquipmentImportError = new UnauthorizedAccessException();
-
-        await ChooseMainCancelAsync(page, dialogs, CloseMainWithoutSaving);
-
-        WaitForSn(page, "CLAY_TEST_LOCAL");
-        Assert.Empty(context.JSInterop.Invocations[CloseRam]);
-        Assert.Empty(context.JSInterop.Invocations["clayModelEquipmentForm.close"]);
-        Assert.Equal(0, fixture.Service.UpdateCalls);
-    }
 
     [Fact]
     public async Task MainOk_RetriesFailedCleanupOnSameHandleWithoutSavingTwice()
@@ -187,7 +146,7 @@ public sealed partial class EquipmentFormTests
     [InlineData(false)]
     public async Task MainOk_LeavesNestedInputAfterSuccessfulSave(bool rawOnly)
     {
-        var closeState = new ClayDraftEditorCloseState(21, rawOnly, false,
+        var closeState = new ClayDraftEditorCloseState(21, rawOnly,
             rawOnly ? [] : ["child:EquipmentUpsDialog:2:root"]);
         var fixture = CreateFixture(closeState: closeState);
         await using var context = fixture.Context;
@@ -253,7 +212,7 @@ public sealed partial class EquipmentFormTests
     [Fact]
     public async Task MainCancel_TypedInputArrivingDuringFreshReadKeepsTheNewerValue()
     {
-        var fixture = CreateFixture(mainScope: new ClayDraftEditorScopeState(21, true, false));
+        var fixture = CreateFixture(mainScope: new ClayDraftEditorScopeState(21, true));
         await using var context = fixture.Context;
         var dialogs = context.Render<MudDialogProvider>();
         var page = context.Render<EquipmentForm>();

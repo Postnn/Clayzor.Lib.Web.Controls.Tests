@@ -85,9 +85,9 @@ public sealed class EquipmentAccountCasTests
 
     /// <summary>Даже текст ошибки провайдера не передаёт старый или новый пароль в диагностику.</summary>
     [Theory]
-    [InlineData(-2, true)]
-    [InlineData(50000, false)]
-    public async Task SensitiveSqlFailure_IsRedactedAndRollsBack(int number, bool unknown)
+    [InlineData(-2)]
+    [InlineData(50000)]
+    public async Task SensitiveSqlFailure_IsRedactedAndRollsBack(int number)
     {
         const string fakeOriginal = "fixture-original-password";
         const string fakeProposed = "fixture-proposed-password";
@@ -104,7 +104,6 @@ public sealed class EquipmentAccountCasTests
 
         var error = await Assert.ThrowsAsync<EquipmentAccountStorageException>(() => draft.UpdateAsync(db));
 
-        Assert.Equal(unknown, error.MayHaveWritten);
         Assert.True(error.WasDispatched);
         Assert.Null(error.InnerException);
         Assert.DoesNotContain(fakeOriginal, error.ToString());

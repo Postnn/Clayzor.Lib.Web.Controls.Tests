@@ -53,7 +53,6 @@ public sealed partial class EquipmentFormTests
                 Assert.Equal(10, draft.GetProperty("Original").GetProperty("BatteryTime").GetInt32());
             });
             saved = SerializeEquipmentDraft(page);
-            Assert.Empty(first.Context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
             await provider.InvokeAsync(() => innerReference.Close(DialogResult.Cancel()));
             await innerTask.WaitAsync(TimeSpan.FromSeconds(3));
             await provider.InvokeAsync(() => outerReference.Close(DialogResult.Cancel()));
@@ -135,7 +134,7 @@ public sealed partial class EquipmentFormTests
         fixture.Context.JSInterop.Setup<ClayDraftRawApplyResult>("clayDraftStore.applyPendingRaw", _ => true)
             .SetResult(new ClayDraftRawApplyResult([], pending ? ["data:ups-test.time:0"] : []));
         fixture.Context.JSInterop.Setup<ClayDraftEditorScopeState>("clayDraftStore.readEditorScope", _ => true)
-            .SetResult(new ClayDraftEditorScopeState(11, true, unknown));
+            .SetResult(new ClayDraftEditorScopeState(11, true));
         fixture.Context.JSInterop.Setup<bool>("clayDraftStore.replaceEditorScope", _ => true).SetResult(true);
     }
 }

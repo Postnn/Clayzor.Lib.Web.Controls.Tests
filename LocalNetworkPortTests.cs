@@ -9,39 +9,6 @@ namespace Clayzor.Lib.Web.Controls.Tests;
 /// <summary>Проверки чтения, валидации и атомарной записи порта локальной сети.</summary>
 public sealed class LocalNetworkPortTests
 {
-    /// <summary>Импорт связывает старую попытку с подтверждёнными портами, не меняя исход операции.</summary>
-    [Theory]
-    [InlineData(20, true)]
-    [InlineData(30, false)]
-    public async Task LegacyPortImportRequiresAuthorizedNeighbor(int target, bool valid)
-    {
-        DapperColumnMapper.Initialize();
-        var script = new ScriptedConnection(new Queue<ScriptEntry>([
-            Script.Rows(Script.Row(("КодСотрудника", 4))),
-            Script.Rows(Script.Row(("КодЛокальнойСети", 10))),
-            Script.Rows(Script.Row(("КодЛокальнойСети", 20))),
-            Script.Rows(),
-            Script.Rows(Script.Row(("Value", true))),
-            Script.Scalar(1),
-        ]), emulateEquipmentIdentity: false);
-        var connection = new EquipmentAccountTransactionConnection(script);
-        using var db = new DbManager("Server=fixture", new FakeSqlErrorHandler(), () => connection);
-        var attempt = Guid.NewGuid();
-
-        var import = () => LocalNetworkPort.ImportLegacyOperationsAsync(db, "fixture", 4, 10,
-            [(attempt, "net.save", target, null)], default);
-        if (valid) await import();
-        else await Assert.ThrowsAsync<InvalidOperationException>(import);
-
-        Assert.Equal(valid, script.CommandLog.Contains(SQLQueries.INSERT_ClayzorLegacyOperationEvidence));
-        if (valid)
-        {
-            Assert.Equal(SQLQueries.INSERT_ClayzorLegacyOperationScope, script.CommandLog[^1]);
-            Assert.Equal("net/20", script.ParameterLog[^1]["ConflictKey"]);
-            Assert.Equal(attempt, script.ParameterLog[^1]["AttemptId"]);
-        }
-        Assert.DoesNotContain(SQLQueries.UPDATE_ЛокальнаяСеть, script.CommandLog);
-    }
 
     /// <summary>Чтение сохраняет nullable-поля, исходный текст, автора и UTC-дату.</summary>
     [Fact]
@@ -102,9 +69,8 @@ public sealed class LocalNetworkPortTests
         draft.Description = "  note  ";
         draft.ReturnDate = returnDate;
 
-        var (connection, wrapper, db) = CreateSaveDb(draft, Script.Scalar(0));
-        var attemptId = Guid.NewGuid();
-        await LocalNetworkPort.SaveAsync(db, "DOMAIN\\user", 4, draft, draft.ChangedAtUtc, attemptId);
+        var (connection, db) = CreateSaveDb(draft, Script.Scalar(0));
+        await LocalNetworkPort.SaveAsync(db, "DOMAIN\\user", 4, draft, draft.ChangedAtUtc);
 
         var parameters = SaveParameters(connection);
         Assert.Equal("srv-a", parameters["Connected"]);
@@ -114,7 +80,6 @@ public sealed class LocalNetworkPortTests
         var sql = SaveSql(connection);
         Assert.Contains("СрокВозврата = @ReturnDate", sql);
         Assert.Contains("UPDLOCK, HOLDLOCK", sql);
-        Assert.Equal(InventoryOperationState.Confirmed, wrapper.StateFor(attemptId));
     }
 
     /// <summary>NULL из прямого вызова преобразуется в допустимые для NOT NULL колонок пустые строки.</summary>
@@ -125,8 +90,8 @@ public sealed class LocalNetworkPortTests
         draft.Connected = null!;
         draft.Description = null!;
 
-        var (connection, _, db) = CreateSaveDb(draft, Script.Scalar(0));
-        await LocalNetworkPort.SaveAsync(db, "DOMAIN\\user", 4, draft, draft.ChangedAtUtc, Guid.NewGuid());
+        var (connection, db) = CreateSaveDb(draft, Script.Scalar(0));
+        await LocalNetworkPort.SaveAsync(db, "DOMAIN\\user", 4, draft, draft.ChangedAtUtc);
 
         var parameters = SaveParameters(connection);
         Assert.Equal(string.Empty, parameters["Connected"]);
@@ -150,10 +115,9 @@ public sealed class LocalNetworkPortTests
     {
         var draft = Draft();
         var targetVersion = draft.ChangedAtUtc.AddHours(2);
-        var (connection, wrapper, db) = CreateSaveDb(draft, Script.Scalar(0), targetVersion);
-        var attemptId = Guid.NewGuid();
+        var (connection, db) = CreateSaveDb(draft, Script.Scalar(0), targetVersion);
 
-        await LocalNetworkPort.SaveAsync(db, "DOMAIN\\user", 4, draft, draft.ChangedAtUtc, attemptId, switchToId: 11);
+        await LocalNetworkPort.SaveAsync(db, "DOMAIN\\user", 4, draft, draft.ChangedAtUtc, switchToId: 11);
 
         var sql = SaveSql(connection);
         Assert.Contains("Подключено = ''", sql);
@@ -164,7 +128,6 @@ public sealed class LocalNetworkPortTests
         Assert.Contains("fn_ЛокальнаяСеть_СоседниеПорты(@Id)", sql);
         Assert.Equal(11, SaveParameters(connection)["TargetId"]);
         Assert.Equal(targetVersion, SaveParameters(connection)["ExpectedTargetChangedAt"]);
-        Assert.Equal(["net/11"], wrapper.ScopesFor(attemptId));
     }
 
     /// <summary>Обмен выполняет три UPDATE в legacy-порядке и не меняет сроки возврата.</summary>
@@ -172,9 +135,9 @@ public sealed class LocalNetworkPortTests
     public async Task Save_Exchange_UsesThreeUpdatesWithoutReturnDate()
     {
         var draft = Draft();
-        var (connection, _, db) = CreateSaveDb(draft, Script.Scalar(0), draft.ChangedAtUtc.AddHours(2));
+        var (connection, db) = CreateSaveDb(draft, Script.Scalar(0), draft.ChangedAtUtc.AddHours(2));
 
-        await LocalNetworkPort.SaveAsync(db, "DOMAIN\\user", 4, draft, draft.ChangedAtUtc, Guid.NewGuid(), exchangeWithId: 11);
+        await LocalNetworkPort.SaveAsync(db, "DOMAIN\\user", 4, draft, draft.ChangedAtUtc, exchangeWithId: 11);
 
         var sql = SaveSql(connection);
         Assert.Equal(3, sql.Split("UPDATE vwЛокальнаяСеть").Length - 1);
@@ -189,9 +152,9 @@ public sealed class LocalNetworkPortTests
     {
         var connection = new ScriptedConnection(new Queue<ScriptEntry>());
         await Assert.ThrowsAsync<LocalNetworkPortRejectedException>(() => LocalNetworkPort.SaveAsync(
-            CreateDb(connection), "DOMAIN\\user", 4, Draft(), DateTime.UtcNow, Guid.NewGuid(), 11, 12));
+            CreateDb(connection), "DOMAIN\\user", 4, Draft(), DateTime.UtcNow, 11, 12));
         await Assert.ThrowsAsync<LocalNetworkPortRejectedException>(() => LocalNetworkPort.SaveAsync(
-            CreateDb(connection), "DOMAIN\\user", 4, Draft(), DateTime.UtcNow, Guid.NewGuid(), switchToId: 10));
+            CreateDb(connection), "DOMAIN\\user", 4, Draft(), DateTime.UtcNow, switchToId: 10));
         Assert.Empty(connection.CommandLog);
     }
 
@@ -203,12 +166,10 @@ public sealed class LocalNetworkPortTests
     public async Task Save_Status_FailsWithoutSuccess(int status, string message)
     {
         var draft = Draft();
-        var (_, wrapper, db) = CreateSaveDb(draft, Script.Scalar(status));
-        var attemptId = Guid.NewGuid();
+        var (_, db) = CreateSaveDb(draft, Script.Scalar(status));
         var ex = await Assert.ThrowsAsync<LocalNetworkPortRejectedException>(() =>
-            LocalNetworkPort.SaveAsync(db, "DOMAIN\\user", 4, draft, draft.ChangedAtUtc, attemptId));
+            LocalNetworkPort.SaveAsync(db, "DOMAIN\\user", 4, draft, draft.ChangedAtUtc));
         Assert.Contains(message, ex.Message);
-        Assert.Equal(InventoryOperationState.Rejected, wrapper.StateFor(attemptId));
     }
 
     /// <summary>Connectivity, no-row и неизвестный статус не становятся успешной записью.</summary>
@@ -220,11 +181,9 @@ public sealed class LocalNetworkPortTests
     {
         var entry = status is int value ? Script.Scalar(value) : new ScriptEntry();
         var draft = Draft();
-        var (_, wrapper, db) = CreateSaveDb(draft, entry);
-        var attemptId = Guid.NewGuid();
+        var (_, db) = CreateSaveDb(draft, entry);
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            LocalNetworkPort.SaveAsync(db, "DOMAIN\\user", 4, draft, draft.ChangedAtUtc, attemptId));
-        Assert.Equal(InventoryOperationState.Reserved, wrapper.StateFor(attemptId));
+            LocalNetworkPort.SaveAsync(db, "DOMAIN\\user", 4, draft, draft.ChangedAtUtc));
     }
 
     /// <summary>Ошибка соединения записи пробрасывается.</summary>
@@ -232,31 +191,11 @@ public sealed class LocalNetworkPortTests
     public async Task Save_Connectivity_Throws()
     {
         var draft = Draft();
-        var (_, wrapper, db) = CreateSaveDb(draft, Script.Error(SqlExceptionFactory.Create(53, "connection error")));
-        var attemptId = Guid.NewGuid();
+        var (_, db) = CreateSaveDb(draft, Script.Error(SqlExceptionFactory.Create(53, "connection error")));
         await Assert.ThrowsAsync<SqlException>(() =>
-            LocalNetworkPort.SaveAsync(db, "DOMAIN\\user", 4, draft, draft.ChangedAtUtc, attemptId));
-        Assert.Equal(InventoryOperationState.Reserved, wrapper.StateFor(attemptId));
+            LocalNetworkPort.SaveAsync(db, "DOMAIN\\user", 4, draft, draft.ChangedAtUtc));
     }
 
-    /// <summary>Неизвестный исход переключения сохраняет конфликтующий слот обоих портов.</summary>
-    [Fact]
-    public async Task Save_MoveWithLostOutcomeBlocksBothPorts()
-    {
-        var draft = Draft();
-        var (connection, wrapper, db) = CreateSaveDb(draft,
-            Script.Error(SqlExceptionFactory.Create(53, "connection error")), draft.ChangedAtUtc.AddHours(1));
-        var attemptId = Guid.NewGuid();
-
-        await Assert.ThrowsAsync<SqlException>(() => LocalNetworkPort.SaveAsync(
-            db, "DOMAIN\\user", 4, draft, draft.ChangedAtUtc, attemptId, switchToId: 11));
-
-        Assert.Equal(InventoryOperationState.Reserved, wrapper.StateFor(attemptId));
-        Assert.True(await LocalNetworkPort.ReadWritePendingAsync(db, 10, default));
-        Assert.True(await LocalNetworkPort.ReadWritePendingAsync(db, 11, default));
-        Assert.False(await LocalNetworkPort.ReadWritePendingAsync(db, 12, default));
-        Assert.Single(connection.CommandLog, sql => sql.Contains("UPDATE vwЛокальнаяСеть", StringComparison.Ordinal));
-    }
 
     /// <summary>Текущий сотрудник требует совпадение Windows/SQL principal.</summary>
     [Fact]
@@ -310,7 +249,7 @@ public sealed class LocalNetworkPortTests
     private static DbManager CreateDb(ScriptedConnection connection) =>
         new("Server=test", new FakeSqlErrorHandler(), () => connection);
 
-    private static (ScriptedConnection Connection, NetFormTests.NetJournalConnection Wrapper, DbManager Db) CreateSaveDb(
+    private static (ScriptedConnection Connection, DbManager Db) CreateSaveDb(
         LocalNetworkPort draft, ScriptEntry result, DateTime? targetVersion = null)
     {
         DapperColumnMapper.Initialize();
@@ -321,9 +260,8 @@ public sealed class LocalNetworkPortTests
             entries.Enqueue(Script.Rows(Script.Row(("КодЛокальнойСети", 11), ("Изменено", target))));
         entries.Enqueue(employee);
         entries.Enqueue(result);
-        var connection = new ScriptedConnection(entries, emulateEquipmentIdentity: false);
-        var wrapper = new NetFormTests.NetJournalConnection(connection);
-        return (connection, wrapper, new DbManager("Server=test", new FakeSqlErrorHandler(), () => wrapper));
+        var connection = new ScriptedConnection(entries, emulateEquipmentIdentity: false) { AllowTransactions = true };
+        return (connection, CreateDb(connection));
     }
 
     private static Dictionary<string, object?> SaveParameters(ScriptedConnection connection) =>

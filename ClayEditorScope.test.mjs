@@ -156,58 +156,6 @@ function createBrowser(formKey = 'territory') {
     };
 }
 
-test('raw capture excludes password inputs and known sensitive keys shown as text', async () => {
-    const browser = createBrowser('equipment-form');
-    const { store } = browser;
-    browser.setType('secondary', 'password');
-    browser.setDraftKey('child', 'sim.puk');
-    const { registrationId: id } = await browser.open();
-    browser.input('secondary', 'synthetic password');
-    browser.input('child', 'synthetic code');
-    browser.input('main', 'ordinary text');
-    const attempt = JSON.parse(await store.beginOperationIntent(id, JSON.stringify({
-        version: 1, kind: 'fixture', data: '{}', acceptedScopes: ['main', 'child'],
-    })));
-    assert.deepEqual(Object.keys(attempt.scopes[0].rawRevisions), ['data:main.name:0']);
-    assert.deepEqual(Object.keys(attempt.scopes[1].rawRevisions), []);
-});
-
-test('restoring an owned historical snapshot scrubs secrets but keeps Unknown and ordinary raw', async () => {
-    const browser = createBrowser('equipment-form');
-    const { store } = browser;
-    const { registrationId: id } = await browser.open();
-    browser.input('main', 'ordinary typed input');
-    browser.input('child', 'ordinary child input');
-    await store.saveTypedScope(id, 'child', 'retained sibling scope');
-    const attempt = JSON.parse(await store.beginOperationIntent(id, JSON.stringify({
-        version: 1, kind: 'fixture', data: '{}', acceptedScopes: ['main'],
-    })));
-    await store.unknownOperation(id, attempt.revision);
-    await store.unregister(id);
-    browser.setType('secondary', 'password');
-    browser.mountValue('secondary', 'fresh authorized input');
-    browser.inspectNextSnapshot(state => {
-        state.raw['data:account.password:0'] = { kind: 'value', value: 'synthetic password' };
-        state.raw['data:sim.puk:1'] = { kind: 'value', scope: 'child', value: 'synthetic code' };
-        state.raw['data:main.secondary:0'] = { kind: 'value', scope: 'main', value: 'synthetic value' };
-    });
-    const restored = await browser.open();
-    const marker = JSON.parse(restored.operation);
-    assert.equal(marker.status, 'unknown');
-    assert.equal(marker.revision, attempt.revision);
-    assert.equal(restored.typedScopes.child, 'retained sibling scope');
-    const result = await store.applyRaw(restored.registrationId);
-    assert.deepEqual([...result.applied], ['data:main.name:0', 'data:child.name:0']);
-    assert.deepEqual([...result.pending], []);
-    assert.equal(browser.displayedValue('main'), 'ordinary typed input');
-    assert.equal(browser.displayedValue('child'), 'ordinary child input');
-    assert.equal(browser.displayedValue('secondary'), 'fresh authorized input');
-
-    await store.unregister(restored.registrationId);
-    browser.inspectNextSnapshot(state => assert.deepEqual(Object.keys(state.raw), ['data:main.name:0', 'data:child.name:0']));
-    await browser.open();
-});
-
 test('reconnect blocks a full reload after IndexedDB has persisted unsaved fields', async () => {
     const browser = createBrowser();
     const { registrationId } = await browser.open();
@@ -312,84 +260,6 @@ test('storage failure preserves current raw and typed values; accepted close has
     assert.ok(closed.cancelledScopes.includes('main'));
 });
 
-test('unresolved operation survives scoped cancel and an old revision cannot reset newer input', async () => {
-    const browser = createBrowser();
-    const { store } = browser;
-    const { registrationId: id } = await browser.open();
-    await store.saveTypedScope(id, 'main', 'local');
-    const old = await store.readEditorScope(id, 'main');
-    await store.saveTypedScope(id, 'main', 'newer');
-    assert.equal(await store.replaceEditorScope(id, 'main', old.revision, 'fresh'), false);
-    await store.beginOperation(id, '{}');
-    const pending = await store.readEditorScope(id, 'main');
-    assert.equal(pending.hasOperation, true);
-    assert.equal(await store.replaceEditorScope(id, 'main', pending.revision, null), false);
-    await store.unregister(id);
-    const reopened = await browser.open();
-    assert.equal(reopened.typedScopes.main, 'newer');
-    assert.ok(reopened.operation);
-});
-test('durable confirmed receipt survives failed cleanup and prevents downgrade', async () => {
-    const browser = createBrowser();
-    const { store } = browser;
-    const { registrationId: id } = await browser.open();
-    await store.saveTypedScope(id, 'main', 'submitted');
-    await store.saveTypedScope(id, 'child', 'unrelated');
-    const attempt = JSON.parse(await store.beginOperationIntent(id, JSON.stringify({
-        version: 1, attemptId: 'attempt-1', kind: 'test', data: 'submitted', acceptedScopes: ['main'],
-    })));
-    await store.recordConfirmedOperation(id, attempt.revision);
-    await assert.rejects(store.unknownOperation(id, attempt.revision));
-    await assert.rejects(store.rejectOperation(id, attempt.revision));
-    await store.saveTypedScope(id, 'main', 'newer after dispatch');
-
-    browser.writeHook(() => { throw new Error('cleanup unavailable'); });
-    await assert.rejects(store.commitOperation(id, attempt.revision), /cleanup unavailable/);
-    await assert.rejects(store.unregister(id));
-
-    const restored = await browser.open();
-    const receipt = JSON.parse(restored.operation);
-    assert.equal(receipt.attemptId, attempt.attemptId);
-    assert.equal(receipt.revision, attempt.revision);
-    assert.equal(receipt.status, 'confirmed');
-    await store.recordConfirmedOperation(restored.registrationId, receipt.revision);
-    await store.commitOperation(restored.registrationId, receipt.revision);
-    await store.unregister(restored.registrationId);
-    const final = await browser.open();
-    assert.equal(final.operation, null);
-    assert.equal(final.typedScopes.main, 'newer after dispatch');
-    assert.equal(final.typedScopes.child, 'unrelated');
-});
-
-test('finds the same user and entity after losing the pointer without taking an active tab', async () => {
-    const browser = createBrowser();
-    const { store } = browser;
-    const first = await browser.open();
-    await store.saveTypedScope(first.registrationId, 'main', 'existing local');
-    const prior = await store.beginOperation(first.registrationId, '{}');
-    await store.recordConfirmedOperation(first.registrationId, prior);
-    browser.forgetPointer();
-
-    const empty = await browser.open();
-    const candidates = await store.listRecoveryCandidates(empty.registrationId);
-    assert.equal(candidates.length, 1);
-    assert.equal(candidates[0].hasOperation, true);
-    assert.equal(await store.recoverListedDraft(empty.registrationId, candidates[0].draftId), null);
-
-    const otherEntity = await browser.open('5');
-    const otherUser = await browser.open('4', 'different employee');
-    assert.equal((await store.listRecoveryCandidates(otherEntity.registrationId)).length, 0);
-    assert.equal((await store.listRecoveryCandidates(otherUser.registrationId)).length, 0);
-
-    await store.unregister(first.registrationId);
-    const restored = await store.recoverListedDraft(empty.registrationId, candidates[0].draftId);
-    assert.equal(restored.registrationId, empty.registrationId);
-    assert.equal(restored.typedScopes.main, 'existing local');
-    assert.equal(JSON.parse(restored.operation).status, 'confirmed');
-    assert.equal((await store.recoverListedDraft(empty.registrationId, candidates[0].draftId)).typedScopes.main,
-        'existing local');
-});
-
 test('recovery cannot merge or overwrite input already made in the new registration', async () => {
     const browser = createBrowser();
     const { store } = browser;
@@ -406,56 +276,6 @@ test('recovery cannot merge or overwrite input already made in the new registrat
     const current = await browser.open();
     assert.equal(current.typedScopes.main, 'new independent draft');
     assert.equal((await store.listRecoveryCandidates(current.registrationId)).length, 1);
-});
-
-test('healthy storage rejects an accepted unrestored scope and preserves it during an unrelated commit', async () => {
-    const browser = createBrowser();
-    const { store } = browser;
-    const first = await browser.open();
-    browser.input('main', 'unrestored last character!');
-    await store.unregister(first.registrationId);
-    browser.mountValue('main', 'rendered default');
-
-    const { registrationId: id } = await browser.open();
-    assert.equal((await store.getHealth(id)).healthy, true);
-    assert.ok((await store.getRestoreReadiness(id)).pendingScopes.includes('main'));
-    const createIntent = scope => JSON.stringify({
-        version: 1, kind: 'fixture', data: '{}', acceptedScopes: [scope],
-    });
-
-    await assert.rejects(store.beginOperationIntent(id, createIntent('main')), /восстановите/);
-    assert.equal((await store.getHealth(id)).hasOperation, false);
-    const child = JSON.parse(await store.beginOperationIntent(id, createIntent('child')));
-    await store.recordConfirmedOperation(id, child.revision);
-    await store.commitOperation(id, child.revision);
-    assert.ok((await store.getRestoreReadiness(id)).pendingScopes.includes('main'));
-    const restored = await store.applyRaw(id, 'main');
-    assert.equal(restored.pending.length, 0);
-    assert.equal(browser.displayedValue('main'), 'unrestored last character!');
-});
-
-test('failed deletion after accepted cleanup leaves a clean classification on re-registration', async () => {
-    const browser = createBrowser();
-    const { store } = browser;
-    const first = await browser.open();
-    await store.saveTypedScope(first.registrationId, 'main', 'submitted');
-    const attempt = JSON.parse(await store.beginOperationIntent(first.registrationId, JSON.stringify({
-        version: 1, kind: 'fixture', data: '{}', acceptedScopes: ['main', 'child'],
-    })));
-    await store.recordConfirmedOperation(first.registrationId, attempt.revision);
-    browser.rejectDeletes(true);
-    await assert.rejects(store.commitOperation(first.registrationId, attempt.revision), /delete refused/);
-    await store.unregister(first.registrationId);
-
-    const reopened = await browser.open();
-    assert.equal(reopened.hasDraft, false);
-    assert.equal(reopened.operation, null);
-    assert.equal(Object.keys(reopened.typedScopes).length, 0);
-    browser.rejectDeletes(false);
-    await store.unregister(reopened.registrationId);
-    const clean = await browser.open();
-    assert.equal(clean.hasDraft, false);
-    assert.equal((await store.getHealth(clean.registrationId)).healthy, true);
 });
 
 test('nested reset replaces the parent snapshot and only the selected scope in one revision', async () => {
@@ -648,28 +468,3 @@ test('pending silent retry recovers textarea text without dispatching it as inpu
     await store.unregister(reopened.registrationId);
 });
 
-test('exclusive confirmation blocks a competing tab and an orphaned operation in the same scope', async () => {
-    const browser = createBrowser();
-    const { store } = browser;
-    const first = await browser.open();
-    browser.forgetPointer();
-    const second = await browser.open();
-    const start = registrationId => store.beginOperationIntent(registrationId, JSON.stringify({
-        version: 1, kind: 'equipment.create', data: '{}', acceptedScopes: ['main'], blockOtherDraftOperations: true,
-    }));
-    const attempts = await Promise.allSettled([start(first.registrationId), start(second.registrationId)]);
-    assert.equal(attempts.filter(attempt => attempt.status === 'fulfilled').length, 1);
-    const winner = attempts[0].status === 'fulfilled' ? first : second;
-    const other = winner === first ? second : first;
-    const accepted = JSON.parse(attempts.find(attempt => attempt.status === 'fulfilled').value);
-    await store.unknownOperation(winner.registrationId, accepted.revision);
-    await store.unregister(winner.registrationId);
-    await assert.rejects(start(other.registrationId), /В другом черновике/);
-    assert.equal((await store.getHealth(other.registrationId)).hasOperation, false);
-
-    const separate = await browser.open('different-source');
-    const independent = JSON.parse(await start(separate.registrationId));
-    assert.equal(independent.status, 'running');
-    await store.unregister(other.registrationId);
-    await store.unregister(separate.registrationId);
-});

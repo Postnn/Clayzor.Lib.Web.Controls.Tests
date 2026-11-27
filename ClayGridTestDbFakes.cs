@@ -232,7 +232,19 @@ internal sealed class ScriptedConnection : DbConnection
     public override Task OpenAsync(CancellationToken ct) { Open(); return Task.CompletedTask; }
     public override void Close() => _state = ConnectionState.Closed;
     protected override DbCommand CreateDbCommand() => new ScriptedCommand(this, CommandLog);
-    protected override DbTransaction BeginDbTransaction(IsolationLevel il) => throw new NotSupportedException();
+    internal bool AllowTransactions { get; init; }
+    internal int CommittedTransactions { get; private set; }
+
+    protected override DbTransaction BeginDbTransaction(IsolationLevel il) =>
+        AllowTransactions ? new ScriptedTransaction(this, il) : throw new NotSupportedException();
+
+    private sealed class ScriptedTransaction(ScriptedConnection owner, IsolationLevel isolation) : DbTransaction
+    {
+        public override IsolationLevel IsolationLevel => isolation;
+        protected override DbConnection DbConnection => owner;
+        public override void Commit() => owner.CommittedTransactions++;
+        public override void Rollback() { }
+    }
     public override void ChangeDatabase(string name) => throw new NotSupportedException();
     protected override void Dispose(bool disposing) { _state = ConnectionState.Closed; }
 

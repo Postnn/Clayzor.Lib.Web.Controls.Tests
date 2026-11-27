@@ -80,7 +80,6 @@ public sealed partial class EquipmentFormTests
             await opening.WaitAsync(TimeSpan.FromSeconds(4));
         }
         Assert.Equal(scenario is "close" or "continue" ? 0 : 1, fixture.Service.SoftwareResetReads);
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.discardScope"]);
     }
 }

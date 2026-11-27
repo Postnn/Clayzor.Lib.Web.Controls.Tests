@@ -54,7 +54,7 @@ public sealed class PhoneCodeEntityTests
         using var connection = new ScriptedConnection(new Queue<ScriptEntry>());
         using var db = new DbManager("Server=test", null, () => connection);
         await Assert.ThrowsAsync<TerritorialEntityRuleException>(() => TerritorialEntityData.SavePhoneAsync(db, "DOMAIN\\Test",
-            4, Guid.NewGuid(), new PhoneCodeEntityRecord { Code = "001" }, new PhoneCodeEntityRecord { Code = "1" }));
+            4, new PhoneCodeEntityRecord { Code = "001" }, new PhoneCodeEntityRecord { Code = "1" }));
         Assert.Empty(connection.CommandLog);
     }
 }

@@ -28,7 +28,7 @@ public sealed class DraftFieldResolutionProposalTests
         var local = original with { Title = "local title", Note = "local note", Version = 9 };
         var fresh = original with { Title = "server title", Category = "server category", Version = 11 };
         context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.register", _ => true)
-            .SetResult(new ClayDraftRestore("conflict-test", true, 3, null, null,
+            .SetResult(new ClayDraftRestore("conflict-test", true, 3, null,
                 new Dictionary<string, string> { ["main"] = JsonSerializer.Serialize(new { Original = original, Current = local }) }));
         context.JSInterop.Setup<ClayDraftRawApplyResult>("clayDraftStore.applyRaw", _ => true)
             .SetResult(new ClayDraftRawApplyResult([], []));
@@ -74,7 +74,6 @@ public sealed class DraftFieldResolutionProposalTests
         Assert.Equal(fresh, normalized.RootElement.GetProperty("Original").Deserialize<FormState>());
         Assert.Equal(merged, normalized.RootElement.GetProperty("Current").Deserialize<FormState>());
         Assert.Equal(new[] { "data:test.title:0" }, Assert.IsAssignableFrom<IReadOnlyList<string>>(rebase.Arguments[4]));
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
     }
 
     public sealed class ConflictCard : TerritorialEntityCardBase<FormState>

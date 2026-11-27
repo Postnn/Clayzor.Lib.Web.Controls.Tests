@@ -46,7 +46,7 @@ public sealed class Eq10DomainPhaseCalendarTests
         var error = await Assert.ThrowsAsync<EquipmentOperationException>(() =>
             service.SaveWithPhonesAsync(Equipment(), [], [Link(1, 8)]));
 
-        Assert.Equal(EquipmentWritePhase.NotSent, error.Phase);
+        Assert.Equal(EquipmentWritePhase.Rejected, error.Phase);
         AssertNoDml(connection);
     }
 
@@ -61,7 +61,7 @@ public sealed class Eq10DomainPhaseCalendarTests
         var error = await Assert.ThrowsAsync<EquipmentOperationException>(() =>
             service.SaveWithPhonesAsync(Equipment(), [], [Link(1, 8)]));
 
-        Assert.Equal(EquipmentWritePhase.Unknown, error.Phase);
+        Assert.Equal(EquipmentWritePhase.Rejected, error.Phase);
         Assert.Single(connection.CommandLog, sql => sql.Contains("UPDATE vwОборудование", StringComparison.Ordinal));
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.SynchronizePhoneOperationsAsync(
             7, [], [Link(1, 8)]));
@@ -79,7 +79,7 @@ public sealed class Eq10DomainPhaseCalendarTests
         var error = await Assert.ThrowsAsync<EquipmentOperationException>(() =>
             service.SaveComputerPhasedAsync(new EquipmentComputerSnapshot { EquipmentId = 7 }, DateTime.Today));
 
-        Assert.Equal(EquipmentWritePhase.NotSent, error.Phase);
+        Assert.Equal(EquipmentWritePhase.Rejected, error.Phase);
         AssertNoDml(connection);
     }
 

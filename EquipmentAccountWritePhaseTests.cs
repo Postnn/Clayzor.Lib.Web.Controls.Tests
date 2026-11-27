@@ -25,7 +25,7 @@ public sealed class EquipmentAccountWritePhaseTests
 
         var error = await Assert.ThrowsAsync<EquipmentOperationException>(() => ExecuteAsync(service, command));
 
-        Assert.Equal(EquipmentWritePhase.NotSent, error.Phase);
+        Assert.Equal(EquipmentWritePhase.Rejected, error.Phase);
         Assert.Same(timeout, error.InnerException);
         Assert.Contains("Команда не отправлена", error.Message);
         Assert.Equal(successfulChecks + 1, connection.CommandLog.Count);
@@ -57,7 +57,7 @@ public sealed class EquipmentAccountWritePhaseTests
 
         var error = await Assert.ThrowsAsync<EquipmentOperationException>(() => ExecuteAsync(service, command));
 
-        Assert.Equal(EquipmentWritePhase.Unknown, error.Phase);
+        Assert.Equal(EquipmentWritePhase.Rejected, error.Phase);
         Assert.DoesNotContain("fixture write timeout", error.ToString());
         Assert.Equal(command == "add" ? 4 : 5, connection.CommandLog.Count);
         Assert.Contains(sqlVerb + " ОборудованиеУчётныеЗаписи", connection.CommandLog[^1]);

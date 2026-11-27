@@ -61,11 +61,7 @@ public sealed class TerritorialCardRawRetryTests
         await using var context = Create(pendingMain: false);
         var page = context.Render<Card>();
         page.WaitForAssertion(() => Assert.Equal("ready", page.Find("output").GetAttribute("data-state")));
-        context.JSInterop.Setup<string>("clayDraftStore.beginOperationIntent", _ => true)
-            .SetException(new JSException("fixture stops before dispatch"));
-        await page.InvokeAsync(page.Instance.SaveAsync);
-
-        Assert.Single(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
+        Assert.True(await page.InvokeAsync(page.Instance.SaveAsync));
     }
 
     private static BunitContext Create(bool pendingMain, int retryActor = 4)
@@ -83,14 +79,14 @@ public sealed class TerritorialCardRawRetryTests
         context.Services.AddSingleton<ClayDraftService>();
         context.Services.AddMudServices();
         context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.register", _ => true)
-            .SetResult(new ClayDraftRestore("card", true, 3, null, null,
+            .SetResult(new ClayDraftRestore("card", true, 3, null,
                 new Dictionary<string, string> { ["main"] = """{"Original":{"Value":"base"},"Current":{"Value":"restored"}}""" }));
         context.JSInterop.Setup<ClayDraftRawApplyResult>("clayDraftStore.applyRaw", _ => true)
             .SetResult(new ClayDraftRawApplyResult([], pendingMain ? ["data:fixture.note:0"] : []));
         context.JSInterop.Setup<ClayDraftRestoreReadiness>("clayDraftStore.getRestoreReadiness", _ => true)
             .SetResult(new ClayDraftRestoreReadiness(false, pendingMain ? ["main"] : ["unrelated-editor"], []));
         context.JSInterop.Setup<ClayDraftStorageHealth>("clayDraftStore.getHealth", _ => true)
-            .SetResult(new ClayDraftStorageHealth(true, 0, null, false, 3, 3));
+            .SetResult(new ClayDraftStorageHealth(true, 0, null, 3, 3));
         return context;
     }
 
@@ -105,7 +101,7 @@ public sealed class TerritorialCardRawRetryTests
 
         internal Task EditAsync() => UpdateDraftAsync(new("newer"));
         internal Task RetryAsync() => RefreshAsync();
-        internal Task<bool> SaveAsync() => ExecuteWriteAsync("test-card.write", _ => throw new InvalidOperationException("No write expected"));
+        internal Task<bool> SaveAsync() => ExecuteWriteAsync("test-card.write", _ => Task.CompletedTask);
 
         protected override void BuildRenderTree(RenderTreeBuilder builder)
         {

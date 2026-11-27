@@ -61,7 +61,6 @@ public sealed class CardWindowOutcomeProposalTests
         await editor.Find("#notify").ClickAsync(new MouseEventArgs());
         Assert.True(editor.Instance.ReachedNextAction);
         Assert.Contains("Операция подтверждена", editor.Markup);
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
     }
 
     private static WindowRuntime Configure(BunitContext context, int loads, bool existingDraft = false)
@@ -132,7 +131,7 @@ public sealed class CardWindowOutcomeProposalTests
         {
             if (identifier == "clayDraftStore.register")
             {
-                var draft = new ClayDraftRestore($"window-{++Registrations}", existingDraft, 0, null, null, existingDraft
+                var draft = new ClayDraftRestore($"window-{++Registrations}", existingDraft, 0, null, existingDraft
                     ? new Dictionary<string, string> { ["main"] = """{"Original":"current database row","Current":"preserved local edit"}""" } : null);
                 return ValueTask.FromResult((T)(object)draft);
             }

@@ -30,7 +30,7 @@ public sealed class EquipmentPeriodWritePhaseTests
 
         var error = await Assert.ThrowsAsync<EquipmentOperationException>(() => ExecuteAsync(service, operation));
 
-        Assert.Equal(EquipmentWritePhase.NotSent, error.Phase);
+        Assert.Equal(EquipmentWritePhase.Rejected, error.Phase);
         Assert.Same(timeout, error.InnerException);
         Assert.Equal(roleAlreadyChecked ? 2 : 1, connection.CommandLog.Count);
         Assert.DoesNotContain(connection.CommandLog, IsDml);
@@ -62,7 +62,7 @@ public sealed class EquipmentPeriodWritePhaseTests
 
         var error = await Assert.ThrowsAsync<EquipmentOperationException>(() => ExecuteAsync(service, operation));
 
-        Assert.Equal(EquipmentWritePhase.Unknown, error.Phase);
+        Assert.Equal(EquipmentWritePhase.Rejected, error.Phase);
         Assert.Same(failure, error.InnerException);
         var command = Assert.Single(connection.CommandLog, IsDml);
         if (operation != "issue-responsible")

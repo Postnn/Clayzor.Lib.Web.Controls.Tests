@@ -108,6 +108,5 @@ public sealed partial class EquipmentFormTests
         Assert.False(result.CanClose);
         Assert.Contains("исходные строки UPS", result.Message);
         Assert.Null(fixture.Service.LastUpsCurrentTests);
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
     }
 }

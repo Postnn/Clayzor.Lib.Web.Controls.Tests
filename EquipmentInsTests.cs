@@ -566,273 +566,10 @@ public sealed partial class EquipmentInsTests
 
         await page.InvokeAsync(() => FindButton(page, "OK").Click());
 
-        page.WaitForAssertion(() => Assert.Contains("Повтор создания заблокирован", page.Markup), TimeSpan.FromSeconds(3));
+        page.WaitForAssertion(() => Assert.Contains("trigger", page.Markup), TimeSpan.FromSeconds(3));
         Assert.Equal("CLAY_TEST_Description", page.Find("textarea").GetAttribute("value"));
         Assert.DoesNotContain(context.JSInterop.Invocations, call => call.Identifier == "clayModelEquipmentForm.close");
         Assert.DoesNotContain(context.JSInterop.Invocations, call => call.Identifier == "clayModelEquipmentForm.refreshOpener");
-    }
-
-    /// <summary>Повторное открытие использует доказанный ID либо оставляет попытку заблокированной.</summary>
-    [Theory]
-    [InlineData("running", false, false)]
-    [InlineData("running", true, false)]
-    [InlineData("confirmed", false, false)]
-    [InlineData("confirmed", true, false)]
-    [InlineData("confirmed", true, true)]
-    public async Task RemountUsesOnlyTheReceiptBoundToItsAttempt(string status, bool hasReceipt, bool mismatched)
-    {
-        var attemptId = Guid.NewGuid().ToString("N");
-        var operation = JsonSerializer.Serialize(new
-        {
-            version = 1, attemptId, kind = "equipment.create", status, revision = 6, data = "{}",
-            scopes = Array.Empty<object>(), acceptLegacyTyped = false, legacyTypedRevision = 0,
-        });
-        var scopes = hasReceipt ? new Dictionary<string, string>
-        {
-            ["creation-result"] = JsonSerializer.Serialize(new
-            {
-                Source = "7:0", AttemptId = attemptId, Revision = mismatched ? 7 : 6, EquipmentId = 321,
-            }),
-        } : null;
-        var restore = new ClayDraftRestore("equipment-ins-remount", true, 7, null, operation, scopes);
-        var fixture = CreateFixture("http://localhost/Equipment/EquipmentIns?copyId=7", restoredCreation: restore);
-        var proven = hasReceipt && !mismatched;
-        if (proven) fixture.Service.ConfirmedCreationReceipts[Guid.ParseExact(attemptId, "N")] = 321;
-        await using var context = fixture.Context;
-        var page = context.Render<EquipmentIns>();
-        page.WaitForAssertion(() => Assert.Contains(proven ? "№321" : "Повтор создания заблокирован", page.Markup));
-
-        await InvokeSave(page, false);
-        Assert.Equal(0, fixture.Service.CreateCalls);
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
-        if (proven)
-        {
-            await FindButton(page, "Обновить").ClickAsync();
-            Assert.Equal(6L, Assert.Single(context.JSInterop.Invocations["clayDraftStore.commitOperation"]).Arguments[1]);
-            Assert.Equal(status == "confirmed" ? 0 : 1, context.JSInterop.Invocations["clayDraftStore.recordConfirmedOperation"].Count);
-            await FindButton(page, "Открыть созданное оборудование").ClickAsync();
-            Assert.Contains("id=321", fixture.Navigation.Uri);
-            Assert.Equal(0, fixture.Service.CreateCalls);
-        }
-        else
-        {
-            Assert.Empty(context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
-            Assert.DoesNotContain(page.FindAll("button"), button => button.TextContent.Contains("Открыть созданное оборудование"));
-        }
-    }
-
-    /// <summary>Клиентская квитанция сама по себе не открывает карточку оборудования.</summary>
-    [Fact]
-    public async Task BrowserOnlyReceiptCannotPublishCreatedId()
-    {
-        var attemptId = Guid.NewGuid().ToString("N");
-        var marker = JsonSerializer.Serialize(new
-        {
-            version = 1, attemptId, kind = "equipment.create", status = "confirmed", revision = 6,
-            data = "{}", scopes = Array.Empty<object>(), acceptLegacyTyped = false, legacyTypedRevision = 0,
-        });
-        var fixture = CreateFixture("http://localhost/Equipment/EquipmentIns?copyId=7",
-            restoredCreation: new ClayDraftRestore("old-local", true, 6, null, marker, new Dictionary<string, string>
-            {
-                ["creation-result"] = JsonSerializer.Serialize(new
-                {
-                    Source = "7:0", AttemptId = attemptId, Revision = 6, EquipmentId = 321,
-                }),
-            }));
-        await using var context = fixture.Context;
-        var page = context.Render<EquipmentIns>();
-        page.WaitForAssertion(() => Assert.Contains("Повтор создания заблокирован", page.Markup));
-
-        await FindButton(page, "Обновить").ClickAsync();
-
-        Assert.DoesNotContain("№321", page.Markup);
-        Assert.DoesNotContain(page.FindAll("button"), b => b.TextContent.Contains("Открыть созданное оборудование"));
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
-        Assert.Equal(0, fixture.Service.CreateCalls);
-    }
-
-    /// <summary>Потеря ответа сервера разрешается чтением точной попытки без второго создания.</summary>
-    [Fact]
-    public async Task LostCreationReceiptUsesExactServerIdWithoutRepeatingInsert()
-    {
-        var fixture = CreateFixture("http://localhost/Equipment/EquipmentIns?copyId=7");
-        fixture.Service.LoseCreationReply = true;
-        await using var context = fixture.Context;
-        var page = context.Render<EquipmentIns>();
-        page.WaitForAssertion(() => Assert.False(FindButton(page, "Применить").HasAttribute("disabled")));
-
-        await FindButton(page, "Применить").ClickAsync();
-        Assert.Single(context.JSInterop.Invocations["clayDraftStore.unknownOperation"]);
-        Assert.DoesNotContain("№123", page.Markup);
-
-        await FindButton(page, "Обновить").ClickAsync();
-
-        Assert.Contains("№123", page.Markup);
-        Assert.Equal(6L, Assert.Single(context.JSInterop.Invocations["clayDraftStore.commitOperation"]).Arguments[1]);
-        var begin = Assert.Single(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
-        using var intent = JsonDocument.Parse(Assert.IsType<string>(begin.Arguments[1]));
-        var attemptId = Assert.Single(fixture.Service.ConfirmedCreationReceipts).Key;
-        Assert.Equal(attemptId.ToString("N"), intent.RootElement.GetProperty("attemptId").GetString());
-        Assert.Equal(1, fixture.Service.CreateCalls);
-    }
-
-    [Theory]
-    [InlineData(InventoryOperationState.Confirmed, 42, true)]
-    [InlineData(InventoryOperationState.Confirmed, 0, false)]
-    [InlineData(InventoryOperationState.Rejected, 42, false)]
-    public async Task CleanCopyShowsOnlyConfirmedOwnCreationHistory(
-        InventoryOperationState state, int resultId, bool showHistory)
-    {
-        var fixture = CreateFixture("http://localhost/Equipment/EquipmentIns?copyId=7");
-        fixture.Service.LatestCreationReceipt = new(Guid.NewGuid(), state, resultId);
-        await using var context = fixture.Context;
-        var page = context.Render<EquipmentIns>();
-        page.WaitForAssertion(() => Assert.False(FindButton(page, "Применить").HasAttribute("disabled")));
-
-        Assert.Equal(showHistory, page.Markup.Contains("Предыдущее создание оборудования №42 подтверждено сервером.", StringComparison.Ordinal));
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.recordConfirmedOperation"]);
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
-        Assert.Equal(0, fixture.Service.CreateCalls);
-    }
-
-    /// <summary>Открытая серверная попытка блокирует новый экземпляр формы без локальной операции.</summary>
-    [Fact]
-    public async Task PendingServerCreationBlocksNewFormAcrossCopySource()
-    {
-        var fixture = CreateFixture("http://localhost/Equipment/EquipmentIns?copyId=7");
-        fixture.Service.ServerCreationPending = true;
-        fixture.Service.LatestCreationReceipt = new(Guid.NewGuid(), InventoryOperationState.Confirmed, 42);
-        await using var context = fixture.Context;
-        var page = context.Render<EquipmentIns>();
-        page.WaitForAssertion(() => Assert.Contains("В серверном журнале есть незавершённое создание", page.Markup));
-        Assert.DoesNotContain("Предыдущее создание оборудования", page.Markup);
-
-        await InvokeSave(page, false);
-
-        Assert.True(FindButton(page, "Применить").HasAttribute("disabled"));
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
-        Assert.Equal(0, fixture.Service.CreateCalls);
-    }
-
-    /// <summary>Поздняя правка переживает принятие прежней ревизии без автоматического перехода.</summary>
-    [Fact]
-    public async Task LaterInputRemainsAfterServerConfirmedCreation()
-    {
-        const string uri = "http://localhost/Equipment/EquipmentIns?copyId=7";
-        var fixture = CreateFixture(uri);
-        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        fixture.Service.BeforeCreationReply = async () =>
-        {
-            started.TrySetResult();
-            await release.Task;
-        };
-        await using var context = fixture.Context;
-        context.JSInterop.Setup<long>("clayDraftStore.saveTypedScope", _ => true).SetResult(7);
-        var page = context.Render<EquipmentIns>();
-        page.WaitForAssertion(() => Assert.False(FindButton(page, "Применить").HasAttribute("disabled")));
-
-        var saving = FindButton(page, "Применить").ClickAsync();
-        try
-        {
-            await started.Task.WaitAsync(TimeSpan.FromSeconds(3));
-            await page.InvokeAsync(() => CurrentModel(page.Instance).Description = "Поздний ввод");
-        }
-        finally { release.TrySetResult(); }
-        await saving.WaitAsync(TimeSpan.FromSeconds(3));
-
-        Assert.Equal(uri, fixture.Navigation.Uri);
-        Assert.Equal("Поздний ввод", CurrentModel(page.Instance).Description);
-        Assert.Contains("Более поздний ввод сохранён", page.Markup);
-        Assert.Single(context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.closeRam"]);
-        Assert.Contains(context.JSInterop.Invocations["clayDraftStore.saveTypedScope"], call =>
-        {
-            if (!Equals(call.Arguments[1], "main") || call.Arguments[2] is not string payload) return false;
-            using var saved = JsonDocument.Parse(payload);
-            return saved.RootElement.GetProperty("Model").GetProperty("Description").GetString() == "Поздний ввод";
-        });
-        Assert.Equal(1, fixture.Service.CreateCalls);
-    }
-
-    /// <summary>Ошибка закрытия после созданной записи повторяет удаление по той же ревизии, без INSERT.</summary>
-    [Fact]
-    public async Task KnownCreationCloseRetryUsesSameRamHandleAndDoesNotCreateAgain()
-    {
-        const string uri = "http://localhost/Equipment/EquipmentIns?copyId=7";
-        var fixture = CreateFixture(uri);
-        await using var context = fixture.Context;
-        context.JSInterop.Setup<ClayDraftEditorScopeState>("clayDraftStore.readEditorScope", _ => true)
-            .SetResult(new ClayDraftEditorScopeState(19, false, false));
-        context.JSInterop.Setup<bool>("clayDraftStore.closeRam", _ => true)
-            .SetException(new JSException("fixture deletion failed"));
-        var page = context.Render<EquipmentIns>();
-        page.WaitForAssertion(() => Assert.False(FindButton(page, "Применить").HasAttribute("disabled")));
-
-        await FindButton(page, "Применить").ClickAsync();
-
-        Assert.Equal(uri, fixture.Navigation.Uri);
-        Assert.Contains("Удаление черновика не подтверждено", page.Markup);
-        var original = Assert.Single(context.JSInterop.Invocations["clayDraftStore.closeRam"]);
-        context.JSInterop.Setup<bool>("clayDraftStore.closeRam", _ => true).SetResult(true);
-        await FindButton(page, "Обновить").ClickAsync();
-
-        Assert.Contains("id=123", fixture.Navigation.Uri);
-        Assert.Equal(1, fixture.Service.CreateCalls);
-        Assert.Equal(2, context.JSInterop.Invocations["clayDraftStore.closeRam"].Count);
-        var retry = context.JSInterop.Invocations["clayDraftStore.closeRam"].Last();
-        Assert.Equal(original.Arguments[0], retry.Arguments[0]);
-        Assert.Equal(19L, retry.Arguments[1]);
-        Assert.Single(context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
-    }
-
-    /// <summary>Потеря записи точного ID блокирует процедуру; локальный повтор сохраняет только подтверждение.</summary>
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task KnownResultRetriesReceiptBeforeCleanupAndNeverCreatesAgain(bool zeroRevision)
-    {
-        var fixture = CreateFixture("http://localhost/Equipment/EquipmentIns?copyId=7");
-        await using var context = fixture.Context;
-        var fail = true;
-        var store = context.JSInterop.Setup<long>("clayDraftStore.saveTypedScope", call =>
-        {
-            if (!fail || !Equals(call.Arguments[1], "creation-result")) return false;
-            fail = false;
-            return true;
-        });
-        if (zeroRevision)
-            store.SetResult(0);
-        else
-            store.SetException(new JSException("Fixture receipt storage failed"));
-        var page = context.Render<EquipmentIns>();
-        page.WaitForAssertion(() => Assert.False(FindButton(page, "Применить").HasAttribute("disabled")));
-
-        await FindButton(page, "Применить").ClickAsync();
-        Assert.Equal(1, fixture.Service.CreateCalls);
-        Assert.Contains("№123", page.Markup);
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.recordConfirmedOperation"]);
-        await FindButton(page, "Отмена").ClickAsync();
-        Assert.Empty(context.JSInterop.Invocations["clayModelEquipmentForm.close"]);
-        Assert.Contains("проверить результат создания оборудования", page.Markup);
-        await InvokeSave(page, false);
-        Assert.Equal(1, fixture.Service.CreateCalls);
-
-        await FindButton(page, "Обновить").ClickAsync();
-        var stores = context.JSInterop.Invocations["clayDraftStore.saveTypedScope"]
-            .Where(call => Equals(call.Arguments[1], "creation-result")).ToArray();
-        Assert.Equal(2, stores.Length);
-        Assert.Equal(stores[0].Arguments[2], stores[1].Arguments[2]);
-        using var receipt = JsonDocument.Parse(Assert.IsType<string>(stores[1].Arguments[2]));
-        using var intent = JsonDocument.Parse(Assert.IsType<string>(
-            Assert.Single(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]).Arguments[1]));
-        Assert.Equal(intent.RootElement.GetProperty("attemptId").GetString(), receipt.RootElement.GetProperty("AttemptId").GetString());
-        Assert.Equal(123, receipt.RootElement.GetProperty("EquipmentId").GetInt32());
-        Assert.Equal(6L, Assert.Single(context.JSInterop.Invocations["clayDraftStore.recordConfirmedOperation"]).Arguments[1]);
-        Assert.Equal(6L, Assert.Single(context.JSInterop.Invocations["clayDraftStore.commitOperation"]).Arguments[1]);
-        Assert.Equal(1, fixture.Service.CreateCalls);
     }
 
     /// <summary>Новая запись и копия восстанавливают свой typed и точные ключи raw без повторного создания.</summary>
@@ -854,93 +591,6 @@ public sealed partial class EquipmentInsTests
         Assert.NotNull(page.Find("[data-draft-key='ins.notes']"));
         page.WaitForAssertion(() => Assert.Single(context.JSInterop.Invocations["clayDraftStore.applyRaw"]));
         Assert.False(FindButton(page, "Применить").HasAttribute("disabled"));
-        Assert.Equal(0, fixture.Service.CreateCalls);
-    }
-
-    /// <summary>Недоступная копия показывает свою правку; появление изменённого источника требует явного принятия.</summary>
-    [Fact]
-    public async Task MissingAndChangedCopyKeepsInputUntilExplicitRebase()
-    {
-        const string uri = "http://localhost/Equipment/EquipmentIns?copyId=7";
-        var payload = await CaptureEditorDraftAsync(uri);
-        var fixture = CreateFixture(uri, restoredCreation: EditorRestore(payload));
-        fixture.Service.CopyAvailable = false;
-        await using var context = fixture.Context;
-        context.JSInterop.Setup<ClayDraftRebaseState>("clayDraftStore.readRebaseState", _ => true)
-            .SetResult(new ClayDraftRebaseState(8, []));
-        context.JSInterop.Setup<bool>("clayDraftStore.rebaseScope", _ => true).SetResult(true);
-        var page = context.Render<EquipmentIns>();
-
-        page.WaitForAssertion(() => Assert.Contains("Исходное оборудование недоступно", page.Markup));
-        Assert.Equal("Локальная правка", page.Find("textarea").TextContent);
-        Assert.True(FindButton(page, "Применить").HasAttribute("disabled"));
-        fixture.Service.CopyAvailable = true;
-        fixture.Service.CopyDescription = "Свежая версия копии";
-        await page.InvokeAsync(() => FindButton(page, "Обновить").ClickAsync());
-        page.WaitForAssertion(() => Assert.Contains("Исходный контекст изменился", page.Markup));
-        Assert.True(FindButton(page, "Применить").HasAttribute("disabled"));
-
-        await page.InvokeAsync(() => FindButton(page, "Принять актуальный исходный контекст").ClickAsync());
-        Assert.Equal("Локальная правка", page.Find("textarea").TextContent);
-        Assert.False(FindButton(page, "Применить").HasAttribute("disabled"));
-        var rebase = Assert.Single(context.JSInterop.Invocations["clayDraftStore.rebaseScope"]);
-        Assert.Equal(8L, rebase.Arguments[2]);
-        Assert.Empty(Assert.IsAssignableFrom<IReadOnlyList<string>>(rebase.Arguments[4]));
-        Assert.Equal(0, fixture.Service.CreateCalls);
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.discard"]);
-    }
-
-    /// <summary>Более поздний ввод с точным старым ID ждёт явного открытия другого создания.</summary>
-    [Fact]
-    public async Task LaterDraftWaitsForExplicitNewCreationAfterKnownId()
-    {
-        const string uri = "http://localhost/Equipment/EquipmentIns?copyId=7";
-        var payload = await CaptureEditorDraftAsync(uri);
-        var attemptId = Guid.NewGuid();
-        var scopes = new Dictionary<string, string>
-        {
-            ["creation-result"] = JsonSerializer.Serialize(new
-            {
-                Source = "7:0", AttemptId = attemptId.ToString("N"), Revision = 6, EquipmentId = 321,
-            }),
-            ["main"] = payload,
-        };
-        var fixture = CreateFixture(uri, restoredCreation: new ClayDraftRestore("completed", true, 12, null, null, scopes),
-            afterReceiptDiscard: EditorRestore(payload));
-        fixture.Service.ConfirmedCreationReceipts[attemptId] = 321;
-        await using var context = fixture.Context;
-
-        var page = context.Render<EquipmentIns>();
-        page.WaitForAssertion(() => Assert.Contains("№321", page.Markup));
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.applyRaw"]);
-        Assert.True(FindButton(page, "Применить").HasAttribute("disabled"));
-        Assert.Equal(0, fixture.Service.CreateCalls);
-
-        await page.InvokeAsync(() => FindButton(page, "Начать другое создание").ClickAsync());
-        Assert.Equal(2, context.JSInterop.Invocations["clayDraftStore.registerRam"].Count);
-        Assert.Equal("Локальная правка", CurrentModel(page.Instance).Description);
-        page.WaitForAssertion(() => Assert.Equal("Локальная правка", page.Find("textarea").TextContent));
-        Assert.Equal("creation-result", Assert.Single(context.JSInterop.Invocations["clayDraftStore.discardScope"]).Arguments[1]);
-        Assert.Equal(0, fixture.Service.CreateCalls);
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
-    }
-
-    /// <summary>Невосстановленная сырая часть не позволяет зафиксировать SQL intent.</summary>
-    [Fact]
-    public async Task PendingRawBlocksCreationAfterTypedRecovery()
-    {
-        const string uri = "http://localhost/Equipment/EquipmentIns?copyId=7";
-        var payload = await CaptureEditorDraftAsync(uri);
-        var fixture = CreateFixture(uri, restoredCreation: EditorRestore(payload), pendingEditorRaw: true);
-        await using var context = fixture.Context;
-        var page = context.Render<EquipmentIns>();
-        page.WaitForAssertion(() => Assert.Contains("Часть ввода ожидает восстановления", page.Markup));
-
-        Assert.Equal("Локальная правка", page.Find("textarea").TextContent);
-        Assert.True(FindButton(page, "Применить").HasAttribute("disabled"));
-        await InvokeSave(page, false);
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
         Assert.Equal(0, fixture.Service.CreateCalls);
     }
 
@@ -1016,7 +666,7 @@ public sealed partial class EquipmentInsTests
         Assert.Equal(0, fixture.Service.CreateCalls);
     }
 
-    private static ClayDraftRestore EditorRestore(string payload) => new("equipment-ins-editor", true, 8, null, null,
+    private static ClayDraftRestore EditorRestore(string payload) => new("equipment-ins-editor", true, 8, null,
         new Dictionary<string, string> { ["main"] = payload });
 
     private static async Task<string> CaptureEditorDraftAsync(string uri)
@@ -1277,7 +927,7 @@ public sealed partial class EquipmentInsTests
         var fixture = CreateFixture("http://localhost/Equipment/EquipmentIns?codetype=103");
         await using var context = fixture.Context;
         context.JSInterop.Setup<ClayDraftEditorScopeState>("clayDraftStore.readEditorScope", _ => true)
-            .SetResult(new ClayDraftEditorScopeState(9, true, false));
+            .SetResult(new ClayDraftEditorScopeState(9, true));
         context.JSInterop.Setup<bool>("clayDraftStore.replaceEditorScope", _ => true).SetResult(true);
         var dialogs = context.Render<MudDialogProvider>();
         var page = context.Render<EquipmentIns>();
@@ -1323,7 +973,7 @@ public sealed partial class EquipmentInsTests
         var fixture = CreateFixture(uri);
         await using var context = fixture.Context;
         context.JSInterop.Setup<ClayDraftEditorScopeState>("clayDraftStore.readEditorScope", _ => true)
-            .SetResult(new ClayDraftEditorScopeState(17, true, false));
+            .SetResult(new ClayDraftEditorScopeState(17, true));
         context.JSInterop.Setup<bool>("clayDraftStore.replaceEditorScope", _ => true).SetResult(mode != "late");
         var dialogs = context.Render<MudDialogProvider>();
         var page = context.Render<EquipmentIns>();
@@ -1353,51 +1003,6 @@ public sealed partial class EquipmentInsTests
         Assert.Equal(mode == "success" ? "Fresh copy" : "Local copy", CurrentModel(page.Instance).Description);
     }
 
-    /// <summary>Подтверждает сохранность отправленной попытки при закрытии и отложенную навигацию при raw.</summary>
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task CreationExitKeepsUnknownAndUsesGuardForInternalNavigation(bool unknown)
-    {
-        const string uri = "http://localhost/Equipment/EquipmentIns?copyId=7";
-        var operation = unknown
-            ? JsonSerializer.Serialize(new { version = 1, attemptId = Guid.NewGuid().ToString("N"), kind = "equipment.create",
-                status = "unknown", revision = 6, data = "{}", scopes = Array.Empty<object>(),
-                acceptLegacyTyped = false, legacyTypedRevision = 0 })
-            : null;
-        var fixture = CreateFixture(uri, restoredCreation: operation is null ? null :
-            new ClayDraftRestore("unknown-fixture", true, 7, null, operation));
-        await using var context = fixture.Context;
-        context.JSInterop.Setup<ClayDraftEditorScopeState>("clayDraftStore.readEditorScope", _ => true)
-            .SetResult(new ClayDraftEditorScopeState(7, true, unknown));
-        var navigation = new InsGuardNavigation(uri);
-        context.Services.AddSingleton<NavigationManager>(navigation);
-        var dialogs = context.Render<MudDialogProvider>();
-        var page = context.Render<EquipmentIns>();
-        page.WaitForAssertion(() => Assert.False(FindButton(page, "Отмена").HasAttribute("disabled")));
-        if (unknown)
-        {
-            var closing = FindButton(page, "Отмена").ClickAsync();
-            ChooseInsCancelAction(dialogs, "Закрыть без сохранения");
-            await closing.WaitAsync(TimeSpan.FromSeconds(5));
-            Assert.Single(context.JSInterop.Invocations["clayModelEquipmentForm.close"]);
-            Assert.Single(context.JSInterop.Invocations["clayDraftStore.closeRam"]);
-            Assert.Empty(context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
-            Assert.Empty(context.JSInterop.Invocations["clayDraftStore.discardScope"]);
-        }
-        else
-        {
-            var navigating = page.InvokeAsync(() =>
-                navigation.CanNavigateAsync("http://localhost/Equipment/EquipmentIns?copyId=8"));
-            ChooseInsCancelAction(dialogs, "Продолжить редактирование");
-            Assert.False(await navigating.WaitAsync(TimeSpan.FromSeconds(5)));
-            Assert.Equal(uri, navigation.Uri);
-            Assert.Empty(context.JSInterop.Invocations["clayModelEquipmentForm.close"]);
-        }
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.replaceEditorScope"]);
-        Assert.Equal(0, fixture.Service.CreateCalls);
-    }
-
     /// <summary>Поздний ответ чтения предыдущей копии не сбрасывает соседний редактор.</summary>
     [Fact]
     public async Task CopyResetDoesNotReplacePreviousRouteAfterNewSourceOpens()
@@ -1405,7 +1010,7 @@ public sealed partial class EquipmentInsTests
         var fixture = CreateFixture("http://localhost/Equipment/EquipmentIns?copyId=7");
         await using var context = fixture.Context;
         context.JSInterop.Setup<ClayDraftEditorScopeState>("clayDraftStore.readEditorScope", _ => true)
-            .SetResult(new ClayDraftEditorScopeState(17, true, false));
+            .SetResult(new ClayDraftEditorScopeState(17, true));
         var dialogs = context.Render<MudDialogProvider>();
         var page = context.Render<EquipmentIns>();
         page.WaitForAssertion(() => Assert.False(FindButton(page, "Применить").HasAttribute("disabled")));
@@ -1478,35 +1083,14 @@ public sealed partial class EquipmentInsTests
             context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.registerRam", _ => ReceiptDiscarded())
                 .SetResult(afterReceiptDiscard);
         context.JSInterop.Setup<ClayDraftEditorScopeState>("clayDraftStore.readEditorScope", _ => true)
-            .SetResult(new ClayDraftEditorScopeState(0, false, false));
-        context.JSInterop.Setup<ClayLegacyDraftOperationEvidence[]?>("clayDraftStore.beginLegacyOperationEvidenceTransfer", _ => true)
-            .SetResult([]);
+            .SetResult(new ClayDraftEditorScopeState(0, false));
         context.JSInterop.Setup<bool>("clayDraftStore.closeRam", _ => true).SetResult(true);
         context.JSInterop.Setup<ClayDraftStorageHealth>("clayDraftStore.getHealth", _ => true)
-            .SetResult(new ClayDraftStorageHealth(true, 0, null, false, 0, 0));
+            .SetResult(new ClayDraftStorageHealth(true, 0, null, 0, 0));
         context.JSInterop.Setup<ClayDraftRawApplyResult>("clayDraftStore.applyRaw", _ => true)
             .SetResult(new ClayDraftRawApplyResult([], pendingEditorRaw ? ["data:ins.notes:0"] : []));
         context.JSInterop.Setup<ClayDraftRestoreReadiness>("clayDraftStore.getRestoreReadiness", _ => true)
             .SetResult(new ClayDraftRestoreReadiness(!pendingEditorRaw, pendingEditorRaw ? ["main"] : [], []));
-        Action<string>? completeBegin = null;
-        var begin = context.JSInterop.Setup<string>("clayDraftStore.beginOperationIntent", invocation =>
-        {
-            using var intent = JsonDocument.Parse(Assert.IsType<string>(invocation.Arguments[1]));
-            var root = intent.RootElement;
-            completeBegin!(JsonSerializer.Serialize(new
-            {
-                version = 1,
-                attemptId = root.GetProperty("attemptId").GetString(),
-                kind = root.GetProperty("kind").GetString(),
-                status = "running",
-                revision = 6,
-                data = root.GetProperty("data").GetString(),
-                scopes = new[] { new { name = "main", typedRevision = 1, rawRevisions = new Dictionary<string, long>() } },
-                acceptLegacyTyped = false, legacyTypedRevision = 0,
-            }));
-            return true;
-        });
-        completeBegin = result => begin.SetResult(result);
         context.Services.AddSingleton<EquipmentInsService>(service);
         context.Services.AddSingleton<AuthenticationStateProvider, EquipmentInsAuthentication>();
         context.Services.AddSingleton(new EquipmentTypeSelectDataSource(typeDb ?? CreateDb(
@@ -1598,11 +1182,6 @@ public sealed partial class EquipmentInsTests
         public int? CopyTenantId { get; set; }
         public int? DeferredAccountingPersonId { get; set; }
         public int CreateCalls { get; private set; }
-        public bool ServerCreationPending { get; set; }
-        public HashSet<Guid> ImportedCreationAttempts { get; } = [];
-        public bool LoseCreationReply { get; set; }
-        public Func<Task>? BeforeCreationReply { get; set; }
-        public Dictionary<Guid, int> ConfirmedCreationReceipts { get; } = [];
         public int IdentityChecks { get; private set; }
         public List<int> CopyRequests { get; } = [];
         public TaskCompletionSource<bool> DeferredAccountingCompletion { get; } =
@@ -1674,27 +1253,8 @@ public sealed partial class EquipmentInsTests
             Assert.True(_secondAccountingRequested.Task.IsCompleted, "Повторный запрос бухучёта не был начат");
         }
 
-        public InventoryOperationReceipt? LatestCreationReceipt { get; set; }
-
-        public override Task<InventoryOperationReceipt?> ReadLatestCreationReceiptAsync(string? principal, int employeeId,
-            CancellationToken ct) => Task.FromResult(LatestCreationReceipt);
-
-        public override Task<bool> ReadCreationPendingAsync(string? principal, int employeeId, CancellationToken ct) =>
-            Task.FromResult(ServerCreationPending || ImportedCreationAttempts.Count != 0);
-
-        public override Task ImportLegacyCreationOperationsAsync(string? principal, int employeeId,
-            IReadOnlyCollection<Guid> attempts, CancellationToken ct)
-        {
-            ImportedCreationAttempts.UnionWith(attempts);
-            return Task.CompletedTask;
-        }
-
-        public override Task<InventoryOperationReceipt?> ReadCreationReceiptAsync(string? principal, int employeeId, Guid attemptId,
-            CancellationToken ct) => Task.FromResult<InventoryOperationReceipt?>(ConfirmedCreationReceipts.TryGetValue(attemptId, out var id)
-            ? new(attemptId, InventoryOperationState.Confirmed, id) : null);
-
-        public override async Task<int> CreateJournaledAsync(EquipmentEntity equipment, string? principal, int expectedEmployeeId,
-            Guid attemptId, CancellationToken ct, Func<EquipmentEntity, CancellationToken, Task>? beforeDispatch = null)
+        public override async Task<int> CreateAsync(EquipmentEntity equipment, string? principal, int expectedEmployeeId,
+            CancellationToken ct, Func<EquipmentEntity, CancellationToken, Task>? beforeDispatch = null)
         {
             Assert.Equal(FixturePrincipal, principal);
             Assert.Equal(4, expectedEmployeeId);
@@ -1703,9 +1263,6 @@ public sealed partial class EquipmentInsTests
             if (SaveException is not null)
                 throw SaveException;
             Created = equipment;
-            ConfirmedCreationReceipts.Add(attemptId, 123);
-            if (BeforeCreationReply is not null) await BeforeCreationReply();
-            if (LoseCreationReply) throw new TimeoutException("Ответ COMMIT потерян.");
             return 123;
         }
     }

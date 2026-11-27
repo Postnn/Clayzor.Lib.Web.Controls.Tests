@@ -1,9 +1,13 @@
+using System.Net;
 using System.Security.Claims;
 using Clayzor.Lib.DALC;
 using Clayzor.Lib.Entities.MedicalTests;
 using Kesco.App.Web.Inventory.Services;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.HttpResults;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.FileProviders;
 
 namespace Clayzor.Lib.Web.Controls.Tests;
 
@@ -68,6 +72,41 @@ public sealed class DraftKeyEndpointTests
     }
 
     [Theory]
+    [InlineData("Development", true, 200)]
+    [InlineData("Development", false, 403)]
+    [InlineData("Production", true, 403)]
+    public async Task HttpKeyIsLimitedToDevelopmentLoopback(string environment, bool loopback, int status)
+    {
+        using var connection = MakeConnection(Script.Rows(Script.Row(("КодСотрудника", 27))));
+        var request = MakeRequest();
+        request.Request.Scheme = "http";
+        request.Request.Host = new HostString("localhost:5020");
+        request.Request.Headers.Origin = "http://localhost:5020";
+        request.Connection.RemoteIpAddress = loopback ? IPAddress.IPv6Loopback : IPAddress.Parse("192.0.2.1");
+        using var services = new ServiceCollection()
+            .AddSingleton<IWebHostEnvironment>(new TestHostEnvironment(environment))
+            .BuildServiceProvider();
+        request.RequestServices = services;
+
+        var result = await SendAsync(request, connection);
+
+        if (status == 200)
+        {
+            var key = Assert.IsType<FileContentHttpResult>(result);
+            Assert.Equal(32, key.FileContents.Length);
+            Assert.Single(connection.CommandLog);
+        }
+        else
+        {
+            Assert.Equal(status, result is null
+                ? request.Response.StatusCode
+                : Assert.IsAssignableFrom<IStatusCodeHttpResult>(result).StatusCode);
+            Assert.Empty(connection.CommandLog);
+        }
+        AssertNoStore(request);
+    }
+
+    [Theory]
     [InlineData(false, 403)]
     [InlineData(true, 503)]
     public async Task UnconfirmedEmployeeNeverReceivesKeyMaterial(bool lookupFailed, int status)
@@ -114,6 +153,7 @@ public sealed class DraftKeyEndpointTests
         context.Request.Headers.Origin = "https://inventory.example";
         context.Request.Headers["Sec-Fetch-Site"] = "same-origin";
         context.Request.Headers[DraftKeyEndpoint.RequestHeader] = "1";
+        context.RequestServices = new ServiceCollection().BuildServiceProvider();
         return context;
     }
 
@@ -132,4 +172,14 @@ public sealed class DraftKeyEndpointTests
     }
 
     private static void AssertNoStore(HttpContext context) => Assert.Equal("no-store", context.Response.Headers.CacheControl.ToString());
+
+    private sealed class TestHostEnvironment(string environment) : IWebHostEnvironment
+    {
+        public string EnvironmentName { get; set; } = environment;
+        public string ApplicationName { get; set; } = "Clayzor.Tests";
+        public string WebRootPath { get; set; } = string.Empty;
+        public IFileProvider WebRootFileProvider { get; set; } = new NullFileProvider();
+        public string ContentRootPath { get; set; } = string.Empty;
+        public IFileProvider ContentRootFileProvider { get; set; } = new NullFileProvider();
+    }
 }

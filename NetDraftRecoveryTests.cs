@@ -28,7 +28,6 @@ public sealed partial class NetFormTests
             using var savedJson = JsonDocument.Parse(snapshot);
             Assert.Equal("Исходные данные", savedJson.RootElement.GetProperty("Original").GetProperty("Description").GetString());
             Assert.Equal("Мой ввод до OK", savedJson.RootElement.GetProperty("Current").GetProperty("Description").GetString());
-            Assert.Empty(original.Context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
         }
 
         var reopened = new NetFixture(description: stale ? "Чужие данные" : "Исходные данные", restoredInput: snapshot);
@@ -41,7 +40,6 @@ public sealed partial class NetFormTests
         {
             Assert.Contains("Исходная версия черновика отличается", page.Markup);
             await Invoke(page, "SaveAsync", false);
-            Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
         }
         else
         {
@@ -63,8 +61,6 @@ public sealed partial class NetFormTests
 
         await page.Find("textarea[data-draft-key='net.description']").InputAsync("Локальный ввод");
         await Invoke(page, "SaveAsync", false);
-
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.saveTypedScope"]);
         Assert.DoesNotContain(fixture.Connection.CommandLog, sql => sql.Contains("UPDATE vwЛокальнаяСеть", StringComparison.Ordinal));
     }
@@ -129,7 +125,6 @@ public sealed partial class NetFormTests
             .Single(button => button.TextContent.Trim() == "Применить результаты сверки").ClickAsync());
 
         Assert.DoesNotContain(fixture.Connection.CommandLog, sql => sql.Contains("UPDATE vwЛокальнаяСеть", StringComparison.Ordinal));
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
         if (freshChangedAgain)
         {
             Assert.Empty(context.JSInterop.Invocations["clayDraftStore.rebaseScope"]);
@@ -187,7 +182,6 @@ public sealed partial class NetFormTests
 
         Assert.Equal(fresh, Model(page.Instance).ChangedAtUtc);
         Assert.DoesNotContain(context.JSInterop.Invocations, call => call.Identifier == "clayModelEquipmentForm.close");
-        Assert.Single(context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
         page.WaitForAssertion(() => Assert.Contains(context.JSInterop.Invocations["clayDraftStore.applyRaw"],
             call => Equals(call.Arguments[1], "net-input")));
     }
@@ -200,8 +194,7 @@ public sealed partial class NetFormTests
     {
         var fixture = new NetFixture(currentUser: verified, missingPort: !denied,
             portReadError: denied ? SqlExceptionFactory.Create(229, "access denied") : null,
-            restoredInput: OwnNetDraft(), restoredRaw: true, rawPending: true,
-            restoredOperation: OperationJson("net.poe", "unknown"));
+            restoredInput: OwnNetDraft(), restoredRaw: true, rawPending: true);
         await using var context = fixture.Context;
         var page = context.Render<NetPage>();
 
@@ -215,9 +208,6 @@ public sealed partial class NetFormTests
 
         await Invoke(page, "SaveAsync", true);
         await Invoke(page, "RestartPoeAsync");
-
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.saveTypedScope"]);
     }
 

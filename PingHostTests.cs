@@ -139,74 +139,6 @@ public sealed class PingHostTests
         finally { transport.PendingReply!.TrySetResult(null); }
     }
 
-    /// <summary>Повтор хранилища сохраняет видимый журнал остановленной проверки без нового запуска.</summary>
-    [Fact]
-    public async Task JournalStorageRetryPreservesLinesAndDoesNotRestart()
-    {
-        var clock = new ManualClock();
-        var transport = new Probe();
-        await using var context = Configure(transport, clock);
-        var writable = false;
-        context.JSInterop.Setup<long>("clayDraftStore.saveTypedScope", _ => !writable)
-            .SetException(new Microsoft.JSInterop.JSException("Тестовый сбой IndexedDB"));
-        context.JSInterop.Setup<long>("clayDraftStore.saveTypedScope", _ => writable).SetResult(9L);
-        var delayedRetry = context.JSInterop.Setup<string?>("clayDraftStore.retryStorage", _ => true);
-        var page = context.Render<PingHostPage>();
-
-        await EventuallyAsync(() => clock.HasTimerDueIn(TimeSpan.FromSeconds(1)));
-        clock.Advance(TimeSpan.FromSeconds(1));
-        page.WaitForAssertion(() => Assert.Contains("время=1мс", page.Find("[role=log]").TextContent));
-        await Button(page, "Остановить").ClickAsync(new MouseEventArgs());
-
-        Assert.Contains("Не удалось сохранить журнал", page.Markup);
-        Assert.Contains("Проверка остановлена.", page.Markup);
-        writable = true;
-        page.WaitForAssertion(() => Assert.Single(context.JSInterop.Invocations["clayDraftStore.retryStorage"]));
-        delayedRetry.SetResult(null);
-        page.WaitForAssertion(() => Assert.DoesNotContain("Не удалось сохранить журнал", page.Markup));
-        Assert.Equal(1, transport.Resolutions);
-        Assert.Equal(1, transport.Sends);
-        var retry = Assert.Single(context.JSInterop.Invocations["clayDraftStore.retryStorage"]);
-        Assert.Null(retry.Arguments[1]);
-        var saved = context.JSInterop.Invocations["clayDraftStore.saveTypedScope"].Last();
-        using var journal = JsonDocument.Parse((string)saved.Arguments[2]!);
-        Assert.Equal("Проверка остановлена.", journal.RootElement.GetProperty("Status").GetString());
-        Assert.False(journal.RootElement.GetProperty("Running").GetBoolean());
-        Assert.Contains("время=1мс", Assert.Single(journal.RootElement.GetProperty("Lines").EnumerateArray()).GetProperty("Text").GetString());
-    }
-
-    /// <summary>Поздний ответ повтора сохранения старого host не пишет его журнал в новую регистрацию.</summary>
-    [Fact]
-    public async Task PendingJournalRetryDoesNotOverwriteNewHost()
-    {
-        var clock = new ManualClock();
-        var transport = new Probe();
-        await using var context = Configure(transport, clock);
-        var writable = false;
-        context.JSInterop.Setup<long>("clayDraftStore.saveTypedScope", _ => !writable)
-            .SetException(new Microsoft.JSInterop.JSException("Тестовый сбой хранилища"));
-        context.JSInterop.Setup<long>("clayDraftStore.saveTypedScope", _ => writable).SetResult(9L);
-        var delayedRetry = context.JSInterop.Setup<string?>("clayDraftStore.retryStorage", _ => true);
-        var page = context.Render<PingHostPage>();
-        await EventuallyAsync(() => clock.HasTimerDueIn(TimeSpan.FromSeconds(1)));
-        await Button(page, "Остановить").ClickAsync(new MouseEventArgs());
-
-        page.WaitForAssertion(() => Assert.Single(context.JSInterop.Invocations["clayDraftStore.retryStorage"]));
-        writable = true;
-        await page.InvokeAsync(() => context.Services.GetRequiredService<NavigationManager>()
-            .NavigateTo("/Equipment/PingHost?host=127.0.0.1"));
-        page.WaitForAssertion(() => Assert.Contains("Обмен пакетами с 127.0.0.1", page.Markup));
-        var savedForNewHost = context.JSInterop.Invocations["clayDraftStore.saveTypedScope"].Count;
-
-        delayedRetry.SetResult(null);
-        await page.InvokeAsync(() => Task.CompletedTask);
-
-        Assert.Contains("Обмен пакетами с 127.0.0.1", page.Markup);
-        Assert.DoesNotContain("Не удалось сохранить журнал", page.Markup);
-        Assert.Equal(savedForNewHost, context.JSInterop.Invocations["clayDraftStore.saveTypedScope"].Count);
-        await Button(page, "Остановить").ClickAsync(new MouseEventArgs());
-    }
-
     /// <summary>При восстановлении прежнего журнала проверка ожидает явного запуска.</summary>
     [Fact]
     public async Task RestoredJournalNeverAutoStarts()
@@ -219,12 +151,6 @@ public sealed class PingHostTests
         Assert.Equal("время<1мс", page.Find("[role=log]").TextContent.Trim());
         Assert.Equal(0, transport.Resolutions);
         Assert.Equal(0, transport.Sends);
-        var calls = context.JSInterop.Invocations.ToList();
-        var lease = Assert.Single(calls, call => call.Identifier == "clayDraftStore.beginLegacyOperationEvidenceTransfer");
-        var retirement = Assert.Single(calls, call => call.Identifier == "clayDraftStore.retireLegacyOperationEvidenceTransfer");
-        Assert.Equal(new object?[] { "ping-host", "localhost" }, lease.Arguments.Take(2));
-        Assert.Equal(lease.Arguments[3], retirement.Arguments[0]);
-        Assert.True(calls.FindIndex(call => call.Identifier == "clayDraftStore.registerRam") < calls.IndexOf(retirement));
     }
 
     /// <summary>Закрытие ждёт подтверждения удаления. Повтор очистки не запускает диагностику.</summary>
@@ -350,10 +276,8 @@ public sealed class PingHostTests
     {
         var context = new BunitContext();
         context.JSInterop.Mode = JSRuntimeMode.Loose;
-        context.JSInterop.Setup<ClayLegacyDraftOperationEvidence[]?>("clayDraftStore.beginLegacyOperationEvidenceTransfer", _ => true)
-            .SetResult([]);
         context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.registerRam", _ => true)
-            .SetResult(new ClayDraftRestore("ping-test", saved is not null, 0, null, null,
+            .SetResult(new ClayDraftRestore("ping-test", saved is not null, 0, null,
                 saved is null ? null : new Dictionary<string, string> { ["journal"] = saved }));
         DapperColumnMapper.Initialize();
         context.Services.AddScoped(_ => new DbManager("Server=fixture", new FakeSqlErrorHandler(),

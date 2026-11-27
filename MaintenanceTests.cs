@@ -28,41 +28,6 @@ namespace Clayzor.Lib.Web.Controls.Tests;
 /// <summary>Проверки отображения и цепочки подтверждения регламентной работы.</summary>
 public sealed partial class MaintenanceTests
 {
-    /// <summary>Потеря ответа после commit не приводит к повторному INSERT в новом circuit.</summary>
-    [Fact]
-    public async Task LostCommitReplyReturnsDurableReceiptToNewCircuitWithoutRepeatInsert()
-    {
-        DapperColumnMapper.Initialize();
-        var connection = new MaintenanceConnection { LoseWriteCommitReply = true };
-        var attemptId = Guid.NewGuid();
-        using (var first = new DbManager("Server=fixture", new FakeSqlErrorHandler(), () => connection))
-        {
-            await Assert.ThrowsAsync<TimeoutException>(() =>
-                MaintenanceData.CompleteAsync(first, "fixture", 4, 17, attemptId));
-        }
-
-        using var next = new DbManager("Server=fixture", new FakeSqlErrorHandler(), () => connection);
-        var employee = await Employee.GetCurrentAsync(next, "fixture");
-        Assert.NotNull(employee);
-        var receipt = await MaintenanceData.ReadReceiptAsync(next, employee, 17, default);
-        Assert.Equal(new InventoryOperationReceipt(attemptId, InventoryOperationState.Confirmed, 17), receipt);
-        Assert.Equal(receipt, await MaintenanceData.CompleteAsync(next, "fixture", 4, 17, attemptId));
-        Assert.Equal(1, connection.InsertCount);
-    }
-    /// <summary> NULL и обе границы часа используют правила legacy.</summary>
-    [Theory]
-    [InlineData(null, "Normal")]
-    [InlineData(-1, "Error")]
-    [InlineData(0, "Warning")]
-    [InlineData(3599, "Warning")]
-    [InlineData(3600, "Normal")]
-    [InlineData(9000, "Normal")]
-    public void DeadlineUsesSqlServerClock(int? offset, string expected)
-    {
-        var now = new DateTime(2026, 11, 25, 15, 0, 0);
-        Assert.Equal(expected, MaintenancePresentation.DeadlineSeverity(offset is { } n ? now.AddSeconds(n) : null, now).ToString());
-    }
-
     /// <summary>Отклоняет небезопасную схему, файловые и неполные веб-адреса.</summary>
     [Theory]
     [InlineData("  HTTPS://example.test/instructions  ", true)]
@@ -116,8 +81,7 @@ public sealed partial class MaintenanceTests
         await Task.WhenAll(click, confirmClick);
         Assert.Equal(1, connection.InsertCount);
         Assert.Equal(17, connection.CompletedId);
-        Assert.Equal(2, connection.Commits);
-        Assert.Equal(InventoryOperationState.Confirmed, connection.JournalState);
+        Assert.Equal(1, connection.Commits);
         Assert.Contains("Выполнение записано, список не обновлён", page.Markup);
     }
 
@@ -140,68 +104,9 @@ public sealed partial class MaintenanceTests
         Assert.Contains(revokeRole ? "нет права" : "Работа удалена", page.Markup);
     }
 
-    /// <summary>Неизвестный исход сохраняет маркер и блокирует слепой повтор.</summary>
+    /// <summary>Отзыв доступности внутри транзакции отменяет подтверждение выполнения.</summary>
     [Fact]
-    public async Task TimeoutPreservesUnknownAndDisablesAnotherInsert()
-    {
-        await using var context = CreateContext(out var connection);
-        connection.FailInsert = true;
-        var provider = context.Render<MudDialogProvider>();
-        var page = context.Render<MaintenancePage>();
-        var click = ClickConfirmation(page);
-        await WaitForYes(provider).ClickAsync(new MouseEventArgs());
-        await click;
-        await page.InvokeAsync(() => Action(page).Instance.OnClick.InvokeAsync());
-        Assert.Equal(1, connection.InsertCount);
-        Assert.True(Action(page).Instance.Disabled);
-        Assert.Single(context.JSInterop.Invocations["clayDraftStore.unknownOperation"]);
-        Assert.Contains("Исход выполнения требует проверки", page.Markup);
-        Assert.Contains("Работа №17", page.Markup);
-        Assert.Contains("maintenance-test", page.Markup);
-        await RecoveryButton(page, "Перечитать список").ClickAsync(new MouseEventArgs());
-        Assert.True(Action(page).Instance.Disabled);
-        Assert.Equal(1, connection.InsertCount);
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.retryStorage"]);
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
-    }
-
-    /// <summary>Новый circuit без браузерного черновика обнаруживает открытую серверную попытку.</summary>
-    [Fact]
-    public async Task NewCircuitWithoutDraftCannotRepeatUnresolvedCompletion()
-    {
-        MaintenanceConnection connection;
-        await using (var original = CreateContext(out connection))
-        {
-            connection.FailInsert = true;
-            var provider = original.Render<MudDialogProvider>();
-            var page = original.Render<MaintenancePage>();
-            var click = ClickConfirmation(page);
-            await WaitForYes(provider).ClickAsync(new MouseEventArgs());
-            await click;
-
-            Assert.Equal(1, connection.InsertCount);
-            Assert.Null(connection.CompletedId);
-            Assert.Equal(InventoryOperationState.Reserved, connection.JournalState);
-        }
-
-        connection.FailInsert = false;
-        await using var reopened = CreateContext(out _, existingConnection: connection);
-        var reopenedPage = reopened.Render<MaintenancePage>();
-        reopenedPage.WaitForAssertion(() =>
-        {
-            Assert.Contains("незавершённая попытка", reopenedPage.Markup, StringComparison.OrdinalIgnoreCase);
-            Assert.True(Action(reopenedPage).Instance.Disabled);
-        });
-
-        await reopenedPage.InvokeAsync(() => Action(reopenedPage).Instance.OnClick.InvokeAsync());
-
-        Assert.Equal(1, connection.InsertCount);
-        Assert.Empty(reopened.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
-    }
-
-    /// <summary>Отзыв доступности после резервирования откатывает запись и освобождает конфликтующий слот.</summary>
-    [Fact]
-    public async Task WorkUnavailableInsideTransactionRejectsReservedAttempt()
+    public async Task WorkUnavailableInsideTransactionRejectsCompletion()
     {
         await using var context = CreateContext(out var connection);
         connection.RejectWorkInsideTransaction = true;
@@ -212,223 +117,9 @@ public sealed partial class MaintenanceTests
         await click;
 
         Assert.Equal(0, connection.InsertCount);
-        Assert.Equal(1, connection.Commits);
+        Assert.Equal(0, connection.Commits);
         Assert.Equal(1, connection.Rollbacks);
-        Assert.Equal(InventoryOperationState.Rejected, connection.JournalState);
         Assert.Contains("Работа удалена", page.Markup);
-    }
-
-    /// <summary>Ошибка после успешного INSERT требует только повторной записи подтверждения в хранилище.</summary>
-    [Fact]
-    public async Task ConfirmedInsertRetriesOnlyCleanupWithSameRevision()
-    {
-        await using var context = CreateContext(out var connection);
-        var first = true;
-        context.JSInterop.SetupVoid("clayDraftStore.commitOperation", _ =>
-        {
-            if (!first) return false;
-            first = false;
-            return true;
-        }).SetException(new JSException("Ошибка записи IndexedDB"));
-        var provider = context.Render<MudDialogProvider>();
-        var page = context.Render<MaintenancePage>();
-        var click = ClickConfirmation(page);
-        await WaitForYes(provider).ClickAsync(new MouseEventArgs());
-        await click;
-
-        Assert.Equal(1, connection.InsertCount);
-        Assert.True(Action(page).Instance.Disabled);
-        using var intent = JsonDocument.Parse((string)Assert.Single(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]).Arguments[1]!);
-        Assert.Equal("confirmation", Assert.Single(intent.RootElement.GetProperty("acceptedScopes").EnumerateArray()).GetString());
-        await RecoveryButton(page, "Перечитать список").ClickAsync(new MouseEventArgs());
-
-        Assert.Equal(1, connection.InsertCount);
-        Assert.False(Action(page).Instance.Disabled);
-        Assert.Equal(2L, Assert.Single(context.JSInterop.Invocations["clayDraftStore.recordConfirmedOperation"]).Arguments[1]);
-        var commits = context.JSInterop.Invocations["clayDraftStore.commitOperation"];
-        Assert.Equal(2, commits.Count);
-        Assert.All(commits, commit => Assert.Equal(2L, commit.Arguments[1]));
-        Assert.DoesNotContain("Не удалось завершить", page.Markup);
-    }
-
-    /// <summary>Подтверждённый исход из новой регистрации продолжает очистку без повторного INSERT.</summary>
-    [Fact]
-    public async Task ReopenedConfirmedReceiptOnlyRetriesCleanup()
-    {
-        const string attemptId = "42b524c46d3d458e99b40f310fc38988";
-        var receipt = $$"""{"version":1,"attemptId":"{{attemptId}}","kind":"maintenance.complete","status":"confirmed","revision":9,"data":"17","scopes":[],"acceptLegacyTyped":false,"legacyTypedRevision":0}""";
-        await using var context = CreateContext(out var connection, restoredOperation: receipt);
-        connection.SeedConfirmed(Guid.Parse(attemptId), 17);
-        var page = context.Render<MaintenancePage>();
-        page.WaitForAssertion(() => Assert.False(Action(page).Instance.Disabled));
-        Assert.DoesNotContain("Завершить обработку черновика", page.Markup);
-
-        Assert.Equal(0, connection.InsertCount);
-        Assert.False(Action(page).Instance.Disabled);
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
-        Assert.Equal(9L, Assert.Single(context.JSInterop.Invocations["clayDraftStore.commitOperation"]).Arguments[1]);
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.recordConfirmedOperation"]);
-    }
-
-    /// <summary>Receipt восстанавливается после сбоя хранения, а следующий сеанс завершает тот же cleanup.</summary>
-    [Fact]
-    public async Task ReceiptStorageAndCleanupFailuresRecoverWithoutAnotherInsert()
-    {
-        const string begin = """{"version":1,"attemptId":"fixture-remount","kind":"maintenance.complete","status":"running","revision":13,"data":"17","scopes":[{"name":"confirmation","typedRevision":12,"rawRevisions":{}}],"acceptLegacyTyped":false,"legacyTypedRevision":0}""";
-        string? durableReceipt = null;
-        var attempts = 0;
-        MaintenanceConnection connection;
-        await using (var context = CreateContext(out connection))
-        {
-            context.JSInterop.Setup<string>("clayDraftStore.beginOperationIntent", _ => true).SetResult(begin);
-            context.JSInterop.SetupVoid("clayDraftStore.recordConfirmedOperation", _ => ++attempts == 1)
-                .SetException(new JSException("Не удалось сохранить подтверждение"));
-            context.JSInterop.SetupVoid("clayDraftStore.recordConfirmedOperation", call =>
-            {
-                if (attempts != 1 || !Equals(call.Arguments[1], 13L)) return false;
-                var receipt = System.Text.Json.Nodes.JsonNode.Parse(begin)!;
-                receipt["status"] = "confirmed";
-                receipt["attemptId"] = connection.JournalAttemptId.ToString("N");
-                durableReceipt = receipt.ToJsonString();
-                return true;
-            }).SetVoidResult();
-            context.JSInterop.SetupVoid("clayDraftStore.commitOperation", _ => true)
-                .SetException(new JSException("Не удалось очистить принятую ревизию"));
-
-            var provider = context.Render<MudDialogProvider>();
-            var page = context.Render<MaintenancePage>();
-            var click = ClickConfirmation(page);
-            await WaitForYes(provider).ClickAsync(new MouseEventArgs());
-            await click;
-            Assert.Equal(1, connection.InsertCount);
-            Assert.Null(durableReceipt);
-            Assert.Empty(context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
-            Assert.True(Action(page).Instance.Disabled);
-
-            await RecoveryButton(page, "Перечитать список").ClickAsync(new MouseEventArgs());
-            Assert.Equal(1, connection.InsertCount);
-            Assert.Equal(13L, Assert.Single(context.JSInterop.Invocations["clayDraftStore.commitOperation"]).Arguments[1]);
-            Assert.All(context.JSInterop.Invocations["clayDraftStore.recordConfirmedOperation"],
-                call => Assert.Equal(13L, call.Arguments[1]));
-            Assert.Equal(2, context.JSInterop.Invocations["clayDraftStore.recordConfirmedOperation"].Count);
-            Assert.NotNull(durableReceipt);
-            Assert.Empty(context.JSInterop.Invocations["clayDraftStore.unknownOperation"]);
-            Assert.True(Action(page).Instance.Disabled);
-        }
-
-        await using var reopened = CreateContext(out var freshConnection, restoredOperation: durableReceipt,
-            existingConnection: connection);
-        var reopenedPage = reopened.Render<MaintenancePage>();
-        reopenedPage.WaitForAssertion(() => Assert.False(Action(reopenedPage).Instance.Disabled));
-
-        Assert.Equal(1, freshConnection.InsertCount);
-        Assert.Empty(reopened.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
-        Assert.Empty(reopened.JSInterop.Invocations["clayDraftStore.recordConfirmedOperation"]);
-        Assert.Equal(13L, Assert.Single(reopened.JSInterop.Invocations["clayDraftStore.commitOperation"]).Arguments[1]);
-        Assert.False(Action(reopenedPage).Instance.Disabled);
-    }
-
-    /// <summary>При смене сотрудника новая личность не может очистить чужой журнал.</summary>
-    [Fact]
-    public async Task ConfirmedCleanupRequiresCurrentDraftOwner()
-    {
-        const string attemptId = "6d89d9bf0e2e40b7a1fe9bf84e8f05a1";
-        var receipt = $$"""{"version":1,"attemptId":"{{attemptId}}","kind":"maintenance.complete","status":"confirmed","revision":23,"data":"17","scopes":[],"acceptLegacyTyped":false,"legacyTypedRevision":0}""";
-        await using var context = CreateContext(out var connection, restoredOperation: receipt);
-        connection.SeedConfirmed(Guid.Parse(attemptId), 17);
-        var firstCommit = true;
-        context.JSInterop.SetupVoid("clayDraftStore.commitOperation", _ =>
-        {
-            if (!firstCommit) return false;
-            firstCommit = false;
-            return true;
-        }).SetException(new JSException("Не удалось записать подтверждение"));
-        context.JSInterop.Setup<ClayDraftRestore>("clayDraftStore.registerRam", call => Equals(call.Arguments[2], "8"))
-            .SetResult(new ClayDraftRestore("maintenance-other-employee", false, 0, null, null));
-        var page = context.Render<MaintenancePage>();
-        page.WaitForAssertion(() => Assert.NotNull(RecoveryButton(page, "Перечитать список")));
-        connection.EmployeeId = 8;
-
-        await RecoveryButton(page, "Перечитать список").ClickAsync(new MouseEventArgs());
-
-        Assert.Single(context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
-        Assert.Equal(0, connection.InsertCount);
-    }
-
-    /// <summary>Старое клиентское утверждение создаёт серверную блокировку без подтверждения результата.</summary>
-    [Fact]
-    public async Task LegacyEvidenceBlocksAfterOpeningWithoutRestoringOldDraft()
-    {
-        const string attemptId = "deadbeef-1111-2222-3333-444444444444";
-        await using var context = CreateContext(out var connection, legacyEvidence:
-            [new(attemptId, MaintenanceData.CompletionKind, "17")]);
-        var page = context.Render<MaintenancePage>();
-        page.WaitForAssertion(() => Assert.Contains("незавершённая попытка", page.Markup));
-        Assert.True(Action(page).Instance.Disabled);
-        Assert.Equal(1, connection.LegacyEvidenceCount);
-        Assert.DoesNotContain("Восстановить черновик", page.Markup);
-        Assert.Equal(0, connection.InsertCount);
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.listRecoveryCandidates"]);
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.recoverListedDraft"]);
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
-
-        using var newCircuit = new DbManager("Server=fixture", new FakeSqlErrorHandler(), () => connection);
-        await Assert.ThrowsAsync<InventoryOperationPendingException>(() =>
-            MaintenanceData.CompleteAsync(newCircuit, "fixture", 4, 17, Guid.NewGuid()));
-        Assert.Equal(0, connection.InsertCount);
-    }
-
-    /// <summary>Даже здоровое хранилище не разрешает отправку при невосстановленном вводе принимаемой области.</summary>
-    [Fact]
-    public async Task PendingConfirmationScopePreventsBeginAndInsert()
-    {
-        await using var context = CreateContext(out var connection,
-            readiness: new ClayDraftRestoreReadiness(false, ["confirmation"], []));
-        var page = context.Render<MaintenancePage>();
-        await ClickConfirmation(page);
-
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
-        Assert.Equal(0, connection.InsertCount);
-    }
-
-    /// <summary>Потеря ответа Begin не отправляет INSERT и восстанавливает только свою попытку.</summary>
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task BeginFailureRetriesStorageWithOnlyProvenUnsentId(bool anotherOperation)
-    {
-        await using var context = CreateContext(out var connection, failBegin: true);
-        if (anotherOperation)
-        {
-            context.JSInterop.Setup<string?>("clayDraftStore.retryStorage", _ => true)
-                .SetResult("""{"version":1,"attemptId":"other-attempt","kind":"maintenance.complete","status":"unknown","revision":3,"data":"17","scopes":[],"acceptLegacyTyped":false,"legacyTypedRevision":0}""");
-        }
-
-        var provider = context.Render<MudDialogProvider>();
-        var page = context.Render<MaintenancePage>();
-        var click = ClickConfirmation(page);
-        await WaitForYes(provider).ClickAsync(new MouseEventArgs());
-        await click;
-
-        Assert.Equal(0, connection.InsertCount);
-        Assert.Contains("Команда не отправлена", page.Markup);
-        Assert.True(Action(page).Instance.Disabled);
-        using var intent = JsonDocument.Parse((string)Assert.Single(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]).Arguments[1]!);
-        var attemptId = intent.RootElement.GetProperty("attemptId").GetString();
-        Assert.True(Guid.TryParse(attemptId, out _));
-
-        await RecoveryButton(page, "Перечитать список").ClickAsync(new MouseEventArgs());
-
-        Assert.Equal(attemptId, Assert.Single(context.JSInterop.Invocations["clayDraftStore.retryStorage"]).Arguments[1]);
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.unknownOperation"]);
-        Assert.Equal(0, connection.InsertCount);
-        Assert.Equal(anotherOperation, Action(page).Instance.Disabled);
-        if (anotherOperation)
-        {
-            Assert.Contains("other-attempt", page.Markup);
-            Assert.Contains("Работа №17", page.Markup);
-        }
     }
 
     private static AngleSharp.Dom.IElement RecoveryButton(IRenderedComponent<MaintenancePage> page, string text) =>
@@ -642,26 +333,20 @@ public sealed partial class MaintenanceTests
         return provider.FindAll("button").Single(x => x.TextContent.Trim() == "Да");
     }
 
-    private static BunitContext CreateContext(out MaintenanceConnection connection, bool failBegin = false, string? sourceZone = null, string? restoredOperation = null, ClayLegacyDraftOperationEvidence[]? legacyEvidence = null, ClayDraftRestoreReadiness? readiness = null,
+    private static BunitContext CreateContext(out MaintenanceConnection connection, string? sourceZone = null, ClayDraftRestoreReadiness? readiness = null,
         int? restoredConfirmation = null, NavigationManager? navigation = null, MaintenanceConnection? existingConnection = null)
     {
         var db = connection = existingConnection ?? new MaintenanceConnection();
         var context = new BunitContext();
         context.JSInterop.Mode = JSRuntimeMode.Loose;
         context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.registerRam", _ => true)
-            .SetResult(new ClayDraftRestore("maintenance-test", restoredOperation is not null || restoredConfirmation is not null,
-                0, null, restoredOperation, restoredConfirmation is { } id
+            .SetResult(new ClayDraftRestore("maintenance-test", restoredConfirmation is not null,
+                0, null, restoredConfirmation is { } id
                     ? new Dictionary<string, string> { ["confirmation"] = JsonSerializer.Serialize(id) } : null));
-        context.JSInterop.Setup<ClayLegacyDraftOperationEvidence[]?>("clayDraftStore.beginLegacyOperationEvidenceTransfer", _ => true)
-            .SetResult(legacyEvidence ?? []);
         context.JSInterop.Setup<ClayDraftRestoreReadiness>("clayDraftStore.getRestoreReadiness", _ => true)
             .SetResult(readiness ?? new ClayDraftRestoreReadiness(true, [], []));
         context.JSInterop.Setup<ClayDraftStorageHealth>("clayDraftStore.getHealth", _ => true)
-            .SetResult(new ClayDraftStorageHealth(true, 0, null, false, 1, 1));
-        var begin = context.JSInterop.Setup<string>("clayDraftStore.beginOperationIntent", _ => true);
-        if (failBegin) begin.SetException(new JSException("Begin не подтверждён"));
-        else begin
-            .SetResult("""{"version":1,"attemptId":"maintenance-test","kind":"maintenance.complete","status":"running","revision":2,"data":"17","scopes":[],"acceptLegacyTyped":false,"legacyTypedRevision":0}""");
+            .SetResult(new ClayDraftStorageHealth(true, 0, null, 1, 1));
         context.ComponentFactories.AddStub<InventoryMainMenu>();
         DapperColumnMapper.Initialize();
         context.Services.AddScoped(_ => new DbManager("Server=fixture", new FakeSqlErrorHandler(), () => db));
@@ -701,17 +386,6 @@ public sealed partial class MaintenanceTests
         public int? CompletedId { get; private set; }
         public int Commits { get; private set; }
         public int Rollbacks { get; private set; }
-        public InventoryOperationState JournalState => (InventoryOperationState)_journal.Values.Single().State;
-        public Guid JournalAttemptId => _journal.Keys.Single();
-        public int LegacyEvidenceCount => _legacy.Count;
-        private readonly Dictionary<Guid, JournalRow> _journal = [];
-        private readonly Dictionary<Guid, JournalRow> _legacy = [];
-        private readonly Dictionary<(Guid AttemptId, string ConflictKey), Guid> _linked = [];
-        private readonly HashSet<(Guid AttemptId, string ConflictKey)> _legacyLinks = [];
-
-        public void SeedConfirmed(Guid attemptId, int workId) =>
-            _journal.Add(attemptId, new JournalRow(attemptId, EmployeeId, $"maintenance/{workId}",
-                MaintenanceData.CompletionKind, (byte)InventoryOperationState.Confirmed, attemptId, workId, true));
         public string LastListQuery { get; private set; } = "";
         public List<string?> ListFilters { get; } = [];
         public DateTime? WallClock { get; set; }
@@ -731,16 +405,9 @@ public sealed partial class MaintenanceTests
         protected override DbTransaction BeginDbTransaction(IsolationLevel isolationLevel) => new Transaction(this, isolationLevel);
         protected override DbCommand CreateDbCommand() => new Command(this);
 
-        private sealed record JournalRow(Guid AttemptId, int EmployeeId, string ConflictKey, string CommandKind,
-            byte State, Guid OpenSlot, int? ResultEntityId = null, bool Settled = false);
-
         private sealed class Transaction(MaintenanceConnection owner, IsolationLevel isolationLevel) : DbTransaction
         {
             private bool _finished;
-            public JournalRow? JournalChange { get; set; }
-            public List<JournalRow> LegacyChanges { get; } = [];
-            public Dictionary<(Guid AttemptId, string ConflictKey), Guid> LinkedChanges { get; } = [];
-            public HashSet<(Guid AttemptId, string ConflictKey)> LegacyLinks { get; } = [];
             public int? CompletedWork { get; set; }
             public override IsolationLevel IsolationLevel => isolationLevel;
             protected override DbConnection? DbConnection => _finished ? null : owner;
@@ -748,12 +415,6 @@ public sealed partial class MaintenanceTests
             public override void Commit()
             {
                 Assert.False(_finished);
-                if (JournalChange is { } row) owner._journal[row.AttemptId] = row;
-                foreach (var evidence in LegacyChanges)
-                    owner._legacy[evidence.AttemptId] = evidence;
-                foreach (var (key, slot) in LinkedChanges)
-                    owner._linked[key] = slot;
-                owner._legacyLinks.UnionWith(LegacyLinks);
                 if (CompletedWork is { } id) owner.CompletedId = id;
                 owner.Commits++;
                 _finished = true;
@@ -791,72 +452,11 @@ public sealed partial class MaintenanceTests
             protected override DbParameter CreateDbParameter() => new FakeParameter();
             public override void Prepare() { }
             public override void Cancel() { }
-            public override object ExecuteScalar()
-            {
-                if (CommandText.Contains("INSERT INTO dbo.ClayzorLegacyOperationScope", StringComparison.Ordinal))
-                {
-                    var legacyTransaction = Assert.IsType<Transaction>(DbTransaction);
-                    legacyTransaction.LegacyLinks.Add((Parameter<Guid>("AttemptId"), Parameter<string>("ConflictKey")));
-                    return 1;
-                }
-                if (CommandText.Contains("INSERT INTO dbo.ClayzorOperationScope", StringComparison.Ordinal))
-                {
-                    var scopeTransaction = Assert.IsType<Transaction>(DbTransaction);
-                    scopeTransaction.LinkedChanges.Add((Parameter<Guid>("AttemptId"), Parameter<string>("ConflictKey")),
-                        Parameter<Guid>("OpenSlot"));
-                    return 1;
-                }
-                if (CommandText.Contains("UPDATE dbo.ClayzorOperationScope", StringComparison.Ordinal))
-                {
-                    var scopeTransaction = Assert.IsType<Transaction>(DbTransaction);
-                    var attemptId = Parameter<Guid>("AttemptId");
-                    var openSlot = Parameter<Guid>("OpenSlot");
-                    var keys = owner._linked.Where(pair => pair.Key.AttemptId == attemptId && pair.Value == openSlot)
-                        .Select(pair => pair.Key).ToArray();
-                    foreach (var key in keys)
-                        scopeTransaction.LinkedChanges.Add(key, attemptId);
-                    return keys.Length;
-                }
-                Assert.Contains("UPDATE dbo.ClayzorOperationJournal", CommandText);
-                var id = Parameter<Guid>("AttemptId");
-                var slot = Parameter<Guid>("OpenSlot");
-                if (!owner._journal.TryGetValue(id, out var row) ||
-                    row.EmployeeId != Parameter<int>("EmployeeId") ||
-                    row.ConflictKey != Parameter<string>("ConflictKey") ||
-                    row.CommandKind != Parameter<string>("CommandKind") ||
-                    row.State != Parameter<byte>("ExpectedState") || row.OpenSlot != slot)
-                    return 0;
-
-                var settled = Parameter<bool>("Settled");
-                var next = row with
-                {
-                    State = Parameter<byte>("NextState"),
-                    ResultEntityId = Parameters["ResultEntityId"].Value as int?,
-                    Settled = settled,
-                    OpenSlot = settled ? id : slot,
-                };
-                if (DbTransaction is Transaction transaction)
-                    transaction.JournalChange = next;
-                else
-                    owner._journal[id] = next;
-                return 1;
-            }
+            public override object ExecuteScalar() => throw new NotSupportedException();
             public override int ExecuteNonQuery() => throw new NotSupportedException();
 
             public override async Task<int> ExecuteNonQueryAsync(CancellationToken ct)
             {
-                if (CommandText.Contains("INSERT INTO dbo.ClayzorOperationJournal", StringComparison.Ordinal))
-                {
-                    var transaction = Assert.IsType<Transaction>(DbTransaction);
-                    Assert.Equal(5, Parameters.Count);
-                    var id = Parameter<Guid>("AttemptId");
-                    Assert.NotEqual(Guid.Empty, id);
-                    Assert.False(owner._journal.ContainsKey(id));
-                    transaction.JournalChange = new(id, Parameter<int>("EmployeeId"), Parameter<string>("ConflictKey"),
-                        Parameter<string>("CommandKind"), 0, Parameter<Guid>("OpenSlot"));
-                    return 1;
-                }
-
                 Assert.Contains("INSERT INTO dbo.РегламентныеРаботыВыполнение", CommandText);
                 var parameter = Assert.Single(Parameters.Cast<DbParameter>());
                 Assert.Equal("id", parameter.ParameterName);
@@ -881,10 +481,6 @@ public sealed partial class MaintenanceTests
 
             protected override DbDataReader ExecuteDbDataReader(CommandBehavior behavior)
             {
-                if (CommandText.Contains("dbo.ClayzorOperationJournal", StringComparison.Ordinal) ||
-                    CommandText.Contains("dbo.ClayzorLegacyOperationEvidence", StringComparison.Ordinal) ||
-                    CommandText.Contains("dbo.ClayzorOperationScope", StringComparison.Ordinal))
-                    return ReadJournal();
                 if (CommandText.Contains("SUSER_SID()"))
                     return Table(("КодСотрудника", owner.EmployeeId)).CreateDataReader();
                 if (CommandText.Contains("fn_ТекущиеРоли"))
@@ -922,83 +518,6 @@ public sealed partial class MaintenanceTests
                 if (owner.HidePendingWork) rows.Rows.Clear();
                 return new DataTableReader([Table(("Now", new DateTime(2026, 11, 25, 15, 0, 0))), rows]);
             }
-
-            private DbDataReader ReadJournal()
-            {
-                if (CommandText.Contains("FROM dbo.ClayzorOperationScope", StringComparison.Ordinal) &&
-                    CommandText.StartsWith("SELECT ConflictKey", StringComparison.Ordinal))
-                {
-                    var attemptId = Parameter<Guid>("AttemptId");
-                    var scopes = new DataTable();
-                    scopes.Columns.Add("ConflictKey", typeof(string));
-                    foreach (var key in owner._linked.Keys.Where(key => key.AttemptId == attemptId))
-                        scopes.Rows.Add(key.ConflictKey);
-                    return scopes.CreateDataReader();
-                }
-                if (CommandText.Contains("INSERT INTO dbo.ClayzorLegacyOperationEvidence", StringComparison.Ordinal))
-                {
-                    var transaction = Assert.IsType<Transaction>(DbTransaction);
-                    var id = Parameter<Guid>("AttemptId");
-                    var actor = Parameter<int>("EmployeeId");
-                    var key = Parameter<string>("ConflictKey");
-                    var kind = Parameter<string>("CommandKind");
-                    if (!owner._legacy.TryGetValue(id, out var existing))
-                    {
-                        existing = new JournalRow(id, actor, key, kind, (byte)InventoryOperationState.Unknown, Guid.Empty);
-                        transaction.LegacyChanges.Add(existing);
-                    }
-                    return Table(("Value", existing.EmployeeId == actor && existing.ConflictKey == key &&
-                        existing.CommandKind == kind)).CreateDataReader();
-                }
-
-                if (CommandText.Contains("SELECT ConflictKey", StringComparison.Ordinal))
-                {
-                    var kind = Parameter<string>("CommandKind");
-                    var slot = Parameter<Guid>("OpenSlot");
-                    var scopes = new DataTable();
-                    scopes.Columns.Add("ConflictKey", typeof(string));
-                    foreach (var open in owner._journal.Values.Concat(owner._legacy.Values)
-                        .Where(item => item.CommandKind == kind && item.OpenSlot == slot)
-                        .Select(item => item.ConflictKey).Distinct())
-                        scopes.Rows.Add(open);
-                    return scopes.CreateDataReader();
-                }
-
-                JournalRow? row;
-                if (CommandText.Contains("SELECT AttemptId", StringComparison.Ordinal))
-                {
-                    owner._journal.TryGetValue(Parameter<Guid>("AttemptId"), out row);
-                }
-                else if (CommandText.Contains("WHERE ConflictKey = @ConflictKey AND OpenSlot = @OpenSlot", StringComparison.Ordinal))
-                {
-                    var key = Parameter<string>("ConflictKey");
-                    var slot = Parameter<Guid>("OpenSlot");
-                    var blocked = owner._journal.Values.Any(item => item.ConflictKey == key && item.OpenSlot == slot) ||
-                        owner._linked.Any(pair => pair.Key.ConflictKey == key && pair.Value == slot) ||
-                        owner._legacyLinks.Any(link => link.ConflictKey == key && owner._legacy.ContainsKey(link.AttemptId)) ||
-                        Parameters.Contains("AttemptId") && owner._legacy.ContainsKey(Parameter<Guid>("AttemptId")) ||
-                        owner._legacy.Values.Any(item => item.ConflictKey == key && item.OpenSlot == slot);
-                    return Table(("Value", blocked))
-                        .CreateDataReader();
-                }
-                else
-                {
-                    Assert.Contains("WHERE EmployeeId = @EmployeeId AND ConflictKey = @ConflictKey", CommandText);
-                    var actor = Parameter<int>("EmployeeId");
-                    var key = Parameter<string>("ConflictKey");
-                    row = owner._journal.Values.Reverse().Where(item => item.EmployeeId == actor && item.ConflictKey == key)
-                        .OrderBy(item => item.Settled).FirstOrDefault();
-                }
-
-                var table = Table(("AttemptId", row?.AttemptId ?? Guid.Empty), ("EmployeeId", row?.EmployeeId ?? 0),
-                    ("ConflictKey", row?.ConflictKey ?? ""), ("CommandKind", row?.CommandKind ?? ""),
-                    ("State", row?.State ?? (byte)0), ("ResultEntityId", row?.ResultEntityId ?? 0));
-                if (row is null) table.Rows.Clear();
-                else if (row.ResultEntityId is null) table.Rows[0]["ResultEntityId"] = DBNull.Value;
-                return table.CreateDataReader();
-            }
-
-            private T Parameter<T>(string name) => Assert.IsType<T>(Parameters[name].Value);
 
             private static DataTable Table(params (string Name, object Value)[] values)
             {

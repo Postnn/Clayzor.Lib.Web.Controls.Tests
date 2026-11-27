@@ -52,6 +52,24 @@ public sealed partial class EquipmentFormTests
         Assert.DoesNotContain(context.JSInterop.Invocations, call => call.Identifier == "clayModelEquipmentForm.close");
     }
 
+    /// <summary>Повторное Применить сохраняет следующее изменение после успешной записи.</summary>
+    [Fact]
+    public async Task ApplyTwice_SavesEachNewEdit()
+    {
+        var fixture = CreateFixture();
+        await using var context = fixture.Context;
+        var page = context.Render<EquipmentForm>();
+        WaitForSn(page, "CLAY_TEST_7");
+        FindSn(page).Input("CLAY_TEST_UPDATED");
+        await InvokeSave(page, false);
+
+        FindSn(page).Input("CLAY_TEST_7");
+        await InvokeSave(page, false);
+
+        Assert.Equal(2, fixture.Service.UpdateCalls);
+        Assert.Equal("CLAY_TEST_7", fixture.Service.Updated?.SerialNumber);
+    }
+
     /// <summary>SQL-ошибка сохраняет ввод и не выполняет success-path.</summary>
     [Fact]
     public async Task SaveSqlException_KeepsInputAndSkipsSuccessCallbacks()
@@ -253,7 +271,6 @@ public sealed partial class EquipmentFormTests
         Assert.Contains("Команды АТС не отправлены", page.Markup);
         Assert.Equal(1, fixture.Service.UpdateWithPhonesCalls);
         Assert.Equal(1, fixture.Service.SyncCalls);
-        Assert.DoesNotContain(context.JSInterop.Invocations, call => call.Identifier == "clayDraftStore.unknownOperation");
 
         fixture.Service.PhonePlanningError = null;
         var apply = page.FindAll("button").Single(button => button.TextContent.Trim() == "Применить");
@@ -271,7 +288,7 @@ public sealed partial class EquipmentFormTests
     public async Task SyncFailure_RetriesWithoutRepeatingDatabaseSave()
     {
         var fixture = CreateFixture(phones: true);
-        fixture.Service.SyncException = new InvalidOperationException("АТС недоступна");
+        fixture.Service.PhonePlanningError = "Команды АТС не отправлены.";
         await using var context = fixture.Context;
         var page = context.Render<EquipmentForm>();
         WaitForSn(page, "CLAY_TEST_7");
@@ -282,7 +299,7 @@ public sealed partial class EquipmentFormTests
         Assert.Equal(1, fixture.Service.UpdateWithPhonesCalls);
         Assert.Equal(1, fixture.Service.SyncCalls);
         Assert.NotNull(GetPrivate(page.Instance, "_pendingPhoneSync"));
-        fixture.Service.SyncException = null;
+        fixture.Service.PhonePlanningError = null;
 
         var apply = page.FindAll("button").Single(item => item.TextContent.Trim() == "Применить");
         Assert.False(apply.HasAttribute("disabled"));
@@ -361,32 +378,13 @@ public sealed partial class EquipmentFormTests
         provider.WaitForAssertion(() => Assert.Contains(CloseMainWithoutSaving, provider.Markup));
         await ClickMainDialogButtonAsync(provider, CloseMainWithoutSaving);
 
-        page.WaitForAssertion(() => Assert.Contains("Исход предыдущей команды не подтверждён долговечным журналом", page.Markup));
+        page.WaitForAssertion(() => Assert.Contains("Исход предыдущей команды не подтверждён", page.Markup));
         Assert.Empty(context.JSInterop.Invocations["clayModelEquipmentForm.close"]);
         Assert.Empty(context.JSInterop.Invocations[CloseRam]);
         Assert.Empty(context.JSInterop.Invocations[ReplaceMainScope]);
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.discard"]);
     }
 
-    [Fact]
-    public async Task CancelPendingSync_ClosesWithDurableUnknownWithoutDispatching()
-    {
-        var fixture = CreateFixture();
-        var id = Guid.NewGuid();
-        fixture.Service.SavedAtsReadResult = SavedAtsAttempt(id, PhoneSyncPhase.Unknown);
-        await using var context = fixture.Context;
-        var dialogs = context.Render<MudDialogProvider>();
-        var page = context.Render<EquipmentForm>();
-        WaitForSn(page, "CLAY_TEST_7");
-
-        await ChooseMainCancelAsync(page, dialogs, CloseMainWithoutSaving);
-
-        Assert.Single(context.JSInterop.Invocations[CloseRam]);
-        Assert.Single(context.JSInterop.Invocations["clayModelEquipmentForm.close"]);
-        Assert.Equal(id.ToString("N"), fixture.Service.SavedAtsReadResult!.Intent.AttemptId);
-        Assert.Equal(0, fixture.Service.SyncCalls);
-        Assert.Equal(0, fixture.Service.UpdateCalls);
-    }
 
     /// <summary>Refresh после подтверждения перезагружает запись и сохраняет pending для повтора.</summary>
     [Fact]
@@ -864,6 +862,7 @@ public sealed partial class EquipmentFormTests
     public async Task ComputerSave_ActualCallbackAwaitsWriteAndObservesFault(bool fault)
     {
         var fixture = CreateFixture(computer: true);
+        fixture.Service.DeferredComputerSave = true;
         await using var context = fixture.Context;
         var provider = context.Render<MudDialogProvider>();
         var page = context.Render<EquipmentForm>();
@@ -1116,46 +1115,6 @@ public sealed partial class EquipmentFormTests
         Assert.Null(GetPrivate(page.Instance, "_mainConflictMessage"));
     }
 
-    /// <summary>Совпадение данных сохраняет Unknown, пока нет доказуемого результата операции.</summary>
-    [Fact]
-    public async Task ReconcileDraftOperation_MatchingSnapshot_KeepsUnknownWithoutWrites()
-    {
-        var fixture = CreateFixture();
-        await using var context = fixture.Context;
-        var page = context.Render<EquipmentForm>();
-        WaitForSn(page, "CLAY_TEST_7");
-        SetDraftMainOperation(page, (string)GetPrivate(page.Instance, "_originalSnapshot")!);
-
-        await InvokeHandler(page, "ReconcileDraftOperationAsync");
-
-        Assert.True((bool)GetPrivate(page.Instance, "_draftOperationUnresolved")!);
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
-        Assert.Equal(0, fixture.Service.UpdateCalls);
-        Assert.Equal(0, fixture.Service.UpdateWithPhonesCalls);
-        Assert.Equal(0, fixture.Service.SyncCalls);
-    }
-
-    /// <summary>Read-only сверка расхождения сохраняет Unknown и не разрешает повтор.</summary>
-    [Fact]
-    public async Task ReconcileDraftOperation_DifferentSnapshot_KeepsUnknownWithoutWrites()
-    {
-        var fixture = CreateFixture();
-        await using var context = fixture.Context;
-        var page = context.Render<EquipmentForm>();
-        WaitForSn(page, "CLAY_TEST_7");
-        SetDraftMainOperation(page, (string)GetPrivate(page.Instance, "_originalSnapshot")!);
-        var fresh = OriginalEquipment(page);
-        fresh.SerialNumber = "CLAY_TEST_FOREIGN";
-        fixture.Service.NextModel = fresh;
-
-        await InvokeHandler(page, "ReconcileDraftOperationAsync");
-
-        Assert.True((bool)GetPrivate(page.Instance, "_draftOperationUnresolved")!);
-        Assert.Equal(0, fixture.Service.UpdateCalls);
-        Assert.Equal(0, fixture.Service.UpdateWithPhonesCalls);
-        Assert.Equal(0, fixture.Service.SyncCalls);
-    }
-
     /// <summary>Поздний ответ и ошибка владельца A не перекрывают успешно выбранного B.</summary>
     [Fact]
     public async Task OwnerChanged_LateFaultFromA_DoesNotOverwriteB()
@@ -1376,50 +1335,6 @@ public sealed partial class EquipmentFormTests
         Assert.Equal("new", editor.Instance.Notes);
     }
 
-    /// <summary>Ошибка соединения при удалении бухучёта не удаляет строку из UI и не запускает success-refresh.</summary>
-    [Fact]
-    public async Task DeleteAccountingConnectivity_DoesNotRefreshOrRemoveRow()
-    {
-        var fixture = CreateFixture();
-        fixture.Service.StoredAccounting.Add(new EquipmentAccounting { Id = 41, EquipmentId = 7, OwnerId = 1 });
-        fixture.Service.DeleteAccountingException = SqlExceptionFactory.Create(53, "connection error");
-        await using var context = fixture.Context;
-        var provider = context.Render<MudDialogProvider>();
-        var page = context.Render<EquipmentForm>();
-        WaitForSn(page, "CLAY_TEST_7");
-        var dialogAdded = TrackNextDialog(context);
-        var pending = InvokeHandler(page, "DeleteAccountingAsync", fixture.Service.StoredAccounting[0]);
-        var dialog = await dialogAdded.Task.WaitAsync(TimeSpan.FromSeconds(2));
-
-        await page.InvokeAsync(() => dialog.Close(DialogResult.Ok(true)));
-        await pending;
-
-        page.WaitForAssertion(() => Assert.Contains("Результат команды «Удаление бухгалтерского учёта» неизвестен", page.Markup));
-        Assert.Single(fixture.Service.StoredAccounting);
-        Assert.Equal(0, fixture.Service.AccountingRefreshCalls);
-
-        var attempt = fixture.Service.AccountingWriteAttempt;
-        Assert.NotEqual(Guid.Empty, attempt);
-        var begin = Assert.Single(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
-        using var browserAttempt = System.Text.Json.JsonDocument.Parse(Assert.IsType<string>(begin.Arguments[1]));
-        Assert.Equal(attempt.ToString("N"), browserAttempt.RootElement.GetProperty("attemptId").GetString());
-        Assert.Empty(browserAttempt.RootElement.GetProperty("acceptedScopes").EnumerateArray());
-        fixture.Service.AccountingWriteReceipt = new InventoryOperationReceipt(attempt, InventoryOperationState.Confirmed, 42);
-        await InvokeHandler(page, "ReconcileDraftOperationAsync");
-        Assert.True(PrivateBool(page.Instance, "_draftOperationUnresolved"));
-        Assert.Equal(0, fixture.Service.AccountingRefreshCalls);
-
-        FindSn(page).Input("CLAY_TEST_ACC_LATER");
-        fixture.Service.AccountingWriteReceipt = new InventoryOperationReceipt(attempt, InventoryOperationState.Confirmed, 41);
-        fixture.Service.StoredAccounting.Clear();
-        await InvokeHandler(page, "ReconcileDraftOperationAsync");
-        Assert.Equal(attempt, fixture.Service.AccountingReadAttempt);
-        Assert.Equal(1, fixture.Service.DeleteAccountingCalls);
-        Assert.Equal(1, fixture.Service.AccountingRefreshCalls);
-        Assert.Equal("CLAY_TEST_ACC_LATER", FindSn(page).GetAttribute("value"));
-        Assert.Single(context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
-    }
-
     /// <summary>SQL-ошибка UPDATE бухучёта сохраняет draft и не запускает success-refresh.</summary>
     [Fact]
     public async Task SaveAccountingConnectivity_KeepsDraftAndDoesNotRefresh()
@@ -1448,59 +1363,15 @@ public sealed partial class EquipmentFormTests
 
         await editor.FindAll("button").Single(button => button.TextContent.Trim() == "OK").ClickAsync();
 
-        editor.WaitForAssertion(() => Assert.Contains("Результат команды «Сохранение бухгалтерского учёта» неизвестен", editor.Markup));
+        editor.WaitForAssertion(() => Assert.Contains("Команда «Сохранение бухгалтерского учёта» не выполнена", editor.Markup));
         Assert.NotSame(draft, fixture.Service.LastAccountingDraft);
         Assert.Equal(draft.Notes, fixture.Service.LastAccountingDraft?.Notes);
         Assert.Equal("new draft", editor.Instance.Value.Notes);
         Assert.Equal(existing.ChangedAt, editor.Instance.Value.ChangedAt);
-        Assert.True(editor.FindAll("button").Single(button => button.TextContent.Trim() == "OK").HasAttribute("disabled"));
+        Assert.False(editor.FindAll("button").Single(button => button.TextContent.Trim() == "OK").HasAttribute("disabled"));
         Assert.Equal(0, fixture.Service.AccountingRefreshCalls);
         Assert.Equal("CLAY_TEST_ACC_DRAFT", FindSn(page).GetAttribute("value"));
         Assert.Equal("old", existing.Notes);
-    }
-
-    /// <summary>Unknown child переживает Cancel, Refresh и повторное открытие без Discard и потери baseline.</summary>
-    [Fact]
-    public async Task UnknownAccounting_CancelRefreshReopen_PreservesMarkerAndDraft()
-    {
-        var fixture = CreateFixture();
-        var existing = new EquipmentAccounting
-        {
-            Id = 41, EquipmentId = 7, OwnerId = 1, Notes = "old",
-            ChangedAt = new DateTime(2026, 11, 22, 18, 29, 44),
-        };
-        fixture.Service.StoredAccounting.Add(existing);
-        fixture.Service.SaveAccountingException = SqlExceptionFactory.Create(-2, "timeout");
-        await using var context = fixture.Context;
-        var provider = context.Render<MudDialogProvider>();
-        var page = context.Render<EquipmentForm>();
-        WaitForSn(page, "CLAY_TEST_7");
-        var dialogAdded = TrackNextDialog(context);
-        var pending = InvokeHandler(page, "OpenAccountingDialogAsync", existing);
-        var reference = await dialogAdded.Task.WaitAsync(TimeSpan.FromSeconds(2));
-        var editor = provider.FindComponent<EquipmentAccountingDialog>();
-        editor.Instance.Value.IsMaterial = true;
-        editor.Instance.Value.DateFrom = DateTime.Today;
-        editor.Instance.Value.Notes = "unknown draft";
-        await editor.FindAll("button").Single(button => button.TextContent.Trim() == "OK").ClickAsync();
-        await provider.InvokeAsync(() => reference.Close(DialogResult.Cancel()));
-        await pending;
-
-        Assert.True(PrivateBool(page.Instance, "_draftOperationUnresolved"));
-        Assert.Contains("unknown draft", GetPrivate(page.Instance, "_restoredEditorState")!.ToString());
-        await InvokeHandler(page, "RefreshAsync");
-        Assert.DoesNotContain(context.JSInterop.Invocations, call => call.Identifier == "clayDraftStore.discard");
-
-        var reopenedAdded = TrackNextDialog(context);
-        var reopenedPending = InvokeHandler(page, "OpenAccountingDialogAsync", existing);
-        var reopenedReference = await reopenedAdded.Task.WaitAsync(TimeSpan.FromSeconds(2));
-        var reopened = provider.FindComponent<EquipmentAccountingDialog>();
-        Assert.Equal("unknown draft", reopened.Instance.Value.Notes);
-        Assert.Equal(existing.ChangedAt, reopened.Instance.Value.ChangedAt);
-        Assert.True(PrivateBool(page.Instance, "_draftOperationUnresolved"));
-
-        await provider.InvokeAsync(() => reopenedReference.Close(DialogResult.Cancel()));
-        await reopenedPending;
     }
 
     /// <summary>После commit ошибка refresh закрывает редактор как записанный; повтор выполняет только SELECT.</summary>
@@ -1801,38 +1672,6 @@ public sealed partial class EquipmentFormTests
         Assert.Contains("Сохраните оборудование перед настройкой", page.Markup);
     }
 
-    /// <summary>Новая форма читает серверный план, а «Применить» продолжает только неотправленный шаг.</summary>
-    [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public async Task ReopenedConfigureReadsServerAndOnlyResumesPlannedStep(bool unknown)
-    {
-        var fixture = CreateFixture(phoneConfig: true);
-        var id = Guid.NewGuid().ToString("N");
-        var intent = new EquipmentPhoneSyncIntent(id, 7, EquipmentPhoneSyncOrigin.ExplicitConfigure,
-            default, 1, 30, [], []);
-        fixture.Service.ConfigureReadResult = new PhoneSyncAttempt(intent,
-        [new(id, new PhoneSyncOperation(PhoneSyncKind.Xorcom, "17"), unknown ? PhoneSyncPhase.Unknown : PhoneSyncPhase.NotSent)]);
-        await using var context = fixture.Context;
-        var page = context.Render<EquipmentForm>();
-        WaitForSn(page, "CLAY_TEST_7");
-
-        Assert.Equal(0, fixture.Service.SyncCalls);
-        Assert.Contains(unknown ? "Повтор заблокирован" : "Продолжить настройку", page.Markup);
-        page.WaitForAssertion(() => Assert.Equal(unknown,
-            page.FindAll("button").Single(button => button.TextContent.Trim() == "Применить").HasAttribute("disabled")));
-        await InvokeHandler(page, "ConfigurePhoneEquipmentAsync");
-        Assert.Equal(0, fixture.Service.SyncCalls);
-        await InvokeHandler(page, "RefreshAsync");
-        Assert.Equal(Guid.ParseExact(id, "N"), fixture.Service.ReadConfigureAttemptId);
-        Assert.Equal(0, fixture.Service.SyncCalls);
-
-        await InvokeHandler(page, "SaveAsync", false);
-        Assert.Equal(unknown ? 0 : 1, fixture.Service.SyncCalls);
-        Assert.Equal(0, fixture.Service.UpdateCalls);
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
-    }
-
     /// <summary>Сохранённый в старой версии Failed не даёт разрешения повторить внешний вызов.</summary>
     [Fact]
     public async Task ConfigureLegacyCheckpointRemainsBlockedWithoutServerProof()
@@ -1863,64 +1702,7 @@ public sealed partial class EquipmentFormTests
         Assert.Equal(0, fixture.Service.UpdateCalls);
     }
 
-    /// <summary>После открытия карточка продолжает собственный план по исходному GUID без повторного сохранения.</summary>
-    [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public async Task ReopenedSavedPhonePlanOnlyResumesProvenUnsentWork(bool alreadyDispatching)
-    {
-        var fixture = CreateFixture();
-        var id = Guid.NewGuid();
-        fixture.Service.SavedAtsReadResult = SavedAtsAttempt(id, alreadyDispatching ? PhoneSyncPhase.Unknown : PhoneSyncPhase.NotSent);
-        await using var context = fixture.Context;
-        var page = context.Render<EquipmentForm>();
-        WaitForSn(page, "CLAY_TEST_7");
-        page.WaitForAssertion(() => Assert.Equal(alreadyDispatching,
-            page.FindAll("button").Single(button => button.TextContent.Trim() == "Применить").HasAttribute("disabled")));
-        Assert.Equal(0, fixture.Service.SyncCalls);
 
-        await InvokeHandler(page, "RefreshAsync");
-        Assert.Equal(id, fixture.Service.SavedAtsReadAttemptId);
-        Assert.Equal(0, fixture.Service.SyncCalls);
-        await InvokeHandler(page, "SaveAsync", false);
-
-        Assert.Equal(alreadyDispatching ? 0 : 1, fixture.Service.SyncCalls);
-        Assert.Equal(0, fixture.Service.UpdateCalls);
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
-    }
-
-    /// <summary>При потерянном ответе SQL подтверждённый main scope принимается независимо от исхода АТС.</summary>
-    [Fact]
-    public async Task ReconcileLostPhoneSaveAcceptsSqlAndReadsAtsWithoutDispatch()
-    {
-        var fixture = CreateFixture();
-        var id = Guid.NewGuid();
-        fixture.Service.SavedAtsReadResult = SavedAtsAttempt(id, PhoneSyncPhase.Unknown);
-        fixture.Service.MainWriteReceipt = new InventoryOperationReceipt(id, InventoryOperationState.Confirmed, 7);
-        await using var context = fixture.Context;
-        var page = context.Render<EquipmentForm>();
-        WaitForSn(page, "CLAY_TEST_7");
-        page.WaitForAssertion(() => Assert.NotEmpty(context.JSInterop.Invocations["clayDraftStore.registerRam"]));
-        SetPrivate(page.Instance, "_draftOperation", new ClayDraftOperation(1, id.ToString("N"), "equipment-phone-save",
-            ClayDraftOperationStatus.Unknown, 1, "{}", [new ClayDraftOperationScope("main", 0, new Dictionary<string, long>())], true, 0));
-        SetPrivate(page.Instance, "_draftOperationUnresolved", true);
-
-        await InvokeHandler(page, "ReconcileDraftOperationAsync");
-
-        Assert.Equal(id, fixture.Service.SavedAtsReadAttemptId);
-        Assert.Single(context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
-        Assert.False(PrivateBool(page.Instance, "_draftOperationUnresolved"));
-        Assert.Contains("Повтор заблокирован", page.Markup);
-        Assert.Equal(0, fixture.Service.SyncCalls);
-        Assert.Equal(0, fixture.Service.UpdateCalls);
-    }
-
-    private static PhoneSyncAttempt SavedAtsAttempt(Guid id, PhoneSyncPhase phase)
-    {
-        var intent = new EquipmentPhoneSyncIntent(id.ToString("N"), 7, EquipmentPhoneSyncOrigin.EquipmentSave,
-            default, 1, 30, [], []) { DurableSave = true };
-        return new PhoneSyncAttempt(intent, [new(intent.AttemptId, new PhoneSyncOperation(PhoneSyncKind.Xorcom, "17"), phase)]);
-    }
 
     /// <summary>Global102 позволяет показать и скрыть пароль без роли редактирования43.</summary>
     [Fact]
@@ -2136,7 +1918,7 @@ public sealed partial class EquipmentFormTests
 
         await editor.FindAll("button").Single(button => button.TextContent.Trim() == "OK").ClickAsync();
 
-        editor.WaitForAssertion(() => Assert.Contains("Результат команды «Сохранение подключения UPS» неизвестен", editor.Markup));
+        editor.WaitForAssertion(() => Assert.Contains("Команда «Сохранение подключения UPS» не выполнена", editor.Markup));
         Assert.Equal(0, fixture.Service.UpsRefreshCalls);
     }
 
@@ -2249,38 +2031,6 @@ public sealed partial class EquipmentFormTests
     }
 
     /// <summary>Сверка рабочей сети использует ту же попытку и принимает только точный серверный результат.</summary>
-    [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public async Task NetworkAttach_ReconcileDoesNotResendAndRequiresExactReceipt(bool matching)
-    {
-        var fixture = CreateFixture(network: true);
-        fixture.Service.LoseNetworkWriteReply = true;
-        fixture.Service.MatchNetworkReceipt = matching;
-        await using var context = fixture.Context;
-        var page = context.Render<EquipmentForm>();
-        WaitForSn(page, "CLAY_TEST_7");
-        SetPrivate(page.Instance, "_canChangeNetwork", true);
-
-        await InvokeHandler(page, "SetNetworkAttachmentAsync", true);
-
-        Assert.Equal(1, fixture.Service.AttachNetworkCalls);
-        var begin = Assert.Single(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
-        using var payload = System.Text.Json.JsonDocument.Parse(Assert.IsType<string>(begin.Arguments[1]));
-        var attemptId = Assert.IsType<Guid>(fixture.Service.NetworkAttemptId);
-        Assert.Equal(attemptId.ToString("N"), payload.RootElement.GetProperty("attemptId").GetString());
-        Assert.Empty(payload.RootElement.GetProperty("acceptedScopes").EnumerateArray());
-        Assert.True(PrivateBool(page.Instance, "_draftOperationUnresolved"));
-
-        await InvokeHandler(page, "RefreshAsync");
-
-        Assert.Equal(attemptId, fixture.Service.NetworkReadAttemptId);
-        Assert.Equal(1, fixture.Service.AttachNetworkCalls);
-        Assert.Equal(matching ? 1 : 0, context.JSInterop.Invocations["clayDraftStore.commitOperation"].Count);
-        Assert.Equal(!matching, PrivateBool(page.Instance, "_draftOperationUnresolved"));
-    }
-
-    /// <summary>Открытая карточка обновляет сроки и статус SIM после полуночи в часовом поясе клиента.</summary>
     [Fact]
     public async Task BusinessDayRollover_RefreshesOverdueAndSimBlockWithoutReload()
     {
@@ -2330,7 +2080,6 @@ public sealed partial class EquipmentFormTests
         Assert.Same(model, CurrentModel(page.Instance));
         Assert.Single(fixture.Service.Requests);
         Assert.Equal(0, fixture.Service.UpdateCalls);
-        Assert.DoesNotContain(context.JSInterop.Invocations, call => call.Identifier == "clayDraftStore.beginOperationIntent");
     }
 
     private sealed class EquipmentDayClock(DateTimeOffset now) : TimeProvider
@@ -2619,17 +2368,15 @@ public sealed partial class EquipmentFormTests
         context.JSInterop.Mode = JSRuntimeMode.Loose;
         context.JSInterop.Setup<int>("clayGridTimeZone.getOffsetMinutes", _ => true).SetResult(180);
         context.JSInterop.Setup<long>("clayGridTimeZone.localDateTimeToUtcMilliseconds", _ => true).SetResult(0L);
-        context.JSInterop.Setup<ClayLegacyDraftOperationEvidence[]>("clayDraftStore.beginLegacyOperationEvidenceTransfer", _ => true)
-            .SetResult([]);
         context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.registerRam", _ => true)
             .SetResult(new ClayDraftRestore("test-registration", false, 0, null, null));
         context.JSInterop.Setup<ClayDraftStorageHealth>("clayDraftStore.getHealth", _ => true)
-            .SetResult(new ClayDraftStorageHealth(true, 0, null, false, 0, 0));
+            .SetResult(new ClayDraftStorageHealth(true, 0, null, 0, 0));
         context.JSInterop.Setup<ClayDraftEditorScopeState>("clayDraftStore.readEditorScope", _ => true)
-            .SetResult(mainScope ?? new ClayDraftEditorScopeState(21, false, false));
+            .SetResult(mainScope ?? new ClayDraftEditorScopeState(21, false));
         context.JSInterop.Setup<ClayDraftEditorCloseState>("clayDraftStore.readEditorCloseState", _ => true)
             .SetResult(closeState ?? new ClayDraftEditorCloseState(mainScope?.Revision ?? 21,
-                mainScope?.HasRaw ?? false, mainScope?.HasOperation ?? false, []));
+                mainScope?.HasRaw ?? false, []));
         context.JSInterop.Setup<bool>("clayDraftStore.closeRam", _ => true).SetResult(true);
         context.JSInterop.Setup<bool>(ReplaceMainScope, _ => true).SetResult(acceptMainReplacement);
         context.JSInterop.Setup<ClayDraftRawApplyResult>("clayDraftStore.applyRaw", _ => true)
@@ -2638,8 +2385,6 @@ public sealed partial class EquipmentFormTests
             .SetResult(new ClayDraftRawApplyResult([], []));
         context.JSInterop.Setup<ClayDraftRestoreReadiness>("clayDraftStore.getRestoreReadiness", _ => true)
             .SetResult(draftReadiness ?? new ClayDraftRestoreReadiness(true, [], []));
-        context.JSInterop.Setup<string>("clayDraftStore.beginOperationIntent", _ => true)
-            .SetResult("""{"version":1,"attemptId":"test-attempt","kind":"test","status":"running","revision":1,"data":"{}","scopes":[],"acceptLegacyTyped":false,"legacyTypedRevision":0}""");
         context.Services.AddMudServices();
         context.Services.AddMudExtensions();
         context.Services.AddScoped<DbManager>(_ => CreateDb());
@@ -2721,7 +2466,7 @@ public sealed partial class EquipmentFormTests
         Fixture fixture,
         IRenderedComponent<EquipmentForm> page)
     {
-        fixture.Service.SyncException = new InvalidOperationException("АТС недоступна");
+        fixture.Service.PhonePlanningError = "Команды АТС не отправлены.";
         WaitForSn(page, "CLAY_TEST_7");
         await InvokeHandler(page, "OnPhoneToAddChangedAsync", 11);
         await InvokeSave(page, false);
@@ -2751,6 +2496,14 @@ public sealed partial class EquipmentFormTests
                 await task;
         });
 
+    private static void SetActiveChildDraft(EquipmentForm form, string dialog, string? key)
+    {
+        const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+        var editorType = typeof(EquipmentForm).GetNestedType("EquipmentDraftEditor", System.Reflection.BindingFlags.NonPublic)!;
+        var editor = editorType.GetConstructor([typeof(string), typeof(string), typeof(int?)])!.Invoke([dialog, key, null]);
+        SetPrivate(form, "_activeEditor", editor);
+    }
+
     private static EquipmentEntity CurrentModel(EquipmentForm page) =>
         (EquipmentEntity)GetPrivate(page, "_model")!;
 
@@ -2776,24 +2529,6 @@ public sealed partial class EquipmentFormTests
             ActiveUpsServers = (object?)null,
             ActiveUpsTests = (object?)null,
         });
-
-    private static void SetDraftMainOperation(IRenderedComponent<EquipmentForm> page, string snapshot)
-    {
-        var data = System.Text.Json.JsonSerializer.Serialize(new
-        {
-            Kind = "equipment-save",
-            EquipmentId = 7,
-            Editor = (string?)null,
-            Origin = "main",
-            Intent = new { ExpectedSnapshot = snapshot, AfterSnapshot = snapshot },
-        });
-        var operation = new ClayDraftOperation(1, "test-attempt", "equipment-save",
-            ClayDraftOperationStatus.Unknown, 1, data,
-            [new ClayDraftOperationScope("main", 0, new Dictionary<string, long>())], true, 0);
-        SetPrivate(page.Instance, "_draftOperation", operation);
-        SetPrivate(page.Instance, "_draftOperationUnresolved", true);
-        SetPrivate(page.Instance, "_draftOperationScope", "main");
-    }
 
     private static UpsTest CloneUpsTestForTest(UpsTest source, DateTime testedAt) => new()
     {
@@ -2876,6 +2611,7 @@ public sealed partial class EquipmentFormTests
         public string? PhonePlanningError { get; set; }
         public Exception? ResponsibleException { get; set; }
         public EquipmentResponsiblePeriod? ResponsibleUpdated { get; private set; }
+        public int PeriodWriteCalls => LocationSaves.Count + (ResponsibleUpdated is null ? 0 : 1);
         public bool DeferredUpdate { get; set; }
         public bool DeferredInitialLoad { get; set; }
         public Exception? LoadException { get; set; }
@@ -2907,21 +2643,13 @@ public sealed partial class EquipmentFormTests
         public bool LoseSoftwareWriteReply { get; set; }
         public int SoftwareWriteCalls { get; private set; }
         public Guid SoftwareWriteAttempt { get; private set; }
-        public Guid SoftwareReadAttempt { get; private set; }
-        public int SoftwareReadInstallationId { get; private set; }
         public EquipmentSoftwareInstallation? SubmittedSoftware { get; private set; }
-        public InventoryOperationReceipt? SoftwareWriteReceipt { get; set; }
         public List<EquipmentComputerSnapshot> StoredComputers { get; } = [];
         public int HotelPhoneCount { get; set; }
         public List<(int[] Original, int[] Current)> PhoneSaves { get; } = [];
         public int UpdateWithPhonesCalls { get; private set; }
         public int SyncCalls { get; private set; }
         public Guid? ConfigureAttemptId { get; private set; }
-        public Guid? ReadConfigureAttemptId { get; private set; }
-        public PhoneSyncAttempt? ConfigureReadResult { get; set; }
-        public PhoneSyncAttempt? SavedAtsReadResult { get; set; }
-        public Guid? SavedAtsReadAttemptId { get; private set; }
-        public InventoryOperationReceipt? MainWriteReceipt { get; set; }
         public IReadOnlyList<PhoneSyncResult>? SyncResults { get; set; }
         public IReadOnlyList<PhoneSyncOperation> LastSyncOperations { get; private set; } = [];
         public TaskCompletionSource UpdateCompletion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -2929,6 +2657,7 @@ public sealed partial class EquipmentFormTests
         public TaskCompletionSource InitialLoadReturned { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public EquipmentEntity? NextModel { get; set; }
         public int? EmployeeId { get; set; }
+        private EquipmentEntity? _savedModel;
 
         public override async Task<EquipmentEntity?> GetAsync(int id)
         {
@@ -2941,6 +2670,8 @@ public sealed partial class EquipmentFormTests
             }
             if (ReturnNullAfterUpdate && UpdateCalls > 0)
                 return null;
+            if (_savedModel is not null)
+                return _savedModel;
             if (LoadException is not null)
             {
                 var exception = LoadException;
@@ -3018,34 +2749,8 @@ public sealed partial class EquipmentFormTests
         public DateTime? ComputerWriteBusinessDay { get; private set; }
         public DateTime ComputerReadDate { get; private set; }
         public Guid ComputerReadAttempt { get; private set; }
-        public InventoryOperationReceipt? ComputerWriteReceipt { get; set; }
         public TaskCompletionSource ComputerSaveRequested { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource ComputerSaveCompletion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        public override async Task SaveComputerPhasedAsync(EquipmentComputerSnapshot snapshot, DateTime? today = null)
-        {
-            ComputerSaveCalls++;
-            ComputerSaveRequested.TrySetResult();
-            await ComputerSaveCompletion.Task;
-            StoredComputers.Add(snapshot);
-        }
-
-        public override Task SaveComputerPhasedAsync(EquipmentComputerSnapshot snapshot, DateTime? businessToday,
-            int? expectedModelId, int employeeId, Guid attemptId, CancellationToken ct)
-        {
-            ComputerWriteAttempt = attemptId;
-            ComputerWriteDate = snapshot.Date.Date;
-            ComputerWriteBusinessDay = businessToday;
-            return SaveComputerPhasedAsync(snapshot, businessToday);
-        }
-
-        public override Task<InventoryOperationReceipt?> ReadComputerWriteReceiptAsync(int equipmentId, DateTime date,
-            bool expectedExisting, int employeeId, Guid attemptId, CancellationToken ct)
-        {
-            ComputerReadDate = date;
-            ComputerReadAttempt = attemptId;
-            return Task.FromResult(ComputerWriteReceipt);
-        }
 
         public override Task<IReadOnlyList<EquipmentComputerSnapshot>> GetComputerHistoryAsync(int equipmentId)
         {
@@ -3107,36 +2812,11 @@ public sealed partial class EquipmentFormTests
         public Guid LicenseWriteAttempt { get; private set; }
         public Guid LicenseReadAttempt { get; private set; }
         public bool LicenseReadExpectedExisting { get; private set; }
-        public InventoryOperationReceipt? LicenseWriteReceipt { get; set; }
 
         public override Task<IReadOnlyList<EquipmentLicense>> GetLicensesAsync(int equipmentId)
         {
             LicenseRefreshCalls++;
             return Task.FromResult<IReadOnlyList<EquipmentLicense>>([]);
-        }
-
-        public override Task<bool> ReadLicenseWritePendingAsync(int equipmentId, int employeeId, CancellationToken ct)
-        {
-            LicensePendingReads++;
-            return Task.FromResult(LicenseWritePending);
-        }
-
-        public override Task SaveLicenseAsync(EquipmentLicense license, LicenseType? type, int employeeId,
-            Guid attemptId, CancellationToken ct)
-        {
-            LicenseWriteCalls++;
-            LicenseWriteAttempt = attemptId;
-            if (LoseLicenseWriteReply)
-                throw new EquipmentOperationException(EquipmentWritePhase.Unknown, "Ответ потерян", new TimeoutException());
-            return Task.CompletedTask;
-        }
-
-        public override Task<InventoryOperationReceipt?> ReadLicenseWriteReceiptAsync(int equipmentId, bool expectedExisting,
-            int employeeId, Guid attemptId, CancellationToken ct)
-        {
-            LicenseReadAttempt = attemptId;
-            LicenseReadExpectedExisting = expectedExisting;
-            return Task.FromResult(LicenseWriteReceipt);
         }
 
         public override Task<IReadOnlyList<LicenseType>> GetLicenseTypesAsync() =>
@@ -3154,25 +2834,6 @@ public sealed partial class EquipmentFormTests
             Assert.Equal((7, 17, 4), (equipmentId, installationId, employeeId));
             SoftwareResetReads++;
             return Task.FromResult(SoftwareResetResult);
-        }
-
-        public override Task SaveSoftwareInstallationAsync(EquipmentSoftwareInstallation installation, int employeeId,
-            Guid attemptId, CancellationToken ct)
-        {
-            SoftwareWriteCalls++;
-            SoftwareWriteAttempt = attemptId;
-            SubmittedSoftware = installation;
-            if (LoseSoftwareWriteReply)
-                throw new EquipmentOperationException(EquipmentWritePhase.Unknown, "Ответ потерян", new TimeoutException());
-            return Task.CompletedTask;
-        }
-
-        public override Task<InventoryOperationReceipt?> ReadSoftwareWriteReceiptAsync(int equipmentId, int installationId,
-            int employeeId, Guid attemptId, CancellationToken ct)
-        {
-            SoftwareReadAttempt = attemptId;
-            SoftwareReadInstallationId = installationId;
-            return Task.FromResult(SoftwareWriteReceipt);
         }
 
         public override Task<IReadOnlyList<EquipmentAccounting>> GetAccountingAsync(int equipmentId)
@@ -3250,32 +2911,6 @@ public sealed partial class EquipmentFormTests
         public Guid UpsReadAttempt { get; private set; }
         public int UpsReadId { get; private set; }
         public int UpsWriteCalls { get; private set; }
-        public InventoryOperationReceipt? UpsWriteReceipt { get; set; }
-
-        public override Task AddUpsLinkAsync(int upsEquipmentId, int serverEquipmentId, int employeeId, Guid attemptId, CancellationToken ct)
-        {
-            UpsWriteAttempt = attemptId;
-            UpsWriteCalls++;
-            return UpsSaveException is not null ? Task.FromException(UpsSaveException) : Task.CompletedTask;
-        }
-
-        public override Task SaveUpsDetailsAsync(int upsEquipmentId, int sourceServerEquipmentId,
-            IReadOnlyCollection<UpsServerLink> originalServers, IReadOnlyCollection<UpsServerLink> currentServers,
-            IReadOnlyCollection<UpsTest> originalTests, IReadOnlyCollection<UpsTest> currentTests,
-            int employeeId, Guid attemptId, CancellationToken ct)
-        {
-            UpsWriteAttempt = attemptId;
-            UpsWriteCalls++;
-            return SaveUpsDetailsAsync(upsEquipmentId, sourceServerEquipmentId, originalServers, currentServers, originalTests, currentTests);
-        }
-
-        public override Task<InventoryOperationReceipt?> ReadUpsWriteReceiptAsync(int upsEquipmentId, int serverEquipmentId,
-            string commandKind, int employeeId, Guid attemptId, CancellationToken ct)
-        {
-            UpsReadAttempt = attemptId;
-            UpsReadId = upsEquipmentId;
-            return Task.FromResult(UpsWriteReceipt);
-        }
 
         public Exception? SaveAccountingException { get; set; }
         public Exception? AccountingRefreshException { get; set; }
@@ -3284,7 +2919,6 @@ public sealed partial class EquipmentFormTests
         public int DeleteAccountingCalls { get; private set; }
         public Guid AccountingWriteAttempt { get; private set; }
         public Guid AccountingReadAttempt { get; private set; }
-        public InventoryOperationReceipt? AccountingWriteReceipt { get; set; }
 
         public override Task SaveAccountingAsync(EquipmentAccounting accounting)
         {
@@ -3302,26 +2936,6 @@ public sealed partial class EquipmentFormTests
 
         public override Task DeleteAccountingAsync(int equipmentId, int accountingId) =>
             DeleteAccountingException is not null ? Task.FromException(DeleteAccountingException) : Task.CompletedTask;
-
-        public override Task SaveAccountingAsync(EquipmentAccounting accounting, int employeeId, Guid attemptId, CancellationToken ct)
-        {
-            AccountingWriteAttempt = attemptId;
-            return SaveAccountingAsync(accounting);
-        }
-
-        public override Task DeleteAccountingAsync(int equipmentId, int accountingId, int employeeId, Guid attemptId, CancellationToken ct)
-        {
-            AccountingWriteAttempt = attemptId;
-            DeleteAccountingCalls++;
-            return DeleteAccountingAsync(equipmentId, accountingId);
-        }
-
-        public override Task<InventoryOperationReceipt?> ReadAccountingWriteReceiptAsync(int equipmentId, int accountingId,
-            string commandKind, int employeeId, Guid attemptId, CancellationToken ct)
-        {
-            AccountingReadAttempt = attemptId;
-            return Task.FromResult(AccountingWriteReceipt);
-        }
 
         public override Task<IReadOnlyList<UpsServerLink>> GetUpsLinksAsync(int serverEquipmentId)
         {
@@ -3373,24 +2987,6 @@ public sealed partial class EquipmentFormTests
             return employee;
         }
 
-        public override Task SetNetworkAttachmentAsync(int equipmentId, int employeeId, Guid attemptId, bool attach,
-            int expectedCount, CancellationToken ct)
-        {
-            AttachNetworkCalls++;
-            NetworkAttemptId = attemptId;
-            if (LoseNetworkWriteReply)
-                throw new EquipmentOperationException(EquipmentWritePhase.Unknown, "Ответ потерян", new TimeoutException());
-            return Task.CompletedTask;
-        }
-
-        public override Task<InventoryOperationReceipt?> ReadNetworkWriteReceiptAsync(int equipmentId, int employeeId,
-            Guid attemptId, bool attach, CancellationToken ct)
-        {
-            NetworkReadAttemptId = attemptId;
-            return Task.FromResult<InventoryOperationReceipt?>(new InventoryOperationReceipt(
-                MatchNetworkReceipt ? attemptId : Guid.NewGuid(), InventoryOperationState.Confirmed, equipmentId));
-        }
-
         public override async Task UpdateAsync(EquipmentEntity equipment)
         {
             UpdateCalls++;
@@ -3402,29 +2998,9 @@ public sealed partial class EquipmentFormTests
             }
             if (SaveException is not null)
                 throw SaveException;
+            _savedModel = equipment;
         }
 
-        public override Task UpdateAsync(EquipmentEntity equipment, int employeeId, Guid attemptId, CancellationToken ct) =>
-            UpdateAsync(equipment);
-
-        public bool LegacyEquipmentPending { get; set; }
-        public Exception? LegacyEquipmentImportError { get; set; }
-        public List<ClayLegacyDraftOperationEvidence> ImportedEquipmentEvidence { get; } = [];
-
-        public override Task ImportEquipmentLegacyEvidenceAsync(int equipmentId, int employeeId,
-            IReadOnlyList<ClayLegacyDraftOperationEvidence> evidence, CancellationToken ct)
-        {
-            if (LegacyEquipmentImportError is { } error)
-                throw error;
-            ImportedEquipmentEvidence.AddRange(evidence);
-            return Task.CompletedTask;
-        }
-
-        public override Task<bool> ReadMainWritePendingAsync(int equipmentId, int employeeId, CancellationToken ct) =>
-            Task.FromResult(LegacyEquipmentPending || ConfigureReadResult is not null || SavedAtsReadResult is not null);
-
-        public override Task<InventoryOperationReceipt?> ReadMainWriteReceiptAsync(int equipmentId, int employeeId,
-            Guid attemptId, bool includesPhones, CancellationToken ct) => Task.FromResult(MainWriteReceipt);
 
         public override Task AddAccountAsync(EquipmentAccount account)
         {
@@ -3435,22 +3011,6 @@ public sealed partial class EquipmentFormTests
         public Guid AccountWriteAttempt { get; private set; }
         public string? AccountWriteBinding { get; private set; }
         public Guid AccountReadAttempt { get; private set; }
-        public InventoryOperationReceipt? AccountWriteReceipt { get; set; }
-
-        public override Task AddAccountAsync(EquipmentAccount account, int employeeId, Guid attemptId, byte[] bindingNonce,
-            CancellationToken ct)
-        {
-            AccountWriteAttempt = attemptId;
-            AccountWriteBinding = EquipmentAccount.AttemptBinding(account.EquipmentId, account.Login, bindingNonce);
-            return AddAccountAsync(account);
-        }
-
-        public override Task<InventoryOperationReceipt?> ReadAccountWriteReceiptAsync(int equipmentId, string commandKind,
-            string binding, int employeeId, Guid attemptId, CancellationToken ct)
-        {
-            AccountReadAttempt = attemptId;
-            return Task.FromResult(binding == AccountWriteBinding ? AccountWriteReceipt : null);
-        }
 
         public EquipmentSimCard? SimEditorSnapshot { get; set; }
 
@@ -3468,44 +3028,8 @@ public sealed partial class EquipmentFormTests
         public Guid SimReadAttempt { get; private set; }
         public DateTime? SimServiceBusinessDay { get; private set; }
         public bool LoseSimWriteReply { get; set; }
-        public InventoryOperationReceipt? SimWriteReceipt { get; set; }
 
         public override Task<int?> GetDuplicateSimIdAsync(int equipmentId, string phoneNumber) => Task.FromResult<int?>(null);
-
-        public override Task SaveSimAsync(EquipmentSimCard sim, EquipmentSimWriteMode mode, string? expectedVersion,
-            int? duplicateEquipmentId, int employeeId, Guid attemptId, CancellationToken ct) => RecordSimWrite(attemptId);
-
-        public override Task DeleteSimAsync(int equipmentId, string? expectedVersion, int employeeId, Guid attemptId, CancellationToken ct) =>
-            DeleteSimAsync(equipmentId, expectedVersion);
-
-        public override Task SaveSimServiceAsync(EquipmentSimService service, DateTime? businessToday, int employeeId,
-            Guid attemptId, CancellationToken ct)
-        {
-            SavedSimServiceVersion = service.ChangedAt;
-            SimServiceBusinessDay = businessToday;
-            return RecordSimWrite(attemptId);
-        }
-
-        private Task RecordSimWrite(Guid attemptId)
-        {
-            SimWriteCalls++;
-            SimWriteAttempt = attemptId;
-            if (LoseSimWriteReply)
-                throw new EquipmentOperationException(EquipmentWritePhase.Unknown, "Ответ потерян", new TimeoutException());
-            return Task.CompletedTask;
-        }
-
-        public override Task<InventoryOperationReceipt?> ReadSimWriteReceiptAsync(int equipmentId, int? duplicateEquipmentId,
-            string commandKind, int employeeId, Guid attemptId, CancellationToken ct) => ReadSimProof(attemptId);
-
-        public override Task<InventoryOperationReceipt?> ReadSimServiceWriteReceiptAsync(int equipmentId, int serviceId,
-            int employeeId, Guid attemptId, CancellationToken ct) => ReadSimProof(attemptId);
-
-        private Task<InventoryOperationReceipt?> ReadSimProof(Guid attemptId)
-        {
-            SimReadAttempt = attemptId;
-            return Task.FromResult(SimWriteReceipt);
-        }
 
         public override Task AddLocationAsync(
             EquipmentLocationPeriod location,
@@ -3519,78 +3043,6 @@ public sealed partial class EquipmentFormTests
         {
             LocationSaves.Add((location, responsible));
             return Task.CompletedTask;
-        }
-
-        public override async Task AddLocationAsync(EquipmentLocationPeriod location, EquipmentResponsiblePeriod? responsible,
-            bool expectedActiveResponsible, int employeeId, Guid attemptId, CancellationToken ct)
-        {
-            await RecordPeriodWrite(attemptId, location.FromUtc);
-            await AddLocationAsync(location, responsible, expectedActiveResponsible);
-        }
-
-        public override Task UpdateResponsibleAsync(EquipmentResponsiblePeriod responsible)
-        {
-            ResponsibleUpdated = responsible;
-            if (ResponsibleException is not null)
-                throw ResponsibleException;
-            return Task.CompletedTask;
-        }
-
-        public Guid PeriodWriteAttempt { get; private set; }
-        public DateTime PeriodWriteStart { get; private set; }
-        public Guid PeriodReadAttempt { get; private set; }
-        public DateTime PeriodReadStart { get; private set; }
-        public int PeriodWriteCalls { get; private set; }
-        public bool LosePeriodWriteReply { get; set; }
-        public InventoryOperationReceipt? PeriodWriteReceipt { get; set; }
-
-        public override Task UpdateLocationAsync(EquipmentLocationPeriod location, int employeeId, Guid attemptId, CancellationToken ct)
-        {
-            SavedLocationVersion = location.ChangedAtUtc;
-            return RecordPeriodWrite(attemptId, location.FromUtc);
-        }
-
-        public override Task IssueResponsibleAsync(EquipmentResponsiblePeriod responsible, int employeeId, Guid attemptId, CancellationToken ct) =>
-            RecordPeriodWrite(attemptId, responsible.FromUtc);
-
-        public override async Task UpdateResponsibleAsync(EquipmentResponsiblePeriod responsible, int employeeId, Guid attemptId, CancellationToken ct)
-        {
-            await RecordPeriodWrite(attemptId, responsible.FromUtc);
-            await UpdateResponsibleAsync(responsible);
-        }
-
-        private Task RecordPeriodWrite(Guid attemptId, DateTime start)
-        {
-            PeriodWriteAttempt = attemptId;
-            PeriodWriteStart = start;
-            PeriodWriteCalls++;
-            if (LosePeriodWriteReply)
-                throw new EquipmentOperationException(EquipmentWritePhase.Unknown, "Ответ потерян", new TimeoutException());
-            return Task.CompletedTask;
-        }
-
-        public override Task<InventoryOperationReceipt?> ReadPeriodWriteReceiptAsync(int equipmentId, DateTime fromUtc,
-            string commandKind, int employeeId, Guid attemptId, CancellationToken ct)
-        {
-            PeriodReadAttempt = attemptId;
-            PeriodReadStart = fromUtc;
-            return Task.FromResult(PeriodWriteReceipt);
-        }
-
-        public override Task WithdrawResponsibleAsync(
-            EquipmentResponsiblePeriod current,
-            EquipmentResponsiblePeriod? next,
-            EquipmentLocationPeriod? location)
-        {
-            WithdrawCalls.Add((current, next, location));
-            return Task.CompletedTask;
-        }
-
-        public override async Task WithdrawResponsibleAsync(EquipmentResponsiblePeriod current, EquipmentResponsiblePeriod? next,
-            EquipmentLocationPeriod? location, DateTime? nextFromLocalDate, int employeeId, Guid attemptId, CancellationToken ct)
-        {
-            await RecordPeriodWrite(attemptId, current.FromUtc);
-            await WithdrawResponsibleAsync(current, next, location);
         }
 
         public override Task<int?> GetConnectionEquipmentIdAsync(int phoneId, int? employeeId, int locationId) =>
@@ -3633,11 +3085,6 @@ public sealed partial class EquipmentFormTests
                 equipment.EquipmentTypeId, original.ToList(), current.ToList());
         }
 
-        public override async Task<EquipmentPhoneSyncIntent?> SaveWithPhonesAsync(EquipmentEntity equipment,
-            IReadOnlyCollection<EquipmentPhoneLink> original, IReadOnlyCollection<EquipmentPhoneLink> current,
-            int employeeId, Guid attemptId, CancellationToken ct) =>
-            await SaveWithPhonesAsync(equipment, original, current);
-
         public override Task<PhoneSyncAttempt> SynchronizePhoneAttemptAsync(EquipmentPhoneSyncIntent intent,
             Func<PhoneSyncAttempt, Task>? checkpoint = null)
         {
@@ -3659,19 +3106,7 @@ public sealed partial class EquipmentFormTests
             return Task.FromResult(CreateAttempt(intent, SyncResults));
         }
 
-        public override Task<PhoneSyncAttempt?> ReadConfigurePhoneAttemptAsync(int equipmentId,
-            int employeeId, Guid? attemptId, CancellationToken ct)
-        {
-            ReadConfigureAttemptId = attemptId;
-            return Task.FromResult(ConfigureReadResult);
-        }
 
-        public override Task<PhoneSyncAttempt?> ReadSavedPhoneAttemptAsync(int equipmentId,
-            int employeeId, Guid? attemptId, CancellationToken ct)
-        {
-            SavedAtsReadAttemptId = attemptId;
-            return Task.FromResult(SavedAtsReadResult);
-        }
 
         public override Task<PhoneSyncAttempt> RetryPhoneSyncAttemptAsync(PhoneSyncAttempt attempt,
             Func<PhoneSyncAttempt, Task>? checkpoint = null)
@@ -3762,20 +3197,7 @@ public sealed partial class EquipmentFormTests
                 Requested.TrySetResult();
                 await Completion.Task.WaitAsync(cancellationToken);
             }
-            var result = await inner.InvokeAsync<TValue>(identifier, cancellationToken, args);
-            if (identifier != "clayDraftStore.beginOperationIntent" || result is not string json || args?[1] is not string text)
-                return result;
-            using var intent = System.Text.Json.JsonDocument.Parse(text);
-            var root = intent.RootElement;
-            if (root.GetProperty("attemptId").GetString() is not { } attemptId)
-                return result;
-            var echoed = System.Text.Json.Nodes.JsonNode.Parse(json)!;
-            echoed["attemptId"] = attemptId;
-            echoed["kind"] = root.GetProperty("kind").GetString();
-            echoed["data"] = root.GetProperty("data").GetString();
-            echoed["scopes"] = System.Text.Json.JsonSerializer.SerializeToNode(root.GetProperty("acceptedScopes")
-                .EnumerateArray().Select(scope => new { name = scope.GetString(), typedRevision = 1, rawRevisions = new { } }));
-            return (TValue)(object)echoed.ToJsonString();
+            return await inner.InvokeAsync<TValue>(identifier, cancellationToken, args);
         }
     }
 }
