@@ -31,5 +31,27 @@ public sealed class ClayErrorOperationDetailsTests
         Assert.DoesNotContain("Journal check failed", panel.Markup);
     }
 
+    /// <summary>Панель использует контрастный вариант текущей темы и доступный переключатель.</summary>
+    [Fact]
+    public void ErrorPanelUsesOutlinedSurfaceAndKeyboardAccessibleToggle()
+    {
+        using var context = new BunitContext();
+        context.Services.AddMudServices();
+        var errors = new ClayErrorService();
+        context.Services.AddSingleton(errors);
+        errors.ReportOperationFailure("Ошибка операции", new InvalidOperationException("Failure"));
+        var panel = context.Render<ClayErrorBar>();
+
+        var alert = panel.Find(".clay-error-bar");
+        Assert.Contains("mud-alert-outlined-error", alert.ClassList);
+        Assert.DoesNotContain("mud-alert-filled-error", alert.ClassList);
+        var toggle = panel.Find(".clay-error-details");
+        Assert.Equal("BUTTON", toggle.TagName);
+        Assert.Equal("false", toggle.GetAttribute("aria-expanded"));
+
+        toggle.Click();
+        Assert.Equal("true", panel.Find(".clay-error-details").GetAttribute("aria-expanded"));
+    }
+
     private static void ThrowJournalFailure() => throw new InvalidOperationException("Journal check failed");
 }

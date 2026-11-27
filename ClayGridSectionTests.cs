@@ -78,6 +78,31 @@ public sealed class ClayGridSectionTests
         Assert.Single(cut.FindAll(".filter-tray"));
     }
 
+    /// <summary>Always оставляет меню фильтра при свёрнутой панели, а настройку колонок можно отключить.</summary>
+    [Fact]
+    public async Task ColumnMenuAlways_WorksWithCollapsedFilterAndDisabledColumnSettings()
+    {
+        await using var ctx = CreateContext();
+        var popover = ctx.Render<MudBlazor.MudPopoverProvider>();
+        var options = Options();
+        options.ShowToolbar = true;
+        options.ColumnMenuMode = ColumnMenuMode.Always;
+        options.FilterTrayExpandedByDefault = false;
+        options.EnableValueFilter = false;
+        options.ShowColumnSettings = false;
+        var cut = ctx.Render<ClayGrid<string>>(parameters => parameters
+            .Add(component => component.Items, ["101"])
+            .Add(component => component.Options, options)
+            .Add(component => component.ColumnDefs, ColumnDefs())
+            .Add(component => component.Columns, Columns()));
+
+        Assert.Empty(cut.FindAll(".filter-tray"));
+        Assert.Empty(cut.FindAll(".toolbar-columns-btn"));
+        Assert.NotNull(cut.Find(".clay-column-menu"));
+        cut.Find(".clay-column-menu button").Click();
+        popover.WaitForAssertion(() => Assert.Contains("Фильтровать", popover.Markup));
+    }
+
     /// <summary>Container-height скрывает фильтр без резервирования места и не меняет высоту грида.</summary>
     [Fact]
     public async Task FillHeight_FilterToggleDoesNotChangeGridHeight()
