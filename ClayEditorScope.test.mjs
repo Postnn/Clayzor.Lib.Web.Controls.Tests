@@ -6,7 +6,7 @@ import { readFile } from 'node:fs/promises';
 
 const script = await readFile(new URL('../../src/Clayzor.Lib.Web.Controls/wwwroot/js/clayDraftStore.js', import.meta.url), 'utf8');
 
-function createBrowser() {
+function createBrowser(formKey = 'territory') {
     const keys = new Map();
     const drafts = new Map();
     const session = new Map();
@@ -14,6 +14,25 @@ function createBrowser() {
     const heldLocks = new Set();
     let interceptWrite;
     let rejectDelete = false;
+    let inspectSnapshot;
+    const crypto = {
+        randomUUID: () => webcrypto.randomUUID(),
+        getRandomValues: bytes => webcrypto.getRandomValues(bytes),
+        subtle: new Proxy(webcrypto.subtle, {
+            get(target, name) {
+                if (name !== 'decrypt') return target[name].bind(target);
+                return async (...args) => {
+                    const bytes = await target.decrypt(...args);
+                    if (!inspectSnapshot) return bytes;
+                    const inspect = inspectSnapshot;
+                    inspectSnapshot = null;
+                    const state = JSON.parse(new TextDecoder().decode(bytes));
+                    inspect(state);
+                    return new TextEncoder().encode(JSON.stringify(state)).buffer;
+                };
+            },
+        }),
+    };
     const makeField = scope => ({
         type: 'text', value: '', disabled: false,
         dataset: { draftKey: scope + '.name', draftScope: scope },
@@ -92,9 +111,9 @@ function createBrowser() {
             return request;
         },
     };
-    const window = {};
+    const window = { addEventListener: (name, listener) => listeners.set(name, listener) };
     vm.runInNewContext(script, {
-        indexedDB, crypto: webcrypto, window, document, TextEncoder, TextDecoder, Event, btoa, atob,
+        indexedDB, crypto, window, document, TextEncoder, TextDecoder, Event, btoa, atob,
         IDBKeyRange: { bound: (lower, upper) => ({ lower, upper }) },
         navigator: { locks: { async request(name, _, callback) {
             if (heldLocks.has(name)) return callback(null);
@@ -106,11 +125,19 @@ function createBrowser() {
     });
     return {
         store: window.clayDraftStore,
-        open: (entity = '4', user = 'employee') => window.clayDraftStore.register('territory', entity, user, 1, '#editor'),
+        beforeUnload: () => {
+            let prevented = false;
+            listeners.get('beforeunload')({ preventDefault: () => { prevented = true; } });
+            return prevented;
+        },
+        open: (entity = '4', user = 'employee') => window.clayDraftStore.register(formKey, entity, user, 1, '#editor'),
         forgetPointer: () => session.clear(),
         rejectDeletes: value => { rejectDelete = value; },
         mountValue: (name, value) => { fields[name].value = value; },
         setDisabled: (name, disabled) => { fields[name].disabled = disabled; },
+        setType: (name, type) => { fields[name].type = type; },
+        setDraftKey: (name, key) => { fields[name].dataset.draftKey = key; },
+        inspectNextSnapshot: callback => { inspectSnapshot = callback; },
         onDispatch: (name, handler) => { fields[name].dispatchEvent = handler; },
         displayedValue: name => fields[name].value,
         setClaySelect: (name, restoreDraftText) => {
@@ -128,6 +155,91 @@ function createBrowser() {
         },
     };
 }
+
+test('raw capture excludes password inputs and known sensitive keys shown as text', async () => {
+    const browser = createBrowser('equipment-form');
+    const { store } = browser;
+    browser.setType('secondary', 'password');
+    browser.setDraftKey('child', 'sim.puk');
+    const { registrationId: id } = await browser.open();
+    browser.input('secondary', 'synthetic password');
+    browser.input('child', 'synthetic code');
+    browser.input('main', 'ordinary text');
+    const attempt = JSON.parse(await store.beginOperationIntent(id, JSON.stringify({
+        version: 1, kind: 'fixture', data: '{}', acceptedScopes: ['main', 'child'],
+    })));
+    assert.deepEqual(Object.keys(attempt.scopes[0].rawRevisions), ['data:main.name:0']);
+    assert.deepEqual(Object.keys(attempt.scopes[1].rawRevisions), []);
+});
+
+test('restoring an owned historical snapshot scrubs secrets but keeps Unknown and ordinary raw', async () => {
+    const browser = createBrowser('equipment-form');
+    const { store } = browser;
+    const { registrationId: id } = await browser.open();
+    browser.input('main', 'ordinary typed input');
+    browser.input('child', 'ordinary child input');
+    await store.saveTypedScope(id, 'child', 'retained sibling scope');
+    const attempt = JSON.parse(await store.beginOperationIntent(id, JSON.stringify({
+        version: 1, kind: 'fixture', data: '{}', acceptedScopes: ['main'],
+    })));
+    await store.unknownOperation(id, attempt.revision);
+    await store.unregister(id);
+    browser.setType('secondary', 'password');
+    browser.mountValue('secondary', 'fresh authorized input');
+    browser.inspectNextSnapshot(state => {
+        state.raw['data:account.password:0'] = { kind: 'value', value: 'synthetic password' };
+        state.raw['data:sim.puk:1'] = { kind: 'value', scope: 'child', value: 'synthetic code' };
+        state.raw['data:main.secondary:0'] = { kind: 'value', scope: 'main', value: 'synthetic value' };
+    });
+    const restored = await browser.open();
+    const marker = JSON.parse(restored.operation);
+    assert.equal(marker.status, 'unknown');
+    assert.equal(marker.revision, attempt.revision);
+    assert.equal(restored.typedScopes.child, 'retained sibling scope');
+    const result = await store.applyRaw(restored.registrationId);
+    assert.deepEqual([...result.applied], ['data:main.name:0', 'data:child.name:0']);
+    assert.deepEqual([...result.pending], []);
+    assert.equal(browser.displayedValue('main'), 'ordinary typed input');
+    assert.equal(browser.displayedValue('child'), 'ordinary child input');
+    assert.equal(browser.displayedValue('secondary'), 'fresh authorized input');
+
+    await store.unregister(restored.registrationId);
+    browser.inspectNextSnapshot(state => assert.deepEqual(Object.keys(state.raw), ['data:main.name:0', 'data:child.name:0']));
+    await browser.open();
+});
+
+test('reconnect blocks a full reload after IndexedDB has persisted unsaved fields', async () => {
+    const browser = createBrowser();
+    const { registrationId } = await browser.open();
+    assert.equal(await browser.store.canReload(), true);
+
+    await browser.store.saveTyped(registrationId, '{"name":"updated"}');
+    assert.equal((await browser.store.getHealth(registrationId)).healthy, true);
+    assert.equal(await browser.store.canReload(), false);
+
+    await browser.store.discard(registrationId);
+    await browser.open();
+    assert.equal(await browser.store.canReload(), true);
+});
+
+test('a server-side unregister with unsaved raw input keeps reload protection', async () => {
+    const browser = createBrowser();
+    const { registrationId } = await browser.open();
+    assert.equal(browser.beforeUnload(), false);
+    browser.input('main', 'not saved to SQL');
+    assert.equal(browser.beforeUnload(), true);
+    await browser.store.unregister(registrationId);
+
+    const clean = await browser.open('5');
+    assert.equal((await browser.store.getHealth(clean.registrationId)).healthy, true);
+    assert.equal(await browser.store.canReload(), false);
+    assert.equal(browser.beforeUnload(), true);
+
+    const recovered = await browser.open();
+    await browser.store.discard(recovered.registrationId);
+    assert.equal(await browser.store.canReload(), true);
+    assert.equal(browser.beforeUnload(), false);
+});
 
 test('accepted reset clears only target raw and persists fresh baseline across registration', async () => {
     const browser = createBrowser();
@@ -314,6 +426,7 @@ test('healthy storage rejects an accepted unrestored scope and preserves it duri
     await assert.rejects(store.beginOperationIntent(id, createIntent('main')), /восстановите/);
     assert.equal((await store.getHealth(id)).hasOperation, false);
     const child = JSON.parse(await store.beginOperationIntent(id, createIntent('child')));
+    await store.recordConfirmedOperation(id, child.revision);
     await store.commitOperation(id, child.revision);
     assert.ok((await store.getRestoreReadiness(id)).pendingScopes.includes('main'));
     const restored = await store.applyRaw(id, 'main');
@@ -329,6 +442,7 @@ test('failed deletion after accepted cleanup leaves a clean classification on re
     const attempt = JSON.parse(await store.beginOperationIntent(first.registrationId, JSON.stringify({
         version: 1, kind: 'fixture', data: '{}', acceptedScopes: ['main', 'child'],
     })));
+    await store.recordConfirmedOperation(first.registrationId, attempt.revision);
     browser.rejectDeletes(true);
     await assert.rejects(store.commitOperation(first.registrationId, attempt.revision), /delete refused/);
     await store.unregister(first.registrationId);
@@ -342,6 +456,42 @@ test('failed deletion after accepted cleanup leaves a clean classification on re
     const clean = await browser.open();
     assert.equal(clean.hasDraft, false);
     assert.equal((await store.getHealth(clean.registrationId)).healthy, true);
+});
+
+test('nested reset replaces the parent snapshot and only the selected scope in one revision', async () => {
+    const browser = createBrowser();
+    const { store } = browser;
+    const { registrationId: id } = await browser.open();
+    browser.input('main', 'retained parent raw');
+    browser.input('child', 'discarded child raw');
+    await store.saveTyped(id, '{"Model":"local","ActiveEditorState":"outdated child"}');
+    await store.saveTypedScope(id, 'sibling', 'retained sibling');
+    const original = await store.readEditorScope(id, 'child');
+    const replacement = '{"Model":"local","ActiveEditorState":"fresh child"}';
+
+    browser.input('child', 'newer child raw');
+    await store.getHealth(id);
+    assert.equal(await store.replaceNestedEditorScope(id, 'child', original.revision, replacement, false), false);
+    const current = await store.readEditorScope(id, 'child');
+    assert.equal(await store.replaceNestedEditorScope(id, 'child', current.revision, replacement, false), true);
+    assert.equal((await store.readEditorScope(id, 'child')).hasRaw, false);
+    assert.equal((await store.readEditorScope(id, 'main')).hasRaw, true);
+
+    await store.unregister(id);
+    const restored = await browser.open();
+    assert.equal(restored.typedState, replacement);
+    assert.equal(restored.typedScopes.sibling, 'retained sibling');
+    assert.equal((await store.readEditorScope(restored.registrationId, 'child')).hasRaw, false);
+    const closing = await store.readEditorScope(restored.registrationId, 'child');
+    const parentWithoutEditor = '{"Model":"local","ActiveEditorState":null}';
+    assert.equal(await store.replaceNestedEditorScope(restored.registrationId, 'child', closing.revision, parentWithoutEditor, true), true);
+    await assert.rejects(store.saveTypedScope(restored.registrationId, 'child', 'late input'), /Отменённая область/);
+
+    await store.unregister(restored.registrationId);
+    const closed = await browser.open();
+    assert.equal(closed.typedState, parentWithoutEditor);
+    assert.equal(closed.typedScopes.sibling, 'retained sibling');
+    assert.ok(closed.cancelledScopes.includes('child'));
 });
 
 test('failed field rebase preserves original typed and raw values in memory and storage', async () => {

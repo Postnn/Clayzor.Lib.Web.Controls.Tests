@@ -22,7 +22,7 @@ public sealed class PhoneCodeEditorCancelTests
     /// <summary>Три исхода используют только родительскую область и сохраняют строковый ключ.</summary>
     [Theory]
     [InlineData("Продолжить редактирование", false, false)]
-    [InlineData("Закрыть без сохранения", true, true)]
+    [InlineData("Закрыть без сохранения", true, false)]
     [InlineData("Отменить мои изменения и загрузить из БД", false, true)]
     public async Task Cancel_ChangesOnlyAcceptedScope(string choice, bool closes, bool replaces)
     {
@@ -32,6 +32,10 @@ public sealed class PhoneCodeEditorCancelTests
         await fixture.ChooseAsync(choice);
 
         Assert.Equal(closes, fixture.Invocations("clayModelEquipmentForm.close") > 0);
+        if (closes)
+            Assert.Equal(19L, Assert.Single(fixture.Context.JSInterop.Invocations["clayDraftStore.closeRam"]).Arguments[1]);
+        else
+            Assert.Equal(0, fixture.Invocations("clayDraftStore.closeRam"));
         var replacements = fixture.Context.JSInterop.Invocations["clayDraftStore.replaceEditorScope"];
         Assert.Equal(replaces ? 1 : 0, replacements.Count);
         if (replaces)
@@ -39,19 +43,14 @@ public sealed class PhoneCodeEditorCancelTests
             var edit = Assert.Single(replacements);
             Assert.Equal("main", edit.Arguments[1]);
             Assert.Equal(19L, edit.Arguments[2]);
-            if (closes)
-                Assert.Null(edit.Arguments[3]);
-            else
-            {
-                using var snapshot = JsonDocument.Parse(Assert.IsType<string>(edit.Arguments[3]));
-                Assert.Equal("00127", snapshot.RootElement.GetProperty("Version").GetProperty("Key").GetString());
-                Assert.Equal("fresh", snapshot.RootElement.GetProperty("Current").GetProperty("Comment").GetString());
-                Assert.Equal("fresh", fixture.Draft!.Comment);
-                Assert.Null(fixture.Draft.SearchEpoch);
-                Assert.False(snapshot.RootElement.GetProperty("Current").TryGetProperty("SearchEpoch", out _));
-            }
+            using var snapshot = JsonDocument.Parse(Assert.IsType<string>(edit.Arguments[3]));
+            Assert.Equal("00127", snapshot.RootElement.GetProperty("Version").GetProperty("Key").GetString());
+            Assert.Equal("fresh", snapshot.RootElement.GetProperty("Current").GetProperty("Comment").GetString());
+            Assert.Equal("fresh", fixture.Draft!.Comment);
+            Assert.Null(fixture.Draft.SearchEpoch);
+            Assert.False(snapshot.RootElement.GetProperty("Current").TryGetProperty("SearchEpoch", out _));
         }
-        else
+        else if (!closes)
             Assert.Equal("local", fixture.Draft!.Comment);
         Assert.Empty(fixture.Context.JSInterop.Invocations["clayDraftStore.discard"]);
         Assert.Equal(0, fixture.Invocations("clayDraftStore.beginOperationIntent"));
@@ -98,10 +97,38 @@ public sealed class PhoneCodeEditorCancelTests
         await fixture.ApproveUnknownCloseAsync();
 
         Assert.Equal(1, fixture.Invocations("clayModelEquipmentForm.close"));
+        Assert.Equal(19L, Assert.Single(fixture.Context.JSInterop.Invocations["clayDraftStore.closeRam"]).Arguments[1]);
         Assert.Equal(0, fixture.Invocations("clayDraftStore.discard"));
         Assert.Equal(0, fixture.Invocations("clayDraftStore.replaceEditorScope"));
         Assert.Equal(0, fixture.Invocations("clayDraftStore.commitOperation"));
         Assert.Equal(0, fixture.Invocations("clayDraftStore.beginOperationIntent"));
+    }
+
+    /// <summary>Старые метаданные принимаются только для точного открытого строкового ключа.</summary>
+    [Theory]
+    [InlineData("00127", true)]
+    [InlineData("127", false)]
+    public async Task LegacyEvidenceMustMatchExactVisibleCodeBeforeRam(string code, bool accepted)
+    {
+        var id = Guid.NewGuid();
+        var payload = JsonSerializer.Serialize(new { Source = code, Target = code });
+        await using var fixture = new PhoneCodeFixture(existing: true,
+            evidence: [new(id.ToString("N"), "phone-code.update", payload)], acceptsEvidence: accepted);
+        var js = fixture.Context.JSInterop;
+        var begin = Assert.Single(js.Invocations["clayDraftStore.beginLegacyOperationEvidenceTransfer"]);
+        Assert.Equal(new object?[] { "phone-code-form", "existing:00127", "4" }, begin.Arguments.Take(3));
+        Assert.Equal(begin.Arguments[3], Assert.Single(js.Invocations["clayDraftStore.finishLegacyOperationEvidenceTransfer"]).Arguments[0]);
+        Assert.Equal(accepted ? 1 : 0, fixture.Invocations("clayDraftStore.registerRam"));
+        Assert.Equal(0, fixture.Invocations("clayDraftStore.beginOperationIntent"));
+        if (accepted)
+        {
+            var at = fixture.Connection.CommandLog.IndexOf(SQLQueries.INSERT_ClayzorLegacyOperationEvidence);
+            Assert.True(at >= 0);
+            Assert.Equal(id, fixture.Connection.ParameterLog[at]["AttemptId"]);
+            Assert.Equal("phone-code/00127", fixture.Connection.ParameterLog[at]["ConflictKey"]);
+        }
+        else
+            Assert.DoesNotContain(SQLQueries.INSERT_ClayzorLegacyOperationEvidence, fixture.Connection.CommandLog);
     }
 
     /// <summary>Обновление с несохранённым вводом не заменяет родительскую ревизию.</summary>
@@ -123,16 +150,18 @@ public sealed class PhoneCodeEditorCancelTests
         private readonly IRenderedComponent<PhoneCodeEntityForm> _form;
         private readonly IRenderedComponent<MudDialogProvider> _dialogs;
         private readonly Queue<ScriptEntry> _script = new();
-        private readonly ScriptedConnection _connection;
+        internal ScriptedConnection Connection { get; }
         internal BunitContext Context { get; } = new();
 
-        internal PhoneCodeFixture(bool existing, bool replacementSucceeds = true, bool unknown = false)
+        internal PhoneCodeFixture(bool existing, bool replacementSucceeds = true, bool unknown = false,
+            ClayLegacyDraftOperationEvidence[]? evidence = null, bool acceptsEvidence = true)
         {
             Context.JSInterop.Mode = JSRuntimeMode.Loose;
             DapperColumnMapper.Initialize();
-            QueueFresh(existing, initial: true);
-            _connection = new ScriptedConnection(_script, emulateEquipmentIdentity: false);
-            Context.Services.AddSingleton(_ => new DbManager("Server=test", new FakeSqlErrorHandler(), () => _connection));
+            QueueFresh(existing, initial: true, importEvidence: evidence is { Length: > 0 } && acceptsEvidence);
+            Connection = new ScriptedConnection(_script, emulateEquipmentIdentity: false);
+            Context.Services.AddSingleton(_ => new DbManager("Server=test", new FakeSqlErrorHandler(),
+                () => evidence is { Length: > 0 } ? new EquipmentAccountTransactionConnection(Connection) : Connection));
             Context.Services.AddSingleton<AuthenticationStateProvider, PhoneCodeAuthentication>();
             Context.Services.AddSingleton<ClayDraftService>();
             Context.Services.AddSingleton<ClayFormWindowService>();
@@ -151,7 +180,10 @@ public sealed class PhoneCodeEditorCancelTests
             var operation = unknown
                 ? """{"version":1,"attemptId":"fixture-attempt","kind":"phone-code.update","status":"unknown","revision":9,"data":"fixture","scopes":[],"acceptLegacyTyped":false,"legacyTypedRevision":0}"""
                 : null;
-            Context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.register", _ => true)
+            Context.JSInterop.Setup<ClayLegacyDraftOperationEvidence[]?>("clayDraftStore.beginLegacyOperationEvidenceTransfer", _ => true)
+                .SetResult(evidence ?? []);
+            Context.JSInterop.Setup<bool>("clayDraftStore.closeRam", _ => true).SetResult(true);
+            Context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.registerRam", _ => true)
                 .SetResult(new ClayDraftRestore("phone-card", true, 19, null, operation,
                     new Dictionary<string, string> { ["main"] = snapshot, ["child-retained"] = "{}" }));
             Context.JSInterop.Setup<ClayDraftRawApplyResult>("clayDraftStore.applyRaw", _ => true).SetResult(new ClayDraftRawApplyResult([], []));
@@ -163,11 +195,16 @@ public sealed class PhoneCodeEditorCancelTests
             Context.JSInterop.Setup<long>("clayDraftStore.saveTypedScope", _ => true).SetResult(20);
 
             _form = existing ? Context.Render<ExistingPhoneCode>() : Context.Render<PhoneCodeEntityForm>();
-            _form.WaitForAssertion(() => Assert.NotEmpty(_form.FindAll("[data-draft-scope='main']")));
-            _form.WaitForAssertion(() => Assert.Single(Context.JSInterop.Invocations["clayDraftStore.getRestoreReadiness"]));
+            if (acceptsEvidence)
+            {
+                _form.WaitForAssertion(() => Assert.NotEmpty(_form.FindAll("[data-draft-scope='main']")));
+                _form.WaitForAssertion(() => Assert.Single(Context.JSInterop.Invocations["clayDraftStore.getRestoreReadiness"]));
+            }
+            else
+                _form.WaitForAssertion(() => Assert.Single(Context.JSInterop.Invocations["clayDraftStore.finishLegacyOperationEvidenceTransfer"]));
         }
 
-        internal void QueueFresh(bool existing, string? failure = null, bool initial = false)
+        internal void QueueFresh(bool existing, string? failure = null, bool initial = false, bool importEvidence = false)
         {
             _script.Enqueue(Script.Rows(Script.Row(("КодСотрудника", failure == "wrong-owner" ? 8 : 4), ("Сотрудник", "fixture"))));
             _script.Enqueue(Script.Rows(Script.Row(("RoleId", (int)Роли.Администратор_тарифов_связи), ("PersonId", 0))));
@@ -188,6 +225,27 @@ public sealed class PhoneCodeEditorCancelTests
                 _script.Enqueue(Territory());
             }
             _script.Enqueue(Script.Rows());
+            if (initial)
+            {
+                _script.Enqueue(Script.Rows(Script.Row(("КодСотрудника", 4), ("Сотрудник", "fixture"))));
+                _script.Enqueue(Script.Rows(Script.Row(("RoleId", (int)Роли.Администратор_тарифов_связи), ("PersonId", 0))));
+                _script.Enqueue(Script.Rows(Script.Row(("PhoneInsert", true), ("PhoneUpdate", true), ("PhoneDelete", true))));
+                _script.Enqueue(Script.Rows());
+                _script.Enqueue(Script.Rows(Script.Row(("Pending", false))));
+            }
+            if (importEvidence)
+            {
+                var actor = Script.Rows(Script.Row(("КодСотрудника", 4), ("Сотрудник", "fixture")));
+                var role = Script.Rows(Script.Row(("RoleId", (int)Роли.Администратор_тарифов_связи), ("PersonId", 0)));
+                var access = Script.Rows(Script.Row(("PhoneInsert", true), ("PhoneUpdate", true), ("PhoneDelete", true)));
+                foreach (var entry in new[]
+                {
+                    actor, role, access, Script.Rows(Script.Row(("Code", "00127"))),
+                    Script.Rows(), Script.Rows(), Script.Rows(Script.Row(("Owned", true))),
+                    actor, role, access, Script.Rows(), Script.Rows(Script.Row(("Pending", true))),
+                })
+                    _script.Enqueue(entry);
+            }
             if (existing && initial) _script.Enqueue(Territory());
         }
 
@@ -226,7 +284,7 @@ public sealed class PhoneCodeEditorCancelTests
         public async ValueTask DisposeAsync()
         {
             await Context.DisposeAsync();
-            _connection.Dispose();
+            Connection.Dispose();
         }
 
         private static ScriptEntry Territory() => Script.Rows(Script.Row(("Id", 7), ("Type", 3), ("Name", "fixture territory")));

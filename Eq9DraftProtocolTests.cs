@@ -14,7 +14,7 @@ public sealed class Eq9DraftProtocolTests
     public async Task RestoreOperation_RealJsonRoundTrip_PreservesUnknownAttemptAndAcceptedRevisions()
     {
         const string operationJson = """
-            {"version":1,"attemptId":"attempt-7","kind":"account-save","status":"unknown","revision":11,"data":"{\"equipmentId\":8,\"row\":\"A\",\"originalVersion\":4}","scopes":[{"name":"child:account:A","typedRevision":8,"rawRevisions":{"data:account.password:0":9}}],"acceptLegacyTyped":false,"legacyTypedRevision":4}
+            {"version":1,"attemptId":"attempt-7","kind":"account-save","status":"unknown","revision":11,"data":"{\"equipmentId\":8,\"row\":\"A\",\"originalVersion\":4}","scopes":[{"name":"child:account:A","typedRevision":8,"rawRevisions":{"data:account.notes:0":9}}],"acceptLegacyTyped":false,"legacyTypedRevision":4}
             """;
         var js = new WireJsRuntime
         {
@@ -32,7 +32,7 @@ public sealed class Eq9DraftProtocolTests
         var scope = Assert.Single(operation.Scopes);
         Assert.Equal("child:account:A", scope.Name);
         Assert.Equal(8, scope.TypedRevision);
-        Assert.Equal(9, scope.RawRevisions["data:account.password:0"]);
+        Assert.Equal(9, scope.RawRevisions["data:account.notes:0"]);
         Assert.Contains("\"originalVersion\":4", operation.Data);
     }
 
@@ -151,11 +151,11 @@ public sealed class Eq9DraftProtocolTests
 
         var apply = handle.ApplyRawWithResultAsync();
         Assert.False(apply.IsCompleted);
-        js.CompleteRaw("""{"applied":["data:main.sn:0"],"pending":["data:sim.pin:0"]}""");
+        js.CompleteRaw("""{"applied":["data:main.sn:0"],"pending":["data:sim.phone:0"]}""");
 
         var result = await apply;
         Assert.Equal("data:main.sn:0", Assert.Single(result.Applied));
-        Assert.Equal("data:sim.pin:0", Assert.Single(result.Pending));
+        Assert.Equal("data:sim.phone:0", Assert.Single(result.Pending));
     }
 
     private static string RegisterJson(string registrationId, string? operationJson) =>

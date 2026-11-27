@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Text.Json;
 using Bunit;
 using Clayzor.Lib.DALC;
 using Clayzor.Lib.Entities.Inventory;
@@ -152,6 +153,7 @@ public sealed partial class ModelEquipmentFormTests
             Id = 42, EquipmentTypeId = 5, Name = "Created model", ChangedById = 4,
             ChangedAt = new DateTime(2026, 11, 17, 12, 30, 0),
         }), Roles(Роли.Специалист_по_инвентаризации_оборудования), Usage());
+        fixture.Enqueue(ModelServerSnapshot());
         await using var _ = fixture.Context;
         var page = fixture.Context.Render<ModelEquipmentForm>();
         page.WaitForAssertion(() => Assert.Contains("CPU:", page.Markup), TimeSpan.FromSeconds(3));
@@ -167,7 +169,10 @@ public sealed partial class ModelEquipmentFormTests
             Assert.False(IsModified(page.Instance));
         }, TimeSpan.FromSeconds(3));
         Assert.Equal(1, fixture.WriteCount);
-        Assert.Equal("Created model", fixture.LastParameters(SQLQueries.INSERT_МоделиОборудования)["Name"]);
+        Assert.Equal("Created model", fixture.LastParameters(SQLQueries.INSERT_МоделиОборудования_Журнал)["Name"]);
+        Assert.Equal(11L, Assert.Single(fixture.Context.JSInterop.Invocations["clayDraftStore.closeRam"]).Arguments[1]);
+        Assert.Equal(new object?[] { "new:5", "42" },
+            fixture.Context.JSInterop.Invocations["clayDraftStore.registerRam"].Select(call => call.Arguments[1]));
         AssertBlocksOtherModelAttempts(fixture.Context);
     }
 
@@ -212,7 +217,7 @@ public sealed partial class ModelEquipmentFormTests
         Assert.Equal(originalUri, fixture.Navigation.Uri);
         Assert.DoesNotContain(fixture.Context.JSInterop.Invocations,
             call => call.Identifier == "clayModelEquipmentForm.refreshOpener");
-        Assert.Contains("Результат сохранения модели неизвестен", page.Markup);
+        Assert.Contains("База данных не вернула идентификатор", page.Markup);
     }
 
     /// <summary>Disposal во время проверки дубликата отменяет последующий success-path.</summary>
@@ -323,9 +328,13 @@ public sealed partial class ModelEquipmentFormTests
         var original = new EquipmentModel { Id = 7, EquipmentTypeId = (int)ТипыОборудования.IP_телефон, Name = "Phone", PhoneTemplate = "old cfg" };
         var fixture = CreateFixture("http://localhost/Equipment/PhoneTemplateForm?id=7", [], original);
         fixture.Enqueue(Script.Rows());
-        fixture.Enqueue(ModelRow(original), roleAllowed ? Roles(Роли.Дежурный_инженер) : Roles());
+        fixture.PrepareTemplateWrite(original, affected: 1, allowWrite: roleAllowed);
         if (roleAllowed)
-            fixture.Enqueue(Script.Scalar(1));
+            fixture.Enqueue(ModelRow(new EquipmentModel
+            {
+                Id = original.Id, EquipmentTypeId = original.EquipmentTypeId,
+                Name = original.Name, PhoneTemplate = "new cfg",
+            }));
         ConfigureTemplateModule(fixture.Context, "new cfg");
         await using var _ = fixture.Context;
         var page = fixture.Context.Render<PhoneTemplateForm>();
@@ -338,7 +347,8 @@ public sealed partial class ModelEquipmentFormTests
         if (!roleAllowed)
         {
             Assert.Equal(0, fixture.WriteCount);
-            Assert.Contains("право на сохранение не подтверждены", page.Markup);
+            Assert.Contains("Не удалось подготовить сохранение", page.Markup);
+            Assert.DoesNotContain(SQLQueries.INSERT_ClayzorOperationJournalAttempt, fixture.Connection.CommandLog);
             Assert.Equal("new cfg", page.Find("textarea").TextContent);
             return;
         }
@@ -355,7 +365,7 @@ public sealed partial class ModelEquipmentFormTests
         var original = new EquipmentModel { Id = 7, EquipmentTypeId = (int)ТипыОборудования.IP_телефон, Name = "Phone", PhoneTemplate = "old cfg" };
         var fixture = CreateFixture("http://localhost/Equipment/PhoneTemplateForm?id=7", [], original);
         fixture.Enqueue(Script.Rows());
-        fixture.Enqueue(ModelRow(original), Roles(Роли.Дежурный_инженер), Script.Scalar(0));
+        fixture.PrepareTemplateWrite(original, affected: 0);
         ConfigureTemplateModule(fixture.Context, "local cfg");
         await using var _ = fixture.Context;
         var page = fixture.Context.Render<PhoneTemplateForm>();
@@ -383,6 +393,7 @@ public sealed partial class ModelEquipmentFormTests
         var page = fixture.Context.Render<ModelEquipmentForm>();
         page.WaitForAssertion(() => Assert.Contains("Результат сохранения модели неизвестен", page.Markup));
         await page.InvokeAsync(() => page.FindComponents<ClayTextBox>()[0].Find("input").Input("Local"));
+        fixture.Enqueue(ModelServerSnapshot());
         fixture.Enqueue(ModelRow(new EquipmentModel { Id = 7, EquipmentTypeId = 5, Name = "Local" }));
         await page.InvokeAsync(() => FindButton(page, "Обновить").Click());
         Assert.Contains("Состояние строки не доказывает исход", page.Markup);
@@ -401,10 +412,13 @@ public sealed partial class ModelEquipmentFormTests
     {
         var fixture = CreateFixture("http://localhost/Equipment/ModelEquipmentForm?id=7",
             [Script.Rows(TypeRow(5)), Script.Rows()], new EquipmentModel { Id = 7, EquipmentTypeId = 5, Name = "Existing" });
+        var attemptId = Guid.NewGuid();
         SetupRestore(fixture.Context, "confirmed", receiptPresent ? new Dictionary<string, string>
         {
-            ["receipt"] = """{"AttemptId":"fixture-attempt","Id":7,"Fingerprint":"fixture"}""",
-        } : null);
+            ["receipt"] = JsonSerializer.Serialize(new { AttemptId = attemptId.ToString("N"), Id = 7, Fingerprint = "fixture" }),
+        } : null, attemptId);
+        fixture.Enqueue(Roles(Роли.Специалист_по_инвентаризации_оборудования), ModelJournalReceipt(attemptId, 7, 7));
+        fixture.Enqueue(ModelServerSnapshot(ModelJournalReceipt(attemptId, 7, 7)));
         await using var _ = fixture.Context;
         var page = fixture.Context.Render<ModelEquipmentForm>();
         page.WaitForAssertion(() => Assert.Contains("Сохранение подтверждено", page.Markup));
@@ -416,9 +430,73 @@ public sealed partial class ModelEquipmentFormTests
         Assert.Empty(fixture.Context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
     }
 
+    /// <summary>Новая вкладка читает серверный исход и блокировку создания без браузерного снимка.</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task NewEditorReadsDurableOutcomeWithoutModelWrite(bool pending)
+    {
+        var fixture = CreateFixture("http://localhost/Equipment/ModelEquipmentForm?codetype=5",
+            [Script.Rows(TypeRow(5)), Script.Rows()]);
+        fixture.Commands.Clear();
+        fixture.Enqueue(Roles(Роли.Специалист_по_инвентаризации_оборудования));
+        fixture.Enqueue(ModelServerSnapshot(pending ? null : ModelJournalReceipt(Guid.NewGuid(), 0, 42), pending));
+        await using var context = fixture.Context;
+        var page = context.Render<ModelEquipmentForm>();
+
+        page.WaitForAssertion(() => Assert.Contains(pending ? "Повтор заблокирован" : "Предыдущее сохранение модели №42 подтверждено сервером.", page.Markup));
+        if (pending)
+        {
+            await page.InvokeAsync(() => page.FindComponents<ClayTextBox>()[0].Find("input").Input("Новая модель"));
+            await page.InvokeAsync(() => InvokeSave(page.Instance, false));
+            Assert.True(FindButton(page, "Применить").HasAttribute("disabled"));
+        }
+        Assert.Equal(0, fixture.WriteCount);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
+    }
+
+    /// <summary>Создание сверяет старые попытки всех типов под одним серверным ключом.</summary>
+    [Theory]
+    [InlineData("0", true)]
+    [InlineData("7", false)]
+    public async Task NewModelTransfersOnlyExactLegacyCreationEvidence(string key, bool accepted)
+    {
+        var fixture = CreateFixture("http://localhost/Equipment/ModelEquipmentForm?codetype=5",
+            [Script.Rows(TypeRow(5)), Script.Rows()]);
+        fixture.Commands.Clear();
+        var actor = Roles(Роли.Специалист_по_инвентаризации_оборудования);
+        fixture.Enqueue(actor);
+        if (accepted)
+        {
+            fixture.Enqueue(actor, Script.Rows(), Script.Rows(Script.Row(("Owned", true))));
+            fixture.Enqueue(ModelServerSnapshot(pending: true));
+        }
+        await using var context = fixture.Context;
+        var attempt = Guid.NewGuid();
+        context.JSInterop.Setup<ClayLegacyDraftOperationEvidence[]?>("clayDraftStore.beginLegacyOperationEvidenceTransfer", _ => true)
+            .SetResult([new(attempt.ToString("N"), "equipment-model.save", key)]);
+        var page = context.Render<ModelEquipmentForm>();
+        page.WaitForAssertion(() => Assert.Contains(accepted ? "Повтор заблокирован" : "Журнал сохранения недоступен", page.Markup));
+        var transfer = Assert.Single(context.JSInterop.Invocations["clayDraftStore.beginLegacyOperationEvidenceTransfer"]);
+        Assert.Equal(new object?[] { "inventory.model-equipment", "new", "4" }, transfer.Arguments.Take(3));
+        Assert.Equal(transfer.Arguments[3],
+            Assert.Single(context.JSInterop.Invocations["clayDraftStore.finishLegacyOperationEvidenceTransfer"]).Arguments[0]);
+        Assert.Equal(accepted ? 1 : 0, context.JSInterop.Invocations["clayDraftStore.registerRam"].Count);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.listRecoveryCandidates"]);
+        Assert.Equal(0, fixture.WriteCount);
+        if (accepted)
+        {
+            var recorded = fixture.LastParameters(SQLQueries.INSERT_ClayzorLegacyOperationEvidence);
+            Assert.Equal("model/new", recorded["ConflictKey"]);
+            Assert.Equal(attempt, recorded["AttemptId"]);
+        }
+    }
+
     /// <summary>Успешный DML не уничтожает ввод после отправки immutable модели.</summary>
-    [Fact]
-    public async Task ConfirmedModelWrite_PreservesLateInput()
+    [Theory]
+    [InlineData("Late input")]
+    [InlineData("Existing")]
+    public async Task ConfirmedModelWrite_PreservesLateInput(string lateName)
     {
         var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -429,25 +507,38 @@ public sealed partial class ModelEquipmentFormTests
         var page = fixture.Context.Render<ModelEquipmentForm>();
         page.WaitForAssertion(() => Assert.Contains("Existing", page.Markup));
         await page.InvokeAsync(() => page.FindComponents<ClayTextBox>()[0].Find("input").Input("Submitted"));
+        await page.InvokeAsync(() => page.FindComponents<ClayTextBox>()[1].Find("input").Input("Accepted PN"));
 
-        var save = page.InvokeAsync(() => InvokeSave(page.Instance, true));
+        var save = page.InvokeAsync(() => FindButton(page, "OK").ClickAsync());
         try
         {
             await started.Task.WaitAsync(TimeSpan.FromSeconds(3));
-            await page.InvokeAsync(() => page.FindComponents<ClayTextBox>()[0].Find("input").Input("Late input"));
+            await page.InvokeAsync(() => page.FindComponents<ClayTextBox>()[0].Find("input").Input(lateName));
         }
         finally { release.TrySetResult(); }
         await save.WaitAsync(TimeSpan.FromSeconds(3));
 
         Assert.Equal("Submitted", fixture.LastParameters(SQLQueries.UPDATE_МоделиОборудования)["Name"]);
-        Assert.Equal("Late input", CurrentModel(page).Name);
+        Assert.Equal(lateName, CurrentModel(page).Name);
+        Assert.Equal("Accepted PN", CurrentModel(page).PartNumber);
+        var changed = Assert.Single(page.FindAll("[data-clay-field-changed]"));
+        Assert.NotNull(changed.QuerySelector("input[data-draft-key='model.name']"));
+        await page.InvokeAsync(() => FindButton(page, "Обновить").ClickAsync());
+        Assert.Equal(lateName, CurrentModel(page).Name);
+        await page.InvokeAsync(() => InvokeSave(page.Instance, true));
         Assert.Contains(fixture.Context.JSInterop.Invocations["clayDraftStore.saveTypedScope"],
             call => Equals(call.Arguments[1], "model-input") &&
-                call.Arguments[2] is string json && json.Contains("Late input", StringComparison.Ordinal));
+                call.Arguments[2] is string json && ReadCurrentName(json) == lateName);
         Assert.Equal(1, fixture.WriteCount);
         Assert.Contains("Сохранение подтверждено. Поздний ввод", page.Markup);
         Assert.DoesNotContain(fixture.Context.JSInterop.Invocations, call => call.Identifier == "clayModelEquipmentForm.close");
         Assert.Single(fixture.Context.JSInterop.Invocations["clayDraftStore.recordConfirmedOperation"]);
+
+        static string? ReadCurrentName(string json)
+        {
+            using var draft = JsonDocument.Parse(json);
+            return draft.RootElement.GetProperty("Current").GetProperty("Name").GetString();
+        }
     }
 
     /// <summary>Ошибка обновления родителя после коммита не объявляет запись несостоявшейся.</summary>
@@ -549,7 +640,7 @@ public sealed partial class ModelEquipmentFormTests
             [Script.Rows(TypeRow(5)), Script.Rows()],
             new EquipmentModel { Id = 7, EquipmentTypeId = 5, Name = concurrentChange ? "Server changed" : "Original" });
         var edit = EditorDraftJson("Original", "Local restored");
-        fixture.Context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.register", _ => true)
+        fixture.Context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.registerRam", _ => true)
             .SetResult(new ClayDraftRestore("model-fixture", true, 10, null, null, new Dictionary<string, string> { ["model-input"] = edit }));
         await using var _ = fixture.Context;
         var page = fixture.Context.Render<ModelEquipmentForm>();
@@ -580,7 +671,7 @@ public sealed partial class ModelEquipmentFormTests
     {
         var fixture = CreateFixture("http://localhost/Equipment/ModelEquipmentForm?id=7",
             [Script.Rows(TypeRow(5)), Script.Rows()], new EquipmentModel { Id = 7, EquipmentTypeId = 5, Name = "Original" });
-        fixture.Context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.register", _ => true)
+        fixture.Context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.registerRam", _ => true)
             .SetResult(new ClayDraftRestore("model-fixture", true, 10, null, null,
                 new Dictionary<string, string> { ["model-input"] = EditorDraftJson("Original", "Local") }));
         fixture.Context.JSInterop.Setup<ClayDraftEditorScopeState>("clayDraftStore.readEditorScope", _ => true)
@@ -610,7 +701,7 @@ public sealed partial class ModelEquipmentFormTests
             [Script.Rows(TypeRow(5)), Script.Rows()],
             existing ? new EquipmentModel { Id = 7, EquipmentTypeId = 5, Name = "Original" } : null);
         await using var context = fixture.Context;
-        context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.register", _ => true)
+        context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.registerRam", _ => true)
             .SetResult(new ClayDraftRestore("model-fixture", true, 10, null, null));
         context.JSInterop.Setup<ClayDraftEditorScopeState>("clayDraftStore.readEditorScope", _ => true)
             .SetResult(new ClayDraftEditorScopeState(10, true, false));
@@ -663,13 +754,12 @@ public sealed partial class ModelEquipmentFormTests
         Assert.Equal(0, fixture.WriteCount);
     }
 
-    /// <summary>Недоступная модель сохраняет Unknown и допускает только scoped повтор для своего сотрудника.</summary>
+    /// <summary>Действующий RAM-редактор сохраняет Unknown при повторном scoped восстановлении.</summary>
     [Fact]
-    public async Task ReadOnlyModelRawRetry_PreservesUnknown()
+    public async Task LiveModelRawRetry_PreservesUnknown()
     {
-        var fixture = CreateFixture("http://localhost/Equipment/ModelEquipmentForm?id=7", [Script.Rows()]);
-        fixture.Commands.Clear();
-        fixture.Enqueue(Script.Rows());
+        var fixture = CreateFixture("http://localhost/Equipment/ModelEquipmentForm?id=7",
+            [Script.Rows(TypeRow(5)), Script.Rows()], new EquipmentModel { Id = 7, EquipmentTypeId = 5, Name = "Original" });
         await using var context = fixture.Context;
         SetupRestore(context, "unknown", new Dictionary<string, string> { ["model-input"] = EditorDraftJson("Original", "Local") });
         context.JSInterop.Setup<ClayDraftEditorScopeState>("clayDraftStore.readEditorScope", _ => true)
@@ -679,7 +769,8 @@ public sealed partial class ModelEquipmentFormTests
         context.JSInterop.Setup<ClayDraftRestoreReadiness>("clayDraftStore.getRestoreReadiness", _ => true)
             .SetResult(new ClayDraftRestoreReadiness(false, [], ["model-input"]));
         var page = context.Render<ModelEquipmentForm>();
-        page.WaitForAssertion(() => Assert.Contains("Часть исходного ввода осталась", page.Markup));
+        page.WaitForAssertion(() => Assert.Contains("Часть ввода ещё не восстановлена", page.Markup));
+        fixture.Enqueue(Roles(Роли.Специалист_по_инвентаризации_оборудования));
         context.JSInterop.Setup<ClayDraftRawApplyResult>("clayDraftStore.applyPendingRaw", _ => true)
             .SetResult(new ClayDraftRawApplyResult([], []));
         context.JSInterop.Setup<ClayDraftRestoreReadiness>("clayDraftStore.getRestoreReadiness", _ => true)
@@ -688,7 +779,7 @@ public sealed partial class ModelEquipmentFormTests
         await page.InvokeAsync(() => FindButton(page, "Обновить").ClickAsync());
 
         Assert.Equal("model-input", Assert.Single(context.JSInterop.Invocations["clayDraftStore.applyPendingRaw"]).Arguments[1]);
-        Assert.Contains("незавершённая попытка", page.Markup);
+        Assert.Contains("Результат сохранения модели неизвестен", page.Markup);
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.retryStorage"]);
         Assert.Equal(0, fixture.WriteCount);
@@ -746,7 +837,7 @@ public sealed partial class ModelEquipmentFormTests
     {
         var fixture = CreateFixture("http://localhost/Equipment/ModelEquipmentForm?id=7",
             [Script.Rows(TypeRow(5)), Script.Rows()], new EquipmentModel { Id = 7, EquipmentTypeId = 5, Name = "Fresh" });
-        fixture.Context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.register", _ => true)
+        fixture.Context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.registerRam", _ => true)
             .SetResult(new ClayDraftRestore("model-fixture", true, 10, null, null));
         fixture.Context.JSInterop.Setup<ClayDraftEditorScopeState>("clayDraftStore.readEditorScope", _ => true)
             .SetResult(new ClayDraftEditorScopeState(10, true, false));
@@ -816,91 +907,58 @@ public sealed partial class ModelEquipmentFormTests
         Assert.Equal(0, fixture.WriteCount);
     }
 
-    /// <summary>Личный черновик доступен для копирования при отсутствии права записи или строки.</summary>
+    /// <summary>Форма без доступа к записи не открывает ввод другого редактора.</summary>
     [Theory]
     [InlineData("missing")]
     [InlineData("revoked")]
-    [InlineData("raw-only")]
     [InlineData("sql-denied")]
     [InlineData("anonymous")]
-    public async Task ReadOnlyRecoveryUsesVerifiedEmployeeAndPreservesOfficialState(string mode)
+    public async Task ReadOnlyModelDoesNotRegisterOrExposePreviousDraft(string mode)
     {
         const string url = "http://localhost/Equipment/ModelEquipmentForm?id=7";
         var model = mode == "revoked"
             ? new EquipmentModel { Id = 7, EquipmentTypeId = 5, Name = "Official" }
             : null;
         var fixture = CreateFixture(url, [Script.Rows(TypeRow(5)), Script.Rows()], model);
+        fixture.Commands.Clear();
         if (model is null)
-        {
-            fixture.Commands.Clear();
             fixture.Enqueue(mode == "sql-denied" ? Script.Error(SqlExceptionFactory.Create(229, "fixture denied")) : Script.Rows());
-        }
         else
-        {
-            fixture.Commands.Clear();
             fixture.Enqueue(ModelRow(model), Roles(Роли.Дежурный_инженер), Usage());
-        }
 
         await using var context = fixture.Context;
         if (mode == "anonymous")
             context.Services.AddSingleton<AuthenticationStateProvider, AnonymousModelAuthentication>();
-        SetupRestore(context, "unknown", mode == "raw-only"
-            ? null
-            : new Dictionary<string, string> { ["model-input"] = EditorDraftJson("Original", "Local recovered") });
-        context.JSInterop.Setup<ClayDraftEditorScopeState>("clayDraftStore.readEditorScope", _ => true)
-            .SetResult(new ClayDraftEditorScopeState(9, true, true));
-        context.JSInterop.Setup<ClayDraftRawApplyResult>("clayDraftStore.applyRaw", _ => true)
-            .SetResult(new ClayDraftRawApplyResult(["data:model.name:0"], ["path:INPUT:0"]));
-
+        SetupRestore(context, "unknown", new Dictionary<string, string> { ["model-input"] = EditorDraftJson("Original", "Local recovered") });
         var page = context.Render<ModelEquipmentForm>();
-        if (model is null)
-            page.WaitForAssertion(() => Assert.Contains(mode == "sql-denied" ? "Недостаточно прав для чтения" : "не найдена", page.Markup));
-        if (mode == "anonymous")
-        {
-            Assert.Empty(page.FindAll("[data-testid='model-readonly-recovery']"));
-            Assert.Empty(context.JSInterop.Invocations["clayDraftStore.register"]);
-            return;
-        }
+        page.WaitForAssertion(() => Assert.Contains(mode == "sql-denied" ? "Недостаточно прав для чтения" :
+            model is null ? "не найдена" : "Official", page.Markup));
 
-        const string panel = "[data-testid='model-readonly-recovery']";
-        page.WaitForAssertion(() => Assert.Contains("Часть исходного ввода осталась", page.Find(panel).TextContent));
-        var register = Assert.Single(context.JSInterop.Invocations["clayDraftStore.register"]);
-        Assert.Equal("7", register.Arguments[1]);
-        Assert.Equal("4", register.Arguments[2]);
-        var scope = Assert.IsType<string>(register.Arguments[4]);
-        var keys = page.FindAll($"{scope} textarea[data-draft-key][readonly]")
-            .Select(field => field.GetAttribute("data-draft-key")).ToArray();
-        Assert.Equal(new[] { "model.type", "model.resource", "model.name", "model.pn", "model.cpu", "model.monitor",
-            "model.memory-type", "model.memory-banks", "model.net", "model.net-name", "model.lifetime",
-            "model.driver", "model.notes" }, keys);
-        var localName = page.Find($"{panel} textarea[data-draft-key='model.name']");
-        Assert.Equal(mode == "raw-only" ? string.Empty : "Local recovered", localName.TextContent);
-        Assert.Equal("model-input", Assert.Single(context.JSInterop.Invocations["clayDraftStore.applyRaw"]).Arguments[1]);
-        Assert.Contains("незавершённая попытка", page.Find(panel).TextContent);
-        Assert.Equal(model?.Name, (PrivateMember("_model", page.Instance).GetValue(page.Instance) as EquipmentModel)?.Name);
+        Assert.DoesNotContain("Local recovered", page.Markup);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginLegacyOperationEvidenceTransfer"]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.registerRam"]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.applyRaw"]);
         Assert.Null(PrivateMember("_writeBaseline", page.Instance).GetValue(page.Instance));
 
         await page.InvokeAsync(() => InvokeSave(page.Instance, false));
         await page.InvokeAsync(() => FindButton(page, "Отмена").ClickAsync());
         Assert.Single(context.JSInterop.Invocations["clayModelEquipmentForm.close"]);
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.replaceEditorScope"]);
-
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.closeRam"]);
         Assert.Equal(0, fixture.WriteCount);
-        Assert.DoesNotContain(context.JSInterop.Invocations, call =>
-            call.Identifier is "clayDraftStore.beginOperationIntent" or "clayDraftStore.commitOperation" or
-                "clayDraftStore.unknownOperation" or "clayDraftStore.saveTypedScope" or "clayDraftStore.discardScope");
     }
 
-    /// <summary>Позднее восстановление прежнего маршрута не раскрывает черновик на новой карточке.</summary>
+    /// <summary>Позднее восстановление RAM прежнего маршрута не раскрывает ввод в новой карточке.</summary>
     [Fact]
-    public async Task ReadOnlyRecoveryDropsLateRawCompletionAfterRouteChange()
+    public async Task LiveModelDropsLateRawCompletionAfterRouteChange()
     {
         const string url = "http://localhost/Equipment/ModelEquipmentForm?id=7";
-        var fixture = CreateFixture(url, []);
-        fixture.Commands.Clear();
-        fixture.Enqueue(Script.Rows(), Script.Rows());
+        var fixture = CreateFixture(url, [Script.Rows(TypeRow(5)), Script.Rows(), Script.Rows(TypeRow(5)), Script.Rows()],
+            new EquipmentModel { Id = 7, EquipmentTypeId = 5, Name = "Original" });
+        fixture.Enqueue(ModelRow(new EquipmentModel { Id = 8, EquipmentTypeId = 5, Name = "Next model" }),
+            Roles(Роли.Специалист_по_инвентаризации_оборудования), Usage());
+        fixture.Enqueue(ModelServerSnapshot());
         await using var context = fixture.Context;
-        context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.register", call => Equals(call.Arguments[1], "7"))
+        context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.registerRam", call => Equals(call.Arguments[1], "7"))
             .SetResult(new ClayDraftRestore("model-fixture", true, 10, null, null,
                 new Dictionary<string, string> { ["model-input"] = EditorDraftJson("Original", "Previous route only") }));
         context.JSInterop.Setup<ClayDraftEditorScopeState>("clayDraftStore.readEditorScope", _ => true)
@@ -909,24 +967,20 @@ public sealed partial class ModelEquipmentFormTests
         var page = context.Render<ModelEquipmentForm>();
         page.WaitForAssertion(() => Assert.Contains("Previous route only", page.Markup));
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(3));
-        while (context.JSInterop.Invocations["clayDraftStore.applyRaw"].Count == 0)
-            await Task.Delay(1, deadline.Token);
-        var registration = Assert.Single(context.JSInterop.Invocations["clayDraftStore.register"]);
-        var selector = Assert.IsType<string>(registration.Arguments[4]);
-        Assert.Single(page.FindAll(selector));
-        Assert.Contains("Previous route only", page.Markup);
-
-        await page.InvokeAsync(() => fixture.Navigation.NavigateTo("http://localhost/Equipment/ModelEquipmentForm?id=8"));
-        page.WaitForAssertion(() =>
+        try
         {
-            Assert.Equal(8, page.Instance.Id);
-            Assert.Empty(page.FindAll(selector));
-            Assert.DoesNotContain("Previous route only", page.Markup);
-        });
-        raw.SetResult(new ClayDraftRawApplyResult(["data:model.name:0"], ["path:INPUT:0"]));
-        await page.InvokeAsync(() => { });
-        Assert.Empty(page.FindAll("[data-testid='model-readonly-recovery']"));
+            while (context.JSInterop.Invocations["clayDraftStore.applyRaw"].Count == 0)
+                await Task.Delay(1, deadline.Token);
+            await page.InvokeAsync(() => fixture.Navigation.NavigateTo("http://localhost/Equipment/ModelEquipmentForm?id=8"));
+            page.WaitForAssertion(() => Assert.Contains("Next model", page.Markup));
+            page.WaitForAssertion(() => Assert.Equal(2, context.JSInterop.Invocations["clayDraftStore.registerRam"].Count));
+        }
+        finally { raw.SetResult(new ClayDraftRawApplyResult(["data:model.name:0"], ["path:INPUT:0"])); }
+
         Assert.DoesNotContain("Previous route only", page.Markup);
+        var registrations = context.JSInterop.Invocations["clayDraftStore.registerRam"];
+        Assert.Equal(new object?[] { "7", "8" }, registrations.Select(call => call.Arguments[1]));
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.closeRam"]);
         Assert.Equal(0, fixture.WriteCount);
     }
 
@@ -963,24 +1017,24 @@ public sealed partial class ModelEquipmentFormTests
 
         Assert.Equal(0, fixture.WriteCount);
         Assert.Equal(choice == "close" ? 1 : 0, context.JSInterop.Invocations["clayModelEquipmentForm.close"].Count);
-        if (choice == "continue")
+        if (choice != "reset")
         {
             Assert.Empty(context.JSInterop.Invocations["clayDraftStore.replaceEditorScope"]);
+            if (choice == "close")
+                Assert.Equal(12L, Assert.Single(context.JSInterop.Invocations["clayDraftStore.closeRam"]).Arguments[1]);
+            else
+                Assert.Empty(context.JSInterop.Invocations["clayDraftStore.closeRam"]);
             Assert.Single(fixture.Commands);
             return;
         }
         var replace = Assert.Single(context.JSInterop.Invocations["clayDraftStore.replaceEditorScope"]);
         Assert.Equal("model-input", replace.Arguments[1]);
         Assert.Equal(12L, replace.Arguments[2]);
-        if (choice == "close")
-            Assert.Null(replace.Arguments[3]);
-        else
-        {
-            Assert.NotNull(replace.Arguments[3]);
-            Assert.Empty(fixture.Commands);
-            Assert.Equal(5, CurrentModel(page).EquipmentTypeId);
-            Assert.False(IsModified(page.Instance));
-        }
+        Assert.NotNull(replace.Arguments[3]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.closeRam"]);
+        Assert.Empty(fixture.Commands);
+        Assert.Equal(5, CurrentModel(page).EquipmentTypeId);
+        Assert.False(IsModified(page.Instance));
     }
 
     /// <summary>Reset применяет DB версию и поля после свежего доступа и CAS той же ревизии.</summary>
@@ -1034,13 +1088,17 @@ public sealed partial class ModelEquipmentFormTests
         var fixture = CreateFixture("http://localhost/Equipment/ModelEquipmentForm?id=7",
             [Script.Rows(TypeRow(5)), Script.Rows()], new EquipmentModel { Id = 7, EquipmentTypeId = 5, Name = "Official" });
         await using var context = fixture.Context;
-        SetupRestore(context, status);
+        var attemptId = status == "confirmed" ? Guid.NewGuid() : (Guid?)null;
+        SetupRestore(context, status, attemptId: attemptId);
+        if (attemptId is { } proven)
+            fixture.Enqueue(Roles(Роли.Специалист_по_инвентаризации_оборудования), ModelJournalReceipt(proven, 7, 7));
         var page = context.Render<ModelEquipmentForm>();
         page.WaitForAssertion(() => Assert.NotEmpty(page.FindAll("[data-testid='model-save-journal']")));
 
         await page.InvokeAsync(() => FindButton(page, "Отмена").ClickAsync());
 
         Assert.Equal(closes ? 1 : 0, context.JSInterop.Invocations["clayModelEquipmentForm.close"].Count);
+        Assert.Equal(closes ? 1 : 0, context.JSInterop.Invocations["clayDraftStore.closeRam"].Count);
         Assert.DoesNotContain(context.JSInterop.Invocations, call => call.Identifier is "clayDraftStore.replaceEditorScope" or
             "clayDraftStore.commitOperation" or "clayDraftStore.discardScope");
         Assert.Equal(0, fixture.WriteCount);
@@ -1106,7 +1164,8 @@ public sealed partial class ModelEquipmentFormTests
         await PickModelCancelAsync(dialogs, discard ? "Закрыть без сохранения" : "Продолжить редактирование");
 
         Assert.Equal(discard, await navigating.WaitAsync(TimeSpan.FromSeconds(5)));
-        Assert.Equal(discard ? 1 : 0, context.JSInterop.Invocations["clayDraftStore.replaceEditorScope"].Count);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.replaceEditorScope"]);
+        Assert.Equal(discard ? 1 : 0, context.JSInterop.Invocations["clayDraftStore.closeRam"].Count);
         Assert.Equal(uri, navigation.Uri);
         Assert.Empty(context.JSInterop.Invocations["clayModelEquipmentForm.close"]);
         Assert.Equal(0, fixture.WriteCount);
@@ -1144,6 +1203,9 @@ public sealed partial class ModelEquipmentFormTests
         SetupRestore(context);
         context.Services.AddScoped(_ => new ClayDraftService(new ModelJournalFixture(context.JSInterop.JSRuntime)));
         context.JSInterop.Setup<ClayDraftRecoveryCandidate[]>("clayDraftStore.listRecoveryCandidates", _ => true).SetResult([]);
+        context.JSInterop.Setup<ClayLegacyDraftOperationEvidence[]?>("clayDraftStore.beginLegacyOperationEvidenceTransfer", _ => true)
+            .SetResult([]);
+        context.JSInterop.Setup<bool>("clayDraftStore.closeRam", _ => true).SetResult(true);
         context.JSInterop.Setup<ClayDraftStorageHealth>("clayDraftStore.getHealth", _ => true)
             .SetResult(new ClayDraftStorageHealth(true, 0, null, false, 1, 1));
         context.JSInterop.Setup<ClayDraftRestoreReadiness>("clayDraftStore.getRestoreReadiness", _ => true)
@@ -1169,6 +1231,13 @@ public sealed partial class ModelEquipmentFormTests
         commands.Enqueue(Roles(Роли.Специалист_по_инвентаризации_оборудования, Роли.Дежурный_инженер));
         if (model is not null && !template) commands.Enqueue(usageCount > 0
             ? Script.Rows(Script.Row(("N", usageCount), ("Списанного", 2))) : Usage());
+        if (template)
+        {
+            commands.Enqueue(NoPending());
+            commands.Enqueue(Script.Rows());
+        }
+        else
+            foreach (var entry in ModelServerSnapshot()) commands.Enqueue(entry);
         var modelConnection = new ScriptedConnection(commands);
         var navigation = new FakeNavigationManager();
         navigation.NavigateTo(uri);
@@ -1180,7 +1249,7 @@ public sealed partial class ModelEquipmentFormTests
         };
         context.Services.AddSingleton<NavigationManager>(navigation);
         context.Services.AddSingleton<IConfiguration>(configuration);
-        context.Services.AddSingleton(CreateDb(modelConnection));
+        context.Services.AddSingleton(new DbManager("Server=test", new FakeSqlErrorHandler(), () => new EquipmentAccountTransactionConnection(modelConnection)));
         context.Services.AddSingleton<AuthenticationStateProvider, ModelAuthentication>();
         context.Services.AddSingleton(new EquipmentTypeSelectDataSource(db));
         context.Services.AddSingleton(new MemoryTypeSelectDataSource(db));
@@ -1254,20 +1323,58 @@ public sealed partial class ModelEquipmentFormTests
 
         internal void PrepareModelWrite(ScriptEntry? result = null, bool allowWrite = true)
         {
-            Enqueue(Script.Scalar(0), Type(Original?.EquipmentTypeId ?? 5));
-            if (Original is not null) Enqueue(ModelRow(Original));
             Enqueue(Script.Scalar(0), allowWrite ? Roles(Роли.Специалист_по_инвентаризации_оборудования) : Roles());
-            if (allowWrite) Enqueue(result ?? Script.Scalar(1));
+            if (!allowWrite) return;
+            Enqueue(Script.Rows());
+            EnqueueProposal();
+            Enqueue(Script.Rows(), Script.Rows(Script.Row(("Pending", false))), Script.NonQuery(),
+                Roles(Роли.Специалист_по_инвентаризации_оборудования));
+            EnqueueProposal();
+            Enqueue(result ?? Script.Scalar(1));
+            if (result?.Exception is null) Enqueue(Script.Scalar(1));
+
+            void EnqueueProposal()
+            {
+                Enqueue(Type(Original?.EquipmentTypeId ?? 5));
+                if (Original is not null) Enqueue(ModelRow(Original));
+                Enqueue(Script.Scalar(0));
+            }
+        }
+
+        internal void PrepareTemplateWrite(EquipmentModel original, int affected, bool allowWrite = true)
+        {
+            Enqueue(ModelRow(original), allowWrite ? Roles(Роли.Дежурный_инженер) : Roles());
+            if (!allowWrite) return;
+
+            Enqueue(Script.Rows(), NoPending(),
+                Script.Rows(), NoPending(), Script.NonQuery(),
+                Roles(Роли.Дежурный_инженер), Script.Scalar(affected), Script.Scalar(1));
         }
     }
 
-    private static void SetupRestore(BunitContext context, string? status = null, IReadOnlyDictionary<string, string>? scopes = null) =>
-        context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.register", _ => true)
-            .SetResult(new ClayDraftRestore("model-fixture", status is not null, 0, null,
-                status is null ? null : OperationJson(status), scopes));
+    private static ScriptEntry[] ModelServerSnapshot(ScriptEntry? latest = null, bool pending = false) =>
+        [Roles(Роли.Специалист_по_инвентаризации_оборудования), latest ?? Script.Rows(), Script.Rows(Script.Row(("Pending", pending)))];
 
-    private static string OperationJson(string status) =>
-        $$"""{"version":1,"attemptId":"fixture-attempt","kind":"equipment-model.save","status":"{{status}}","revision":9,"data":"{\"Id\":7,\"Fingerprint\":\"fixture\"}","scopes":[],"acceptLegacyTyped":false,"legacyTypedRevision":0}""";
+    private static void SetupRestore(BunitContext context, string? status = null,
+        IReadOnlyDictionary<string, string>? scopes = null, Guid? attemptId = null)
+    {
+        var restore = new ClayDraftRestore("model-fixture", status is not null, 0, null,
+            status is null ? null : OperationJson(status, attemptId), scopes);
+        context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.registerRam", _ => true).SetResult(restore);
+    }
+
+    private static string OperationJson(string status, Guid? attemptId = null) => JsonSerializer.Serialize(new
+    {
+        version = 1,
+        attemptId = attemptId?.ToString("N") ?? "fixture-attempt",
+        kind = "equipment-model.save",
+        status,
+        revision = 9,
+        data = """{"Id":7,"Fingerprint":"fixture"}""",
+        scopes = new[] { new { name = "model-input", typedRevision = 11, rawRevisions = new Dictionary<string, long>() } },
+        acceptLegacyTyped = false,
+        legacyTypedRevision = 0,
+    });
 
     private sealed class ModelJournalFixture(IJSRuntime inner) : IJSRuntime
     {
@@ -1275,9 +1382,9 @@ public sealed partial class ModelEquipmentFormTests
 
         public async ValueTask<T> InvokeAsync<T>(string identifier, CancellationToken cancellationToken, object?[]? args)
         {
-            if (identifier == "clayDraftStore.registerStream")
+            if (identifier == "clayDraftStore.registerRamStream")
             {
-                var restored = await inner.InvokeAsync<ClayDraftRestore?>("clayDraftStore.register", cancellationToken, args);
+                var restored = await inner.InvokeAsync<ClayDraftRestore?>("clayDraftStore.registerRam", cancellationToken, args);
                 if (restored is null) return default!;
                 return (T)(object)new ClayDraftRestoreStream(restored.RegistrationId,
                     new TemplateTestStream(System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(restored)));

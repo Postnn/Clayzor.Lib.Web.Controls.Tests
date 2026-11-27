@@ -186,22 +186,25 @@ public sealed partial class Eq10DomainPhoneTests
     [Fact]
     public async Task ConfigureRetry_RevokedOwnerRole_ZeroAdditionalAts()
     {
-        var version = Version();
-        var connection = Connection(
-            Script.Rows(EquipmentRow(ownerId: 1, typeId: 30, changedAt: version)), Script.Scalar(1),
-            Script.Rows(PhoneRow(1, 8)), Script.Rows(LookupRow(1, 1, "xorcom")),
-            Script.Scalar(1), Script.Error(new InvalidOperationException("Процедура вернула код 2.")),
-            Script.Rows(EquipmentRow(ownerId: 1, typeId: 30, changedAt: version)), Script.Scalar(0));
-        var service = Service(connection);
+        var id = Guid.NewGuid();
+        var (service, connection) = ConfigureService([
+            ConfigureActor(), .. ConfigureRead(id, 1, 1, EquipmentAtsStep.Planned),
+            Script.Scalar(1), .. ConfigureRead(id, 1, 1, EquipmentAtsStep.Planned), .. ConfigurePhoneContext(1),
+            Script.Scalar(1), new ScriptEntry
+            {
+                SetNonQueryOutputs = parameters => parameters.Cast<System.Data.Common.DbParameter>()
+                    .Single(parameter => parameter.Direction == System.Data.ParameterDirection.ReturnValue).Value = 2,
+            },
+            ConfigureActor(), .. ConfigureAccess(ownerId: 1, personId: 2)]);
         var initial = await service.ConfigurePhoneEquipmentAttemptAsync(7);
-        Assert.Equal(PhoneSyncPhase.Failed, Assert.Single(initial.Operations).Phase);
+        Assert.Equal(PhoneSyncPhase.Unknown, Assert.Single(initial.Operations).Phase);
         var restored = JsonSerializer.Deserialize<PhoneSyncAttempt>(JsonSerializer.Serialize(initial))!;
 
-        var revoked = await Assert.ThrowsAsync<EquipmentOperationException>(() => service.RetryPhoneSyncAttemptAsync(restored));
-        Assert.Equal(EquipmentWritePhase.Rejected, revoked.Phase);
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.RetryPhoneSyncAttemptAsync(restored));
 
-        Assert.Single(connection.CommandLog, sql => sql.Contains("sp_Xorcom_PhoneNumberSync", StringComparison.Ordinal));
-        Assert.DoesNotContain(connection.CommandLog, sql => sql.Contains("UPDATE", StringComparison.OrdinalIgnoreCase));
+        Assert.Single(connection.CommandLog, IsAtsDispatch);
+        Assert.Single(connection.CommandLog, sql => sql == Clayzor.Lib.Entities.SQLQueries.UPDATE_EquipmentAtsStepState);
+        Assert.DoesNotContain(Clayzor.Lib.Entities.SQLQueries.UPDATE_EquipmentAtsCompleted, connection.CommandLog);
     }
 
     /// <summary>Изменение фактического владельца или типа между Configure и retry запрещает dispatch.</summary>
@@ -210,78 +213,133 @@ public sealed partial class Eq10DomainPhoneTests
     [InlineData(2, 30)]
     public async Task ConfigureRetry_OwnerOrTypeChanged_ZeroAdditionalAts(int retryOwnerId, int retryTypeId)
     {
-        var version = Version();
-        var connection = Connection(
-            Script.Rows(EquipmentRow(ownerId: 1, typeId: 30, changedAt: version)), Script.Scalar(1),
-            Script.Rows(PhoneRow(1, 8)), Script.Rows(LookupRow(1, 1, "xorcom")),
-            Script.Scalar(1), Script.Error(new InvalidOperationException("Процедура вернула код 2.")),
-            Script.Rows(EquipmentRow(ownerId: retryOwnerId, typeId: retryTypeId, changedAt: version)));
-        var service = Service(connection);
+        var id = Guid.NewGuid();
+        var (service, connection) = ConfigureService([
+            ConfigureActor(), .. ConfigureRead(id, 1, 1, EquipmentAtsStep.Planned),
+            Script.Error(SqlExceptionFactory.Create(-2, "Тайм-аут проверки процедуры")),
+            ConfigureActor(), .. ConfigureAccess(retryOwnerId, personId: 1, typeId: retryTypeId)]);
         var initial = await service.ConfigurePhoneEquipmentAttemptAsync(7);
+        Assert.Equal(PhoneSyncPhase.NotSent, Assert.Single(initial.Operations).Phase);
 
-        var changed = await Assert.ThrowsAsync<EquipmentOperationException>(() => service.RetryPhoneSyncAttemptAsync(initial));
-        Assert.Equal(EquipmentWritePhase.Rejected, changed.Phase);
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => service.RetryPhoneSyncAttemptAsync(initial));
 
-        Assert.Single(connection.CommandLog, sql => sql.Contains("sp_Xorcom_PhoneNumberSync", StringComparison.Ordinal));
+        Assert.DoesNotContain(connection.CommandLog, IsAtsDispatch);
+        Assert.DoesNotContain(Clayzor.Lib.Entities.SQLQueries.UPDATE_EquipmentAtsStepState, connection.CommandLog);
     }
 
-    /// <summary>Null-owner explicit Configure допускает только подтверждённую global43 и повторяет Failed.</summary>
+    /// <summary>Карточка без владельца допускает только глобальную роль 43 и продолжает сохранённый Planned.</summary>
     [Fact]
-    public async Task ConfigureRetry_NullOwnerWithGlobalRole_RetriesFailedOnly()
+    public async Task ConfigureRetry_NullOwnerRequiresGlobalRoleToRunPersistedPlannedStep()
     {
-        var version = Version();
-        var equipment = Script.Row(("КодОборудования", 7), ("КодЛицаВладельца", null),
-            ("КодТипаОборудования", 30), ("Изменено", version));
-        var connection = Connection(
-            Script.Rows(equipment), Script.Scalar(1), Script.Rows(PhoneRow(1, 8)),
-            Script.Rows(LookupRow(1, 1, "xorcom")), Script.Scalar(1),
-            Script.Error(new InvalidOperationException("Процедура вернула код 2.")),
-            Script.Rows(equipment), Script.Scalar(1), Script.Rows(PhoneRow(1, 8)), Script.Scalar(1), Script.NonQuery());
-        var service = Service(connection);
-        var initial = await service.ConfigurePhoneEquipmentAttemptAsync(7);
+        var (restricted, deniedConnection) = ConfigureService([ConfigureActor(), .. ConfigureAccess(null, personId: 1)]);
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(() => restricted.ConfigurePhoneEquipmentAttemptAsync(7));
+        Assert.DoesNotContain(deniedConnection.CommandLog, IsAtsDispatch);
+
+        var id = Guid.NewGuid();
+        var (service, connection) = ConfigureService([
+            .. ConfigureRead(id, null, 0, EquipmentAtsStep.Planned),
+            ConfigureActor(), .. ConfigureRead(id, null, 0, EquipmentAtsStep.Planned),
+            Script.Scalar(1), .. ConfigureRead(id, null, 0, EquipmentAtsStep.Planned), .. ConfigurePhoneContext(1),
+            Script.Scalar(1), Script.NonQuery(),
+            .. ConfigureRead(id, null, 0, EquipmentAtsStep.Dispatching), Script.Scalar(1), Script.Scalar(1)]);
+        var initial = await service.ReadConfigurePhoneAttemptAsync(7, 4, id, default);
+        Assert.NotNull(initial);
+        Assert.Equal(PhoneSyncPhase.NotSent, Assert.Single(initial.Operations).Phase);
 
         var retried = await service.RetryPhoneSyncAttemptAsync(initial);
 
+        Assert.Equal(id.ToString("N"), retried.AttemptId);
         Assert.Equal(PhoneSyncPhase.Succeeded, Assert.Single(retried.Operations).Phase);
-        Assert.Equal(2, connection.CommandLog.Count(sql => sql.Contains("sp_Xorcom_PhoneNumberSync", StringComparison.Ordinal)));
-        Assert.DoesNotContain(connection.CommandLog, sql => sql.Contains("UPDATE", StringComparison.OrdinalIgnoreCase));
+        Assert.Single(connection.CommandLog, IsAtsDispatch);
+        Assert.Equal(2, connection.CommandLog.Count(sql => sql == Clayzor.Lib.Entities.SQLQueries.UPDATE_EquipmentAtsStepState));
+        Assert.Single(connection.CommandLog, sql => sql == Clayzor.Lib.Entities.SQLQueries.UPDATE_EquipmentAtsCompleted);
+        Assert.DoesNotContain(connection.CommandLog, sql => sql.Contains("UPDATE vwОборудование", StringComparison.Ordinal));
     }
 
-    /// <summary>Mixed ledger переживает JSON и повторяет только Failed, сохраняя Succeeded и Unknown.</summary>
+    /// <summary>Смешанный план сохраняет подтверждённый, неопределённый и неотправленный шаги без повторной отправки.</summary>
     [Fact]
-    public async Task MixedAttempt_RetryFailedOnly_PreservesUnknownAndDoesNotUpdateMain()
+    public async Task MixedAttempt_DispatchingBlocksRetryAndReconciliationOnlyReads()
     {
-        var version = Version();
-        var connection = Connection(
-            Script.Rows(EquipmentRow(ownerId: 1, typeId: 30, changedAt: version)), Script.Scalar(1),
-            Script.Rows(PhoneRow(1, 8), PhoneRow(2, 8), PhoneRow(3, 8)),
-            Script.Rows(LookupRow(1, 1, "xorcom")), Script.Rows(LookupRow(2, 1, "xorcom")),
-            Script.Rows(LookupRow(3, 1, "xorcom")),
-            Script.Scalar(1), Script.NonQuery(),
-            Script.Scalar(1), Script.Error(new InvalidOperationException("Процедура вернула код 2.")),
-            Script.Scalar(1), Script.Error(SqlExceptionFactory.Create(-2, "timeout")),
-            Script.Rows(EquipmentRow(ownerId: 1, typeId: 30, changedAt: version)), Script.Scalar(1),
-            Script.Rows(PhoneRow(1, 8), PhoneRow(2, 8), PhoneRow(3, 8)), Script.Scalar(1), Script.NonQuery(),
-            Script.Rows(EquipmentRow(ownerId: 1, typeId: 30, changedAt: version)), Script.Scalar(1),
-            Script.Rows(PhoneRow(1, 8), PhoneRow(2, 8), PhoneRow(3, 8)));
-        var service = Service(connection);
+        var id = Guid.NewGuid();
+        byte[] states = [EquipmentAtsStep.Confirmed, EquipmentAtsStep.Dispatching, EquipmentAtsStep.Planned];
+        PhoneSyncPhase[] phases = [PhoneSyncPhase.Succeeded, PhoneSyncPhase.Unknown, PhoneSyncPhase.NotSent];
+        var (service, connection) = ConfigureService([
+            ConfigureActor(), .. ConfigureRead(id, 1, 1, states),
+            ConfigureActor(), .. ConfigureRead(id, 1, 1, states),
+            ConfigureActor(), .. ConfigureRead(id, 1, 1, states),
+            Script.Rows(EquipmentRow()), ConfigurePhoneLinks(3),
+            .. ConfigureRead(id, 1, 1, states), .. ConfigurePhoneContext(3)]);
         var initial = await service.ConfigurePhoneEquipmentAttemptAsync(7);
-        Assert.Equal(new[] { PhoneSyncPhase.Succeeded, PhoneSyncPhase.Failed, PhoneSyncPhase.Unknown },
-            initial.Operations.Select(item => item.Phase).ToArray());
+        Assert.Equal(phases, initial.Operations.Select(item => item.Phase));
         var restored = JsonSerializer.Deserialize<PhoneSyncAttempt>(JsonSerializer.Serialize(initial))!;
 
         var retried = await service.RetryPhoneSyncAttemptAsync(restored);
+        Assert.Equal(phases, retried.Operations.Select(item => item.Phase));
 
-        Assert.Equal(new[] { PhoneSyncPhase.Succeeded, PhoneSyncPhase.Succeeded, PhoneSyncPhase.Unknown },
-            retried.Operations.Select(item => item.Phase).ToArray());
-        Assert.Equal(4, connection.CommandLog.Count(sql => sql.Contains("sp_Xorcom_PhoneNumberSync", StringComparison.Ordinal)));
-        Assert.Equal(2, connection.ParameterLog.Last()["КодТелефонногоНомера"]);
-        var restoredAfterRetry = JsonSerializer.Deserialize<PhoneSyncAttempt>(JsonSerializer.Serialize(retried))!;
-        var reconciliation = await service.ReconcilePhoneSyncAttemptAsync(restoredAfterRetry);
+        var reconciliation = await service.ReconcilePhoneSyncAttemptAsync(retried);
         Assert.True(reconciliation.PersistedStateMatches);
-        Assert.Equal(PhoneSyncPhase.Unknown, reconciliation.Attempt.Operations.Last().Phase);
-        Assert.Equal(4, connection.CommandLog.Count(sql => sql.Contains("sp_Xorcom_PhoneNumberSync", StringComparison.Ordinal)));
-        Assert.DoesNotContain(connection.CommandLog, sql => sql.Contains("UPDATE", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal(phases, reconciliation.Attempt.Operations.Select(item => item.Phase));
+        Assert.DoesNotContain(connection.CommandLog, IsAtsDispatch);
+        Assert.DoesNotContain(connection.CommandLog, sql => sql.TrimStart().StartsWith("UPDATE", StringComparison.OrdinalIgnoreCase) ||
+            sql.TrimStart().StartsWith("INSERT", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static ScriptEntry ConfigureActor() => Script.Rows(Script.Row(("КодСотрудника", 4)));
+
+    private static ScriptEntry[] ConfigureAccess(int? ownerId, int personId, int typeId = 30) =>
+    [
+        ConfigureActor(),
+        Script.Rows(Script.Row(("RoleId", (int)Clayzor.Lib.Entities.Роли.Специалист_по_инвентаризации_оборудования), ("PersonId", personId))),
+        Script.Rows(Script.Row(("КодОборудования", 7), ("КодЛицаВладельца", ownerId),
+            ("КодТипаОборудования", typeId), ("Изменено", Version()))),
+    ];
+
+    private static ScriptEntry[] ConfigureRead(Guid id, int? ownerId, int personId, params byte[] states) =>
+    [
+        .. ConfigureAccess(ownerId, personId),
+        ConfigureRows([("AttemptId", typeof(Guid)), ("EmployeeId", typeof(int)), ("EquipmentId", typeof(int)),
+            ("Origin", typeof(byte)), ("ExpectedChangedAtUtc", typeof(DateTime)), ("OwnerId", typeof(int)),
+            ("ContextFingerprint", typeof(string)), ("State", typeof(byte))],
+            new object?[] { id, 4, 7, (byte)EquipmentPhoneSyncOrigin.ExplicitConfigure, Version(), ownerId, ConfigureFingerprint(states.Length), (byte)0 }),
+        ConfigureRows([("StepIndex", typeof(int)), ("Kind", typeof(byte)), ("TargetId", typeof(int)),
+            ("Deleting", typeof(bool)), ("State", typeof(byte))],
+            states.Select((state, i) => new object?[] { i, EquipmentAtsStep.Xorcom, i + 1, false, state }).ToArray()),
+    ];
+
+    private static string ConfigureFingerprint(int count) => Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(
+        JsonSerializer.SerializeToUtf8Bytes(Enumerable.Range(1, count).Select(phoneId => new
+        {
+            PhoneId = phoneId, ConnectionEquipmentId = 8, AutoDialNumber = "", AutoDialDelay = (byte?)null,
+            IsDefault = false, StationId = 1, XorcomName = "xorcom",
+        }))));
+
+    private static ScriptEntry ConfigurePhoneLinks(int count) =>
+        Script.Rows(Enumerable.Range(1, count).Select(id => Script.Row(
+            ("КодТелефонногоНомера", id), ("КодОборудования", 7), ("КодОборудованияПодключения", 8))).ToArray());
+
+    private static ScriptEntry[] ConfigurePhoneContext(int count) =>
+    [
+        ConfigurePhoneLinks(count),
+        .. Enumerable.Range(1, count).Select(id => Script.Rows(LookupRow(id, 1, "xorcom"))),
+    ];
+
+    private static ScriptEntry ConfigureRows((string Name, Type Type)[] columns, params object?[][] values) => new()
+    {
+        ReaderFactory = () =>
+        {
+            var table = new System.Data.DataTable();
+            foreach (var (name, type) in columns) table.Columns.Add(name, type);
+            foreach (var row in values) table.Rows.Add(row.Select(value => value ?? DBNull.Value).ToArray());
+            return table.CreateDataReader();
+        },
+    };
+
+    private static (EquipmentFormService Service, ScriptedConnection Script) ConfigureService(params ScriptEntry[] entries)
+    {
+        DapperColumnMapper.Initialize();
+        var script = new ScriptedConnection(new Queue<ScriptEntry>(entries), emulateEquipmentIdentity: false);
+        return (new EquipmentFormService(new DbManager("Server=fixture", new FakeSqlErrorHandler(),
+            () => new EquipmentAccountTransactionConnection(script)), new TestAuthenticationStateProvider()), script);
     }
 
     private static EquipmentFormService Service(ScriptedConnection connection)

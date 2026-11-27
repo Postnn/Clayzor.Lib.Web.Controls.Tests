@@ -27,26 +27,22 @@ public sealed partial class PhonePoolAttributeTests
         await SelectAttributeCancellationAsync(page, dialogs, choice);
 
         var replaces = context.JSInterop.Invocations["clayDraftStore.replaceEditorScope"];
-        if (choice == "continue")
-        {
-            Assert.Empty(replaces);
-            Assert.Contains("Исходное значение", page.Markup);
-        }
-        else
+        if (choice == "reset")
         {
             var replace = Assert.Single(replaces);
             Assert.Equal("main", replace.Arguments[1]);
             Assert.Equal(13L, replace.Arguments[2]);
-            if (choice == "close")
-                Assert.Null(replace.Arguments[3]);
-            else
-            {
-                using var snapshot = JsonDocument.Parse(Assert.IsType<string>(replace.Arguments[3]));
-                Assert.Equal(changed.Value, snapshot.RootElement.GetProperty("Current").GetProperty("Value").GetString());
-                Assert.Equal(changed.ChangedAt, snapshot.RootElement.GetProperty("Version").GetProperty("ChangedAt").GetDateTime());
-                Assert.Contains(changed.Value, page.Markup);
-            }
+            using var snapshot = JsonDocument.Parse(Assert.IsType<string>(replace.Arguments[3]));
+            Assert.Equal(changed.Value, snapshot.RootElement.GetProperty("Current").GetProperty("Value").GetString());
+            Assert.Equal(changed.ChangedAt, snapshot.RootElement.GetProperty("Version").GetProperty("ChangedAt").GetDateTime());
+            Assert.Contains(changed.Value, page.Markup);
         }
+        else
+        {
+            Assert.Empty(replaces);
+            if (choice == "continue") Assert.Contains("Исходное значение", page.Markup);
+        }
+        Assert.Equal(choice == "close" ? 1 : 0, context.JSInterop.Invocations["clayDraftStore.closeRam"].Count);
         Assert.Equal(choice == "close" ? 1 : 0, context.JSInterop.Invocations["clayModelEquipmentForm.close"].Count);
         await page.InvokeAsync(() => AssertNoPoolAttributeCancelWrite(sql, context));
     }
@@ -105,7 +101,7 @@ public sealed partial class PhonePoolAttributeTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task ReadOnlyPoolAttributeExitPreservesRawAndUnknown(bool unknown)
+    public async Task ReadOnlyPoolAttributeExitNeverTouchesPriorRawOrUnknown(bool unknown)
     {
         using var sql = new Probe { TypeExists = false };
         var snapshot = RecoverySnapshot("Ввод в режиме чтения");
@@ -118,11 +114,16 @@ public sealed partial class PhonePoolAttributeTests
             new Dictionary<string, string> { ["main"] = snapshot }));
         SetAttributeScopeRevision(context);
         var page = context.Render<PhonePoolAttributeForm>();
-        page.WaitForElement("section[data-draft-scope=main] input[readonly]");
+        page.WaitForAssertion(() => Assert.Contains("Тип атрибута не найден", page.Markup));
+        Assert.DoesNotContain("Ввод в режиме чтения", page.Markup);
+        Assert.DoesNotContain("ppa-unknown-exit", page.Markup);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.registerRam"]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.applyRaw"]);
 
         await page.InvokeAsync(() => Button(page, "Отмена").ClickAsync(new MouseEventArgs()));
 
         Assert.Single(context.JSInterop.Invocations["clayModelEquipmentForm.close"]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.closeRam"]);
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.replaceEditorScope"]);
         await page.InvokeAsync(() => AssertNoPoolAttributeCancelWrite(sql, context));
     }

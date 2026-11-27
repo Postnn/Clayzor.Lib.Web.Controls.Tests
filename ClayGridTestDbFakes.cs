@@ -82,8 +82,10 @@ internal sealed class ScriptedDataReader : DbDataReader
 internal sealed class ScriptEntry
 {
     public List<Dictionary<string, object?>>? Rows { get; init; }
+    public Func<DbDataReader>? ReaderFactory { get; init; }
     public int? Scalar { get; init; }
     public int? AffectedRows { get; init; }
+    public Action<DbParameterCollection>? SetNonQueryOutputs { get; init; }
     public Exception? Exception { get; init; }
     public TaskCompletionSource? Started { get; init; }
     public TaskCompletionSource? Release { get; init; }
@@ -127,6 +129,7 @@ internal sealed class ScriptedCommand : DbCommand
         var e = GetEntry();
         CommandLog.Add(CommandText);
         if (e.Exception is not null) throw e.Exception;
+        e.SetNonQueryOutputs?.Invoke(DbParameterCollection);
         return e.AffectedRows ?? 1;
     }
 
@@ -145,7 +148,7 @@ internal sealed class ScriptedCommand : DbCommand
         _owner.ParameterLog.Add(DbParameterCollection.Cast<DbParameter>()
             .ToDictionary(parameter => parameter.ParameterName, parameter => parameter.Value));
         if (e.Exception is not null) throw e.Exception;
-        return new ScriptedDataReader(e.Rows ?? []);
+        return e.ReaderFactory?.Invoke() ?? new ScriptedDataReader(e.Rows ?? []);
     }
 
     public override Task<int> ExecuteNonQueryAsync(CancellationToken ct)
@@ -159,6 +162,7 @@ internal sealed class ScriptedCommand : DbCommand
                      .Where(parameter => parameter.Direction == ParameterDirection.ReturnValue && parameter.Value is null or DBNull))
             parameter.Value = 0;
         if (e.Exception is not null) throw e.Exception;
+        e.SetNonQueryOutputs?.Invoke(DbParameterCollection);
         return Task.FromResult(e.AffectedRows ?? 1);
     }
 
@@ -193,7 +197,7 @@ internal sealed class ScriptedCommand : DbCommand
             await e.Release.Task.WaitAsync(ct);
         if (e.Exception is not null) throw e.Exception;
         var rows = e.Rows ?? (e.Scalar is int scalar ? [Script.Row(("Value", scalar))] : []);
-        return new ScriptedDataReader(rows);
+        return e.ReaderFactory?.Invoke() ?? new ScriptedDataReader(rows);
     }
 }
 

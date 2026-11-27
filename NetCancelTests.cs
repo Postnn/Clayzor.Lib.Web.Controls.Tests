@@ -4,6 +4,7 @@ using Clayzor.Lib.Web.Controls.Services;
 using Microsoft.AspNetCore.Components;
 using Microsoft.AspNetCore.Components.Authorization;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.JSInterop;
 using MudBlazor;
 using NetPage = Kesco.App.Web.Inventory.Components.Pages.Net.Net;
 
@@ -32,22 +33,17 @@ public sealed partial class NetFormTests
 
         Assert.Equal(choice == "reset" ? "From DB" : "Original", Model(page.Instance).Description);
         Assert.Equal(choice == "close" ? 1 : 0, context.JSInterop.Invocations["clayModelEquipmentForm.close"].Count);
-        if (choice == "continue")
-            Assert.Empty(context.JSInterop.Invocations["clayDraftStore.replaceEditorScope"]);
-        else
+        Assert.Equal(choice == "close" ? 1 : 0, context.JSInterop.Invocations["clayDraftStore.closeRam"].Count);
+        if (choice == "reset")
         {
             var replace = Assert.Single(context.JSInterop.Invocations["clayDraftStore.replaceEditorScope"]);
             Assert.Equal("net-input", replace.Arguments[1]);
             Assert.Equal(23L, replace.Arguments[2]);
-            if (choice == "close")
-                Assert.Null(replace.Arguments[3]);
-            else
-            {
-                using var input = JsonDocument.Parse(Assert.IsType<string>(replace.Arguments[3]));
-                Assert.Equal("2026-11-26T11:00:00", input.RootElement.GetProperty("ChangedAt").GetString());
-                Assert.Equal("From DB", input.RootElement.GetProperty("Original").GetProperty("Description").GetString());
-            }
+            using var input = JsonDocument.Parse(Assert.IsType<string>(replace.Arguments[3]));
+            Assert.Equal("2026-11-26T11:00:00", input.RootElement.GetProperty("ChangedAt").GetString());
+            Assert.Equal("From DB", input.RootElement.GetProperty("Original").GetProperty("Description").GetString());
         }
+        else Assert.Empty(context.JSInterop.Invocations["clayDraftStore.replaceEditorScope"]);
         AssertNoNetCancelWrite(fixture);
     }
 
@@ -94,9 +90,11 @@ public sealed partial class NetFormTests
         using var fixture = new NetFixture(poe: 1, restoredOperation: OperationJson("net.poe", status));
         var page = fixture.Context.Render<NetPage>();
         WaitForLoad(page);
+        page.WaitForAssertion(() => Assert.Empty(page.FindAll("[data-testid='net-input-notice']")));
         await page.InvokeAsync(() => NetCancelButton(page).ClickAsync());
 
         Assert.Equal(closes ? 1 : 0, fixture.Context.JSInterop.Invocations["clayModelEquipmentForm.close"].Count);
+        Assert.Single(fixture.Context.JSInterop.Invocations["clayDraftStore.closeRam"]);
         Assert.DoesNotContain(fixture.Context.JSInterop.Invocations, call => call.Identifier is
             "clayDraftStore.replaceEditorScope" or "clayDraftStore.commitOperation" or "clayDraftStore.discardScope");
         AssertNoNetCancelWrite(fixture);
@@ -155,25 +153,56 @@ public sealed partial class NetFormTests
         await PickNetCancelAsync(dialogs, discard ? "Закрыть без сохранения" : "Продолжить редактирование");
 
         Assert.Equal(discard, await navigating.WaitAsync(TimeSpan.FromSeconds(5)));
-        Assert.Equal(discard ? 1 : 0, context.JSInterop.Invocations["clayDraftStore.replaceEditorScope"].Count);
+        Assert.Equal(discard ? 1 : 0, context.JSInterop.Invocations["clayDraftStore.closeRam"].Count);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.replaceEditorScope"]);
         Assert.Equal(uri, navigation.Uri);
         Assert.Empty(context.JSInterop.Invocations["clayModelEquipmentForm.close"]);
         AssertNoNetCancelWrite(fixture);
     }
 
     [Fact]
-    public async Task NetReadOnlyRecoveryClosesWithoutReplacingRaw()
+    public async Task UnavailablePortClosesWithoutOpeningPriorRegistration()
     {
         using var fixture = new NetFixture(missingPort: true, restoredRaw: true);
         var context = fixture.Context;
         var page = context.Render<NetPage>();
-        page.WaitForAssertion(() => Assert.NotEmpty(page.FindAll("[data-testid='net-readonly-recovery']")));
+        page.WaitForAssertion(() => Assert.Contains("не найден", page.Markup));
 
         await page.InvokeAsync(() => NetCancelButton(page).ClickAsync());
 
         Assert.Single(context.JSInterop.Invocations["clayModelEquipmentForm.close"]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.registerRam"]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.closeRam"]);
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.replaceEditorScope"]);
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.discardScope"]);
+        AssertNoNetCancelWrite(fixture);
+    }
+
+    [Fact]
+    public async Task FailedPhysicalCloseRetriesTheSameHandleAndRevisionWithoutDml()
+    {
+        using var fixture = new NetFixture(description: "Исходное значение");
+        var context = fixture.Context;
+        var dialogs = context.Render<MudDialogProvider>();
+        var page = context.Render<NetPage>();
+        WaitForLoad(page);
+        InstallNetCancelScope(context);
+        context.JSInterop.Setup<bool>("clayDraftStore.closeRam", _ => true)
+            .SetException(new JSException("fixture close failure"));
+
+        var closing = page.InvokeAsync(() => NetCancelButton(page).ClickAsync());
+        await PickNetCancelAsync(dialogs, "Закрыть без сохранения");
+        await closing.WaitAsync(TimeSpan.FromSeconds(5));
+
+        var first = Assert.Single(context.JSInterop.Invocations["clayDraftStore.closeRam"]);
+        Assert.Empty(context.JSInterop.Invocations["clayModelEquipmentForm.close"]);
+        Assert.Contains("Не удалось подтвердить удаление", page.Markup);
+        context.JSInterop.Setup<bool>("clayDraftStore.closeRam", _ => true).SetResult(true);
+        await page.InvokeAsync(() => NetCancelButton(page).ClickAsync());
+
+        Assert.Equal(2, context.JSInterop.Invocations["clayDraftStore.closeRam"].Count);
+        Assert.Equal(first.Arguments, context.JSInterop.Invocations["clayDraftStore.closeRam"].Last().Arguments);
+        Assert.Single(context.JSInterop.Invocations["clayModelEquipmentForm.close"]);
         AssertNoNetCancelWrite(fixture);
     }
 

@@ -138,6 +138,62 @@ public sealed class EquipmentUpsTestDialogTests
         return context;
     }
 
+    /// <summary>Сброс вложенного теста применяет только подтверждённую ревизию.</summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ScopedResetKeepsNestedInputWhenRevisionChanges(bool acceptsRevision)
+    {
+        await using var context = CreateContext();
+        var provider = context.Render<MudDialogProvider>();
+        var original = ExistingValue();
+        var local = ExistingValue();
+        local.BatteryTime = 11;
+        var fresh = ExistingValue();
+        fresh.BatteryTime = 20;
+        int reads = 0;
+        int writes = 0;
+        var cancellation = new EquipmentUpsTestCancellation(
+            () => Task.FromResult<ClayDraftEditorScopeState?>(new(12, false, false)),
+            () =>
+            {
+                reads++;
+                return Task.FromResult<EquipmentUpsTestDraft?>(new(fresh, fresh.TestedAt.Date, fresh.TestedAt.TimeOfDay,
+                    fresh.BatteryTime, fresh.Servers, fresh.Issues));
+            },
+            (revision, replacement, current) =>
+            {
+                writes++;
+                Assert.Equal(12L, revision);
+                Assert.Equal(20, replacement?.BatteryTime);
+                Assert.True(current());
+                return Task.FromResult(acceptsRevision);
+            });
+        var reference = await context.Services.GetRequiredService<IDialogService>().ShowAsync<EquipmentUpsTestDialog>(
+            "UPS test", new DialogParameters<EquipmentUpsTestDialog>
+            {
+                { dialog => dialog.Original, original },
+                { dialog => dialog.Value, local },
+                { dialog => dialog.Date, local.TestedAt.Date },
+                { dialog => dialog.Time, local.TestedAt.TimeOfDay },
+                { dialog => dialog.ScopedCancellation, cancellation },
+            });
+        var editor = provider.FindComponent<EquipmentUpsTestDialog>();
+
+        var cancel = editor.InvokeAsync(() =>
+            editor.FindAll("button").Single(button => button.TextContent.Trim() == "Отмена").ClickAsync());
+        provider.WaitForAssertion(() => Assert.Single(provider.FindComponents<Clayzor.Lib.Web.Controls.Components.Form.ClayEditorCancelDialog>()));
+        await provider.InvokeAsync(() => provider.FindComponent<Clayzor.Lib.Web.Controls.Components.Form.ClayEditorCancelDialog>().FindAll("button")
+            .Single(button => button.TextContent.Trim() == "Отменить мои изменения и загрузить из БД").ClickAsync());
+        await cancel.WaitAsync(TimeSpan.FromSeconds(3));
+
+        Assert.Equal(1, reads);
+        Assert.Equal(1, writes);
+        Assert.Equal(acceptsRevision ? 20 : 11, editor.Instance.Value.BatteryTime);
+        Assert.Same(acceptsRevision ? fresh : original, editor.Instance.Original);
+        Assert.False(reference.Result.IsCompleted);
+    }
+
     private static UpsTest ExistingValue() => new()
     {
         Id = 5,

@@ -169,7 +169,7 @@ public sealed partial class NetFormTests
         var fixture = new NetFixture(hasLateRaw: () => lateRaw);
         await using var context = fixture.Context;
         fixture.Enqueue(Script.Rows(Script.Row(("КодСотрудника", 4), ("Сотрудник", "Тестов А."))));
-        fixture.Enqueue(new ScriptEntry { Scalar = 0, Started = started, Release = release });
+        fixture.AddSaveDbCommand(new ScriptEntry { Scalar = 0, Started = started, Release = release });
         var fresh = new DateTime(2026, 11, 21, 11, 0, 0);
         fixture.AddLoad(description: "Отправлено", changedAt: fresh, includeCustomerLookup: false);
         var page = context.Render<NetPage>();
@@ -196,7 +196,7 @@ public sealed partial class NetFormTests
     [InlineData(false, true)]
     [InlineData(true, true)]
     [InlineData(false, false)]
-    public async Task NetUnavailablePortShowsOnlyVerifiedEmployeesOwnReadOnlyDraft(bool denied, bool verified)
+    public async Task NetUnavailablePortDoesNotAttachPreviousRegistration(bool denied, bool verified)
     {
         var fixture = new NetFixture(currentUser: verified, missingPort: !denied,
             portReadError: denied ? SqlExceptionFactory.Create(229, "access denied") : null,
@@ -207,22 +207,11 @@ public sealed partial class NetFormTests
 
         page.WaitForAssertion(() => Assert.Contains(denied ? "Нет доступа к записи порта" : "не найден", page.Markup));
         Assert.Empty(page.FindAll("[data-testid='net-port-caption']"));
-        var panels = page.FindAll("[data-testid='net-readonly-recovery']");
-        if (verified)
-        {
-            Assert.Single(panels);
-            var note = panels[0].QuerySelector("textarea[data-draft-key='net.description']")!;
-            Assert.True(note.HasAttribute("readonly"));
-            Assert.Equal("Сохранённый локальный черновик", note.TextContent);
-            Assert.Contains("Незавершённая операция остаётся", panels[0].TextContent);
-            page.WaitForAssertion(() => Assert.Single(context.JSInterop.Invocations["clayDraftStore.applyRaw"]));
-            Assert.Equal("net-input", context.JSInterop.Invocations["clayDraftStore.applyRaw"].Single().Arguments[1]);
-        }
-        else
-        {
-            Assert.Empty(panels);
-            Assert.Empty(context.JSInterop.Invocations["clayDraftStore.register"]);
-        }
+        Assert.Empty(page.FindAll("[data-testid='net-readonly-recovery']"));
+        Assert.DoesNotContain("Сохранённый локальный черновик", page.Markup);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.register"]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.registerRam"]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.applyRaw"]);
 
         await Invoke(page, "SaveAsync", true);
         await Invoke(page, "RestartPoeAsync");
@@ -230,25 +219,6 @@ public sealed partial class NetFormTests
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.saveTypedScope"]);
-    }
-
-    [Fact]
-    public async Task NetUnavailablePortDoesNotPublishLateRawStateAfterRouteChange()
-    {
-        var fixture = new NetFixture(missingPort: true, restoredInput: OwnNetDraft(), restoredRaw: true, deferRaw: true);
-        await using var context = fixture.Context;
-        var requested = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var apply = context.JSInterop.Setup<ClayDraftRawApplyResult>("clayDraftStore.applyRaw", _ => { requested.TrySetResult(); return true; });
-        var page = context.Render<NetPage>();
-        await requested.Task.WaitAsync(TimeSpan.FromSeconds(3));
-
-        ChangeId(page.Instance, 0);
-        await Invoke(page, "LoadCurrentAsync", 0);
-        apply.SetResult(new ClayDraftRawApplyResult([], ["data:net.description:0"]));
-
-        page.WaitForAssertion(() => Assert.Empty(page.FindAll("[data-testid='net-readonly-recovery']")));
-        Assert.DoesNotContain("Сохранённый локальный черновик", page.Markup);
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.discardScope"]);
     }
 
     private static string OwnNetDraft() => JsonSerializer.Serialize(new

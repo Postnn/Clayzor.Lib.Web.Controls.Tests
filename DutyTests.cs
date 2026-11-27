@@ -2,6 +2,8 @@ using System.Data;
 using System.Data.Common;
 using System.Security.Claims;
 using System.Text.Json;
+using System.Text.Json.Nodes;
+using Microsoft.JSInterop;
 using Bunit;
 using Clayzor.Lib.Web.Controls.Components.Select;
 using Clayzor.Lib.Web.Controls.Services;
@@ -78,7 +80,7 @@ public sealed partial class DutyTests
     {
         using var connection = new Probe();
         using var db = Db(connection);
-        var result = await DutyData.SaveAsync(db, "fixture", 4, Original, ClosingDraft(), default);
+        var result = await DutyData.SaveAsync(db, "fixture", 4, Original, ClosingDraft(), Guid.NewGuid(), default);
         Assert.Equal(9, result.ActualId);
         Assert.Equal((byte)1, result.Closed);
         Assert.Equal(1, connection.Commits);
@@ -96,7 +98,7 @@ public sealed partial class DutyTests
     {
         using var connection = new Probe { FailProcedure = failing };
         using var db = Db(connection);
-        await Assert.ThrowsAsync<DutyRejectedException>(() => DutyData.SaveAsync(db, "fixture", 4, Original, ClosingDraft(), default));
+        await Assert.ThrowsAsync<DutyRejectedException>(() => DutyData.SaveAsync(db, "fixture", 4, Original, ClosingDraft(), Guid.NewGuid(), default));
         Assert.Equal(0, connection.Commits);
         Assert.Equal(1, connection.Rollbacks);
         Assert.Equal(Original, connection.Row);
@@ -110,7 +112,7 @@ public sealed partial class DutyTests
         using var connection = new Probe();
         connection.Intervals.Add(new Interval(200, 8, OldDay));
         using var db = Db(connection);
-        await Assert.ThrowsAsync<DutyRejectedException>(() => DutyData.SaveAsync(db, "fixture", 4, Original, ClosingDraft(), default));
+        await Assert.ThrowsAsync<DutyRejectedException>(() => DutyData.SaveAsync(db, "fixture", 4, Original, ClosingDraft(), Guid.NewGuid(), default));
         Assert.Null(connection.DeletedFor);
         Assert.Null(connection.InsertedFor);
         Assert.Equal(2, connection.Intervals.Count);
@@ -144,7 +146,7 @@ public sealed partial class DutyTests
         }
         using var db = Db(connection);
         var rejected = await Assert.ThrowsAsync<DutyRejectedException>(() =>
-            DutyData.SaveAsync(db, "fixture", 4, original, draft, default));
+            DutyData.SaveAsync(db, "fixture", 4, original, draft, Guid.NewGuid(), default));
         Assert.Equal(reason switch
         {
             "closed" => DutyRejectionKind.Closed,
@@ -168,7 +170,7 @@ public sealed partial class DutyTests
         using var connection = new Probe { WorkDay = workDay };
         using var db = Db(connection);
         var draft = ClosingDraft() with { Close = false, Confirmation = DutyConfirmation.Planned };
-        var result = await DutyData.SaveAsync(db, "fixture", 4, Original, draft, default);
+        var result = await DutyData.SaveAsync(db, "fixture", 4, Original, draft, Guid.NewGuid(), default);
         Assert.Equal(8, connection.CalendarFor);
         Assert.Equal((byte)0, result.Closed);
         Assert.Equal(workDay ? (DateTime?)null : NewDay.ToDateTime(TimeOnly.MinValue), result.TimeOff);
@@ -182,8 +184,8 @@ public sealed partial class DutyTests
         using var connection = new Probe { Row = null };
         using var db = Db(connection);
         var draft = new DutyDraft(DateOnly.FromDateTime(Today), 8);
-        var inserted = await DutyData.SaveAsync(db, "fixture", 4, null, draft, default);
-        var updated = await DutyData.SaveAsync(db, "fixture", 4, inserted, draft with { PlannedId = 9 }, default);
+        var inserted = await DutyData.SaveAsync(db, "fixture", 4, null, draft, Guid.NewGuid(), default);
+        var updated = await DutyData.SaveAsync(db, "fixture", 4, inserted, draft with { PlannedId = 9 }, Guid.NewGuid(), default);
         Assert.Equal(2, connection.Commits);
         Assert.Equal(9, updated.PlannedId);
         Assert.Equal(new[] { "insert", "plan" }, connection.Branches);
@@ -193,16 +195,53 @@ public sealed partial class DutyTests
 
     /// <summary>Потерянный ответ COMMIT не выдаётся за доказанный отказ и не повторяется.</summary>
     [Fact]
-    public async Task LostCommitResponseKeepsBusinessOutcomeUnknown()
+    public async Task LostCommitResponseUsesExactConfirmedJournalAndDoesNotRepeatDml()
     {
         using var connection = new Probe { LoseCommitResponse = true };
         using var db = Db(connection);
-        await Assert.ThrowsAsync<TimeoutException>(() => DutyData.SaveAsync(db, "fixture", 4, Original, ClosingDraft(), default));
+        var attempt = Guid.NewGuid();
+        var saved = await DutyData.SaveAsync(db, "fixture", 4, Original, ClosingDraft(), attempt, default);
+        var outcome = await DutyData.ReadSaveAttemptAsync(db, "fixture", 4, DutyDate, attempt, default);
+        Assert.Equal(InventoryOperationState.Confirmed, outcome?.State);
+        Assert.Equal(saved, await DutyData.SaveAsync(db, "fixture", 4, Original, ClosingDraft(), attempt, default));
         Assert.Equal(1, connection.Commits);
         Assert.Equal(0, connection.Rollbacks);
         Assert.Equal(1, connection.ScheduleWrites);
         Assert.Single(connection.Intervals);
     }
+
+    /// <summary>Незавершённая попытка блокирует дату создания независимо от инициатора.</summary>
+    [Fact]
+    public async Task PendingSaveBlocksSameCreationDateAcrossEmployees()
+    {
+        var date = DateOnly.FromDateTime(Today);
+        var oldAttempt = Guid.NewGuid();
+        using var connection = new Probe { Row = null };
+        connection.Journal.Add(oldAttempt, new(oldAttempt, 8, $"duty:{date:yyyyMMdd}", "duty.save", InventoryOperationState.Unknown));
+        using var db = Db(connection);
+        var dates = await DutyData.ReadOpenSaveDatesAsync(db, "fixture", 4, default);
+        Assert.Contains(date, dates);
+        await Assert.ThrowsAsync<InventoryOperationPendingException>(() =>
+            DutyData.SaveAsync(db, "fixture", 4, null, new DutyDraft(date, 8), Guid.NewGuid(), default));
+        Assert.Equal(0, connection.ScheduleWrites);
+        Assert.Single(connection.Journal);
+    }
+
+    /// <summary>Отзыв SQL-прав после резерва отменяет попытку без изменения расписания и отгулов.</summary>
+    [Fact]
+    public async Task SaveRevalidatesSqlRightsAfterReservation()
+    {
+        using var connection = new Probe();
+        connection.AfterReservation = () => connection.CanWrite = false;
+        using var db = Db(connection);
+        var attempt = Guid.NewGuid();
+        var denied = await Assert.ThrowsAsync<DutyRejectedException>(() =>
+            DutyData.SaveAsync(db, "fixture", 4, Original, ClosingDraft(), attempt, default));
+        Assert.Equal(DutyRejectionKind.AccessDenied, denied.Kind);
+        Assert.Equal(0, connection.ScheduleWrites);
+        Assert.Equal(InventoryOperationState.Rejected, connection.Journal[attempt].State);
+    }
+
 
     /// <summary>Страница создаёт черновик с текущим днём и блокирует кнопку при недоступной записи.</summary>
     [Fact]
@@ -211,10 +250,10 @@ public sealed partial class DutyTests
         using var connection = new Probe { Row = null, CanWrite = false };
         await using var context = new BunitContext();
         context.JSInterop.Mode = JSRuntimeMode.Loose;
-        context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.register", _ => true)
+        context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.registerRam", _ => true)
             .SetResult(new ClayDraftRestore("duty-test", false, 0, null, null));
         context.Services.AddScoped(_ => Db(connection));
-        context.Services.AddScoped<ClayDraftService>();
+        context.Services.AddScoped(_ => new ClayDraftService(new DutyAcknowledgement(context.JSInterop.JSRuntime)));
         context.Services.AddScoped<ClayFormWindowService>();
         context.Services.AddSingleton<IConfiguration>(new ConfigurationBuilder().Build());
         context.Services.AddSingleton<AuthenticationStateProvider>(new DutyAuthentication(true));
@@ -263,7 +302,7 @@ public sealed partial class DutyTests
             Assert.Single(editor.FindAll($"input[data-draft-key='{key}']"));
         editor.WaitForAssertion(() => Assert.Equal("main",
             Assert.Single(context.JSInterop.Invocations["clayDraftStore.applyRaw"]).Arguments[1]));
-        var registration = Assert.Single(context.JSInterop.Invocations["clayDraftStore.register"]);
+        var registration = Assert.Single(context.JSInterop.Invocations["clayDraftStore.registerRam"]);
         Assert.Equal(new object[] { "duty", "20261121", "4" }, registration.Arguments.Take(3));
         var root = editor.Find(Assert.IsType<string>(registration.Arguments[4]));
         Assert.True(root.Contains(recovered));
@@ -291,7 +330,7 @@ public sealed partial class DutyTests
         using var connection = new Probe { Row = Original with { Closed = 1 } };
         var restored = new ClayDraftRestore("old-duty", true, 9, null, null);
         await using var context = EditorContext(connection, restored, deferRegistration: true);
-        var registration = context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.register",
+        var registration = context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.registerRam",
             call => Equals(call.Arguments[1], "20261121"));
         var released = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         context.JSInterop.SetupVoid("clayDraftStore.unregister", call =>
@@ -437,7 +476,7 @@ public sealed partial class DutyTests
         await using var context = EditorContext(connection, new ClayDraftRestore("private", true, 9, null, null), authenticated);
         var editor = context.Render<DutyEditor>(parameters => parameters.Add(component => component.RouteId, route));
         editor.WaitForAssertion(() => Assert.Contains(authenticated ? "Некорректная дата" : "Не удалось подтвердить", editor.Markup));
-        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.register"]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.registerRam"]);
         Assert.Equal(0, connection.ScheduleWrites);
     }
 
@@ -576,11 +615,193 @@ public sealed partial class DutyTests
         };
         using var db = Db(connection);
 
-        var result = await DutyData.SaveAsync(db, "fixture", 4, Original, ClosingDraft(), default);
+        var result = await DutyData.SaveAsync(db, "fixture", 4, Original, ClosingDraft(), Guid.NewGuid(), default);
 
         Assert.Equal((byte)1, result.Closed);
         Assert.Equal(1, connection.ScheduleWrites);
         Assert.Equal(1, connection.Commits);
+    }
+
+    /// <summary>При открытии даты прежняя попытка создания заносится отдельно от подтверждённых записей.</summary>
+    [Fact]
+    public async Task DutyImportsMatchingLegacyCreationEvidenceBeforeOpeningRam()
+    {
+        var attemptId = Guid.NewGuid();
+        using var db = new Probe { Row = Original with { DutyDate = Today, ActualId = null, TimeOff = null } };
+        await using var context = EditorContext(db, new ClayDraftRestore("duty-legacy", false, 0, null, null), rawReady: true);
+        context.JSInterop.Setup<ClayLegacyDraftOperationEvidence[]?>("clayDraftStore.beginLegacyOperationEvidenceTransfer",
+            call => Equals(call.Arguments[1], "new"))
+            .SetResult([new(attemptId.ToString("N"), "duty.save", "2026-11-25"),
+                new(Guid.NewGuid().ToString("N"), "duty.save", "2026-11-26")]);
+        context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.registerRam", _ =>
+            db.LegacyJournal.TryGetValue(attemptId, out var entry) && entry.State == InventoryOperationState.Unknown)
+            .SetResult(new ClayDraftRestore("duty-legacy", false, 0, null, null));
+        var leaseActions = new List<(string Action, object? Lease)>();
+        context.JSInterop.SetupVoid("clayDraftStore.finishLegacyOperationEvidenceTransfer", call =>
+        {
+            leaseActions.Add(("finish", call.Arguments[0]));
+            return true;
+        }).SetVoidResult();
+        context.JSInterop.SetupVoid("clayDraftStore.retireLegacyOperationEvidenceTransfer", call =>
+        {
+            leaseActions.Add(("retire", call.Arguments[0]));
+            return true;
+        }).SetVoidResult();
+        var page = context.Render<DutyEditor>(p => p.Add(component => component.RouteId, "20261125"));
+        page.WaitForAssertion(() => Assert.Contains("Есть незавершённая серверная попытка", page.Markup));
+        Assert.True(DutyAction(page, "Сохранить").HasAttribute("disabled"));
+        Assert.Equal("duty:20261125", Assert.Single(db.LegacyJournal).Value.ConflictKey);
+        Assert.Empty(db.Journal);
+        Assert.Equal(0, db.ScheduleWrites);
+        var calls = context.JSInterop.Invocations.ToList();
+        var leases = calls.Where(call => call.Identifier == "clayDraftStore.beginLegacyOperationEvidenceTransfer").ToArray();
+        Assert.Equal(new object?[] { "20261125", "new" }, leases.Select(call => call.Arguments[1]).ToArray());
+        var retirement = Assert.Single(calls, call => call.Identifier == "clayDraftStore.retireLegacyOperationEvidenceTransfer");
+        Assert.Equal(leases[0].Arguments[3], retirement.Arguments[0]);
+        var finishes = calls.Where(call => call.Identifier == "clayDraftStore.finishLegacyOperationEvidenceTransfer").ToArray();
+        Assert.Equal(new[] { leases[1].Arguments[3], leases[0].Arguments[3] }, finishes.Select(call => call.Arguments[0]));
+        Assert.Equal(new[]
+        {
+            ("finish", leases[1].Arguments[3]),
+            ("retire", leases[0].Arguments[3]),
+            ("finish", leases[0].Arguments[3]),
+        }, leaseActions);
+    }
+
+    /// <summary>Подтверждённый клиентом снимок остаётся неизвестным без точного подтверждения сервера.</summary>
+    [Theory]
+    [InlineData(false, null, false)]
+    [InlineData(true, 99, false)]
+    [InlineData(true, null, false)]
+    [InlineData(true, null, true)]
+    public async Task DutyRequiresExactServerOutcomeForClientConfirmedMarker(bool hasServerReceipt, int? resultId, bool failCleanup)
+    {
+        var attemptId = Guid.NewGuid();
+        var row = Original with { DutyDate = Today, ActualId = null, TimeOff = null };
+        using var db = new Probe { Row = row };
+        if (hasServerReceipt)
+            db.Journal.Add(attemptId, new(attemptId, 4, "duty:20261125", "duty.save", InventoryOperationState.Confirmed, resultId));
+        var confirmed = hasServerReceipt && resultId is null;
+        var operation = JsonSerializer.Serialize(new
+        {
+            version = 1, attemptId = attemptId.ToString("N"), kind = "duty.save", status = "confirmed", revision = 9,
+            data = JsonSerializer.Serialize(new { Original = row, Draft = DutyDraft.FromRow(row) }),
+            scopes = new[] { new { name = "main", typedRevision = 7, rawRevisions = new Dictionary<string, long>() } },
+            acceptLegacyTyped = false, legacyTypedRevision = 0,
+        });
+        await using var context = EditorContext(db, new ClayDraftRestore("duty-confirmed", true, 9, null, operation), rawReady: true);
+        var rejectCleanup = failCleanup;
+        context.JSInterop.SetupVoid("clayDraftStore.commitOperation", _ => rejectCleanup)
+            .SetException(new JSException("Тестовый отказ очистки."));
+        var page = context.Render<DutyEditor>(p => p.Add(component => component.RouteId, "20261125"));
+        var expectedMessage = failCleanup ? "Повторите сверку для завершения очистки" :
+            confirmed ? "Серверный журнал подтвердил сохранение" : "Исход предыдущего сохранения неизвестен";
+        page.WaitForAssertion(() => Assert.Contains(expectedMessage, page.Markup));
+        if (failCleanup)
+        {
+            rejectCleanup = false;
+            var compare = page.FindAll("button").Single(button => button.TextContent.Trim() == "Сверить состояние записи");
+            await compare.ClickAsync(new MouseEventArgs());
+            Assert.Contains("Серверный журнал подтвердил сохранение", page.Markup);
+        }
+        Assert.Equal(0, db.ScheduleWrites);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.closeRam"]);
+        var cleanup = context.JSInterop.Invocations["clayDraftStore.commitOperation"];
+        var markers = context.JSInterop.Invocations["clayDraftStore.recordConfirmedOperation"];
+        Assert.Equal(failCleanup ? 2 : confirmed ? 1 : 0, cleanup.Count);
+        Assert.Equal(cleanup.Count, markers.Count);
+        Assert.All(cleanup, call => Assert.Equal(9L, call.Arguments[1]));
+        Assert.All(markers, call => Assert.Equal(9L, call.Arguments[1]));
+    }
+
+
+    /// <summary>Точный отказ освобождает только попытку и оставляет локальный ввод.</summary>
+    [Theory]
+    [InlineData("same", "unknown", null, false, true, true, "Ввод сохранён.")]
+    [InlineData("changed", "unknown", null, false, true, false, "Состояние дежурства изменилось.")]
+    [InlineData("closed", "unknown", null, false, true, false, "Дежурство закрыто.")]
+    [InlineData("denied", "unknown", null, false, true, false, "Изменение дежурства недоступно.")]
+    [InlineData("same", "confirmed", null, false, false, false, "Серверный отказ расходится")]
+    [InlineData("same", "unknown", 99, false, false, false, "Исход предыдущего сохранения неизвестен")]
+    [InlineData("same", "unknown", null, true, true, true, "Ввод сохранён.")]
+    public async Task DutyReconcilesOnlyExactRejectedAttemptAndRetainsInput(string fresh, string markerStatus,
+        int? resultId, bool loseRejectReply, bool rejects, bool canEdit, string message)
+    {
+        var attemptId = Guid.NewGuid();
+        var row = Original with { DutyDate = Today, ActualId = null, TimeOff = null };
+        var current = fresh switch
+        {
+            "changed" => row with { ChangedAt = row.ChangedAt.AddMinutes(1) },
+            "closed" => row with { Closed = 1 },
+            _ => row,
+        };
+        var sent = DutyDraft.FromRow(row) with { PlannedId = 9 };
+        var retained = sent with { PlannedId = 11 };
+        using var db = new Probe { Row = current, CanWrite = fresh != "denied" };
+        db.Journal.Add(attemptId, new(attemptId, 4, "duty:20261125", "duty.save", InventoryOperationState.Rejected, resultId));
+        var operation = JsonSerializer.Serialize(new
+        {
+            version = 1, attemptId = attemptId.ToString("N"), kind = "duty.save", status = markerStatus, revision = 9,
+            data = JsonSerializer.Serialize(new { Original = row, Draft = sent }),
+            scopes = new[] { new { name = "main", typedRevision = 7, rawRevisions = new Dictionary<string, long>() } },
+            acceptLegacyTyped = false, legacyTypedRevision = 0,
+        });
+        var retainedJson = JsonSerializer.Serialize(new { Original = row, Draft = retained });
+        var restored = new ClayDraftRestore("duty-rejected", true, 15, null, operation,
+            new Dictionary<string, string> { ["main"] = retainedJson, ["sibling"] = "retained" });
+        await using var context = EditorContext(db, restored, rawReady: true);
+        if (loseRejectReply)
+        {
+            context.JSInterop.SetupVoid("clayDraftStore.rejectOperation", _ => true)
+                .SetException(new JSException("Ответ о снятии маркера потерян."));
+            context.JSInterop.Setup<string?>("clayDraftStore.retryStorage", _ => true).SetResult(null);
+        }
+
+        var page = context.Render<DutyEditor>(p => p.Add(component => component.RouteId, "20261125"));
+        page.WaitForAssertion(() => Assert.Contains(message, page.Markup));
+        var rejected = context.JSInterop.Invocations["clayDraftStore.rejectOperation"];
+        Assert.Equal(rejects ? 1 : 0, rejected.Count);
+        Assert.All(rejected, call => Assert.Equal(9L, call.Arguments[1]));
+        var retry = context.JSInterop.Invocations["clayDraftStore.retryStorage"];
+        Assert.Equal(loseRejectReply ? 1 : 0, retry.Count);
+        Assert.All(retry, call => Assert.Null(call.Arguments[1]));
+        Assert.Equal(0, db.ScheduleWrites);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.recordConfirmedOperation"]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.closeRam"]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.replaceEditorScope"]);
+        Assert.Empty(context.JSInterop.Invocations["clayDraftStore.discardScope"]);
+
+        const System.Reflection.BindingFlags instance =
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+        Assert.Equal(canEdit, Assert.IsType<bool>(typeof(DutyEditor).GetProperty("CanEdit", instance)!.GetValue(page.Instance)));
+        var recovery = typeof(DutyEditor).GetField("_recoverySnapshot", instance)!.GetValue(page.Instance);
+        var actual = recovery is null
+            ? typeof(DutyEditor).GetField("_draft", instance)!.GetValue(page.Instance)
+            : recovery.GetType().GetProperty("Draft")!.GetValue(recovery);
+        Assert.Equal(retained, Assert.IsType<DutyDraft>(actual));
+    }
+
+    /// <summary>Начальный фокус включается только после загрузки доступного редактора.</summary>
+    [Theory]
+    [InlineData(true, false, true)]
+    [InlineData(false, false, false)]
+    [InlineData(true, true, false)]
+    public async Task InitialFocusUsesWritableReadyScopeWithoutGenericEnter(bool canWrite, bool closed, bool ready)
+    {
+        using var db = new Probe { Row = Original with { DutyDate = Today, Closed = closed ? (byte)1 : (byte)0 }, CanWrite = canWrite };
+        await using var context = EditorContext(db,
+            new ClayDraftRestore("duty-focus", false, 0, null, null), rawReady: true);
+        var page = context.Render<DutyEditor>(p => p.Add(component => component.RouteId, "20261125"));
+
+        page.WaitForAssertion(() =>
+        {
+            var scope = page.FindComponent<Clayzor.Lib.Web.Controls.Components.Form.ClayEditorFocusScope>();
+            Assert.Equal(ready, scope.Instance.Ready);
+            Assert.False(scope.Instance.AdvanceOnEnter);
+        });
     }
 
     private static BunitContext EditorContext(Probe connection, ClayDraftRestore restore, bool authenticated = true, bool rawReady = false, bool deferRegistration = false,
@@ -588,14 +809,20 @@ public sealed partial class DutyTests
     {
         var context = new BunitContext();
         context.JSInterop.Mode = JSRuntimeMode.Loose;
+        context.JSInterop.Setup<ClayLegacyDraftOperationEvidence[]?>("clayDraftStore.beginLegacyOperationEvidenceTransfer", _ => true)
+            .SetResult([]);
+        context.JSInterop.SetupVoid("clayDraftStore.closeRam", call => call.Arguments.Count == 1).SetVoidResult();
+        context.JSInterop.Setup<bool>("clayDraftStore.closeRam", call => call.Arguments.Count == 2).SetResult(true);
+        context.JSInterop.Setup<ClayDraftEditorScopeState>("clayDraftStore.readEditorScope", _ => true)
+            .SetResult(new ClayDraftEditorScopeState(15, false, false));
         if (!deferRegistration)
-            context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.register", _ => true).SetResult(restore);
+            context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.registerRam", _ => true).SetResult(restore);
         context.JSInterop.Setup<ClayDraftRawApplyResult>("clayDraftStore.applyRaw", _ => true)
             .SetResult(new ClayDraftRawApplyResult(rawReady ? ["data:duty.time-off:0"] : [], rawReady ? [] : ["data:duty.time-off:0"]));
         context.JSInterop.Setup<ClayDraftRestoreReadiness>("clayDraftStore.getRestoreReadiness", _ => true)
             .SetResult(new ClayDraftRestoreReadiness(rawReady, rawReady ? [] : ["main"], []));
         context.Services.AddScoped(_ => Db(connection));
-        context.Services.AddScoped<ClayDraftService>();
+        context.Services.AddScoped(_ => new ClayDraftService(new DutyAcknowledgement(context.JSInterop.JSRuntime)));
         context.Services.AddScoped<ClayFormWindowService>();
         context.Services.AddSingleton<IConfiguration>(new ConfigurationBuilder().Build());
         context.Services.AddSingleton<AuthenticationStateProvider>(new DutyAuthentication(authenticated));
@@ -603,6 +830,23 @@ public sealed partial class DutyTests
         context.Services.AddMudServices();
         context.Render<MudBlazor.MudPopoverProvider>();
         return context;
+    }
+
+    private sealed class DutyAcknowledgement(IJSRuntime inner) : IJSRuntime
+    {
+        public ValueTask<T> InvokeAsync<T>(string identifier, object?[]? args) =>
+            InvokeAsync<T>(identifier, CancellationToken.None, args);
+
+        public async ValueTask<T> InvokeAsync<T>(string identifier, CancellationToken cancellationToken, object?[]? args)
+        {
+            var value = await inner.InvokeAsync<T>(identifier, cancellationToken, args);
+            if (identifier != "clayDraftStore.beginOperationIntent" || value is not string json) return value;
+            using var intent = JsonDocument.Parse((string)args![1]!);
+            var response = JsonNode.Parse(json)!;
+            foreach (var name in new[] { "attemptId", "kind", "data" })
+                response[name] = intent.RootElement.GetProperty(name).GetString();
+            return (T)(object)response.ToJsonString();
+        }
     }
 
     private sealed class DutyAuthentication(bool authenticated) : AuthenticationStateProvider
@@ -625,6 +869,12 @@ public sealed partial class DutyTests
         return new DbManager("Server=fixture", new FakeSqlErrorHandler(), () => connection);
     }
 
+    private sealed record JournalEntry(Guid AttemptId, int EmployeeId, string ConflictKey, string CommandKind,
+        InventoryOperationState State, int? ResultEntityId = null)
+    {
+        internal bool Open => State is InventoryOperationState.Reserved or InventoryOperationState.Dispatching or InventoryOperationState.Unknown;
+    }
+
     private sealed record Interval(int Id, int Employee, DateOnly Date);
 
     private sealed class Probe : DbConnection
@@ -639,6 +889,9 @@ public sealed partial class DutyTests
         public bool WorkDay { get; init; }
         public string? FailProcedure { get; init; }
         public bool LoseCommitResponse { get; init; }
+        public Action? AfterReservation { get; set; }
+        public Dictionary<Guid, JournalEntry> Journal { get; set; } = [];
+        public Dictionary<Guid, JournalEntry> LegacyJournal { get; set; } = [];
         public int Commits { get; set; }
         public int Rollbacks { get; set; }
         public int? DeletedFor { get; set; }
@@ -667,6 +920,10 @@ public sealed partial class DutyTests
     {
         public DutyRow? Row = connection.Row;
         public List<Interval> Intervals = [.. connection.Intervals];
+        public Dictionary<Guid, JournalEntry> Journal = new(connection.Journal);
+        public Dictionary<Guid, JournalEntry> LegacyJournal = new(connection.LegacyJournal);
+        public bool DomainWrite;
+        public bool Reservation;
         private bool _finished;
         public override IsolationLevel IsolationLevel => IsolationLevel.Serializable;
         protected override DbConnection DbConnection => connection;
@@ -675,9 +932,12 @@ public sealed partial class DutyTests
             Assert.False(_finished);
             connection.Row = Row;
             connection.Intervals = Intervals;
-            connection.Commits++;
+            connection.Journal = Journal;
+            connection.LegacyJournal = LegacyJournal;
+            if (DomainWrite) connection.Commits++;
+            if (Reservation) connection.AfterReservation?.Invoke();
             _finished = true;
-            if (connection.LoseCommitResponse) throw new TimeoutException();
+            if (DomainWrite && connection.LoseCommitResponse) throw new TimeoutException();
         }
         public override void Rollback()
         {
@@ -704,7 +964,19 @@ public sealed partial class DutyTests
         protected override DbParameter CreateDbParameter() => new FakeParameter();
         public override void Prepare() { }
         public override void Cancel() { }
-        public override object ExecuteScalar() => throw new NotSupportedException();
+        public override object ExecuteScalar()
+        {
+            Assert.Contains("UPDATE dbo.ClayzorOperationJournal", CommandText);
+            var journal = DbTransaction is ProbeTransaction tx ? tx.Journal : owner.Journal;
+            var attempt = Param<Guid>("AttemptId");
+            if (!journal.TryGetValue(attempt, out var previous) ||
+                previous.State != (InventoryOperationState)Param<byte>("ExpectedState"))
+                return 0;
+            if ((InventoryOperationState)Param<byte>("NextState") == InventoryOperationState.Confirmed)
+                Assert.True(Transaction.DomainWrite);
+            journal[attempt] = previous with { State = (InventoryOperationState)Param<byte>("NextState") };
+            return 1;
+        }
 
         private T Param<T>(string key) => (T)Parameters.Cast<DbParameter>().Single(p => p.ParameterName.TrimStart('@') == key).Value!;
         private DateOnly Day(string key) => DateOnly.FromDateTime(Param<DateTime>(key));
@@ -713,6 +985,15 @@ public sealed partial class DutyTests
         public override int ExecuteNonQuery()
         {
             var tx = Transaction;
+            if (CommandText.Contains("INSERT INTO dbo.ClayzorOperationJournal"))
+            {
+                var attempt = Param<Guid>("AttemptId");
+                tx.Journal.Add(attempt, new(attempt, Param<int>("EmployeeId"), Param<string>("ConflictKey"),
+                    Param<string>("CommandKind"), InventoryOperationState.Reserved));
+                tx.Reservation = true;
+                return 1;
+            }
+            tx.DomainWrite = true;
             if (CommandText.Contains("sp_НерабочиеДниDel"))
             {
                 var old = tx.Intervals.Single(row => row.Id == Param<int>("intervalId"));
@@ -751,6 +1032,33 @@ public sealed partial class DutyTests
 
         protected override DbDataReader ExecuteDbDataReader(CommandBehavior behavior)
         {
+            if (CommandText.Contains("SELECT AttemptId") && CommandText.Contains("dbo.ClayzorOperationJournal"))
+            {
+                var journal = DbTransaction is ProbeTransaction tx ? tx.Journal : owner.Journal;
+                if (!journal.TryGetValue(Param<Guid>("AttemptId"), out var entry))
+                    return new DataTable().CreateDataReader();
+                return Values(("AttemptId", typeof(Guid), entry.AttemptId), ("EmployeeId", typeof(int), entry.EmployeeId),
+                    ("ConflictKey", typeof(string), entry.ConflictKey), ("CommandKind", typeof(string), entry.CommandKind),
+                    ("State", typeof(byte), (byte)entry.State), ("ResultEntityId", typeof(int), entry.ResultEntityId));
+            }
+            if (CommandText.Contains("INSERT INTO dbo.ClayzorLegacyOperationEvidence"))
+            {
+                var attempt = Param<Guid>("AttemptId");
+                var evidence = new JournalEntry(attempt, Param<int>("EmployeeId"), Param<string>("ConflictKey"),
+                    Param<string>("CommandKind"), InventoryOperationState.Unknown);
+                Transaction.LegacyJournal.TryAdd(attempt, evidence);
+                return Values(("Value", typeof(bool), Transaction.LegacyJournal[attempt] == evidence));
+            }
+            if (CommandText.Contains("SELECT CONVERT(bit, CASE WHEN EXISTS") && CommandText.Contains("dbo.ClayzorOperationJournal"))
+                return Values(("Value", typeof(bool), Transaction.Journal.Values.Concat(Transaction.LegacyJournal.Values).Any(entry => entry.Open && entry.ConflictKey == Param<string>("ConflictKey"))));
+            if (CommandText.Contains("SELECT ConflictKey") && CommandText.Contains("dbo.ClayzorOperationJournal"))
+            {
+                var table = new DataTable();
+                table.Columns.Add("ConflictKey", typeof(string));
+                foreach (var entry in owner.Journal.Values.Concat(owner.LegacyJournal.Values).Where(entry => entry.Open && entry.CommandKind == Param<string>("CommandKind")).DistinctBy(entry => entry.ConflictKey))
+                    table.Rows.Add(entry.ConflictKey);
+                return table.CreateDataReader();
+            }
             if (CommandText.Contains("SUSER_SID()")) return Values(("КодСотрудника", typeof(int), owner.CurrentEmployeeId));
             if (CommandText.Contains("WITH Schedule AS")) return Values(("Today", typeof(DateTime), owner.ServerToday));
             if (CommandText.Contains("CanChangeTimeOff"))
@@ -804,4 +1112,3 @@ public sealed partial class DutyTests
         }
     }
 }
-

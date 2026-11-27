@@ -119,7 +119,7 @@ public sealed class EquipmentAccountDialogTests
     [Theory]
     [InlineData(null)]
     [InlineData("obsolete-opaque-version")]
-    public async Task RestoredVersionMismatch_PreservesProtectedInputAndBlocksSave(string? originalVersion)
+    public async Task RestoredVersionMismatch_PreservesOrdinaryRawWithAuthorizedPasswordAndBlocksSave(string? originalVersion)
     {
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([
             Script.Scalar(1), Script.Rows(Script.Row(
@@ -134,7 +134,7 @@ public sealed class EquipmentAccountDialogTests
             RawRestore = async () =>
             {
                 var editor = await ready.Task;
-                await editor.Find("input[type=password]").InputAsync("fixture-local-raw");
+                await editor.Find("input[data-draft-key='account.notes']").InputAsync("fixture-local-raw");
             },
         };
         var reference = await context.Services.GetRequiredService<IDialogService>().ShowAsync<EquipmentAccountDialog>(
@@ -151,12 +151,12 @@ public sealed class EquipmentAccountDialogTests
         dialog.WaitForAssertion(() =>
         {
             Assert.Contains("Сверьте актуальные данные", dialog.Markup);
-            Assert.Equal("local notes", dialog.Instance.Notes);
-            Assert.Equal("fixture-local-raw", dialog.Instance.Password);
+            Assert.Equal("fixture-local-raw", dialog.Instance.Notes);
+            Assert.Equal("fixture-server-value", dialog.Instance.Password);
             Assert.True(dialog.FindAll("button").Single(button => button.TextContent.Trim() == "OK").HasAttribute("disabled"));
         });
         var typed = editorContext.CaptureDraftState();
-        Assert.DoesNotContain("fixture-local-raw", typed);
+        Assert.Contains("fixture-local-raw", typed);
         Assert.DoesNotContain("fixture-server-value", typed);
         Assert.False(reference.Result.IsCompleted);
         await provider.InvokeAsync(() => reference.Close(DialogResult.Cancel()));

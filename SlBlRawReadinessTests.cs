@@ -80,16 +80,20 @@ public sealed partial class SlBlEditorRestoreTests
     }
 
     [Theory]
-    [InlineData("unknown")]
-    [InlineData("confirmed")]
-    public async Task SlBlOwnedOrUnknownOutcomeIsNotOverwrittenByFailedInput(string state)
+    [InlineData("unknown", false)]
+    [InlineData("confirmed", false)]
+    [InlineData("confirmed", true)]
+    public async Task SlBlOwnedOrUnknownOutcomeIsNotOverwrittenByFailedInput(string state, bool serverConfirmed)
     {
         using var sql = new MailboxConnection();
         await using var context = new BunitContext();
+        var intent = new SlBlIntent(Guid.NewGuid(), Address, SlBlKind.Safe, Baseline, LatestText);
+        sql.ExternalWrite(LatestText);
+        if (serverConfirmed) sql.SeedConfirmed(intent.OperationId);
         var marker = JsonSerializer.Serialize(new
         {
-            version = 1, attemptId = "slbl-owned-readiness", kind = "slbl.sync", status = state, revision = 9,
-            data = JsonSerializer.Serialize(new SlBlIntent(Guid.NewGuid(), Address, SlBlKind.Safe, Baseline, LatestText)),
+            version = 1, attemptId = intent.OperationId.ToString("N"), kind = "slbl.sync", status = state, revision = 9,
+            data = JsonSerializer.Serialize(intent),
             scopes = Array.Empty<object>(), acceptLegacyTyped = false, legacyTypedRevision = 0,
         });
         SetupRawScopeFixture(context, marker);
@@ -102,7 +106,7 @@ public sealed partial class SlBlEditorRestoreTests
 
         await form.InvokeAsync(() => Button(form, "Обновить").ClickAsync(new MouseEventArgs()));
 
-        Assert.Equal(state == "confirmed" ? 1 : 0, context.JSInterop.Invocations["clayDraftStore.commitOperation"].Count);
+        Assert.Equal(serverConfirmed ? 1 : 0, context.JSInterop.Invocations["clayDraftStore.commitOperation"].Count);
         Assert.Empty(context.JSInterop.Invocations["clayDraftStore.applyPendingRaw"]);
         Assert.Equal(0, sql.Dispatches);
         Assert.Contains(OldText, form.Find("textarea").TextContent);
@@ -113,7 +117,7 @@ public sealed partial class SlBlEditorRestoreTests
     {
         context.JSInterop.Mode = JSRuntimeMode.Loose;
         var snapshot = JsonSerializer.Serialize(new { Address, Kind = SlBlKind.Safe, Original = Baseline, Current = OldText });
-        context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.register", _ => true)
+        context.JSInterop.Setup<ClayDraftRestore?>("clayDraftStore.registerRam", _ => true)
             .SetResult(new ClayDraftRestore("slbl-readiness", true, 5, null, marker, new Dictionary<string, string> { ["main"] = snapshot }));
         context.JSInterop.Setup<ClayDraftRawApplyResult>("clayDraftStore.applyRaw", _ => true).SetResult(new([], []));
         context.JSInterop.Setup<ClayDraftStorageHealth>("clayDraftStore.getHealth", _ => true)

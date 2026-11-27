@@ -1,3 +1,4 @@
+using System.Reflection;
 using System.Text.Json;
 using Bunit;
 using Clayzor.Lib.Entities.Inventory;
@@ -11,13 +12,14 @@ namespace Clayzor.Lib.Web.Controls.Tests;
 public sealed partial class EquipmentFormTests
 {
     [Fact]
-    public async Task AccountingIntentAndDispatchUseOriginalInputWhileBeginAwaits()
+    public async Task AccountingIntentUsesKeyAndDispatchUsesFrozenInput()
     {
         var fixture = CreateFixture();
         await using var context = fixture.Context;
         var page = context.Render<EquipmentForm>();
         WaitForSn(page, "CLAY_TEST_7");
         SetPrivate(page.Instance, "_canUseAccounting", true);
+        SetActiveChildDraft(page.Instance, nameof(EquipmentAccountingDialog), null);
         var draft = new EquipmentAccounting { Notes = "Отправленное значение" };
         fixture.Js.DeferredIdentifier = "clayDraftStore.beginOperationIntent";
 
@@ -28,7 +30,9 @@ public sealed partial class EquipmentFormTests
         await saving.WaitAsync(TimeSpan.FromSeconds(3));
 
         using var envelope = ReadChildOperationEnvelope(context);
-        Assert.Equal("Отправленное значение", envelope.RootElement.GetProperty("Intent").GetProperty("Notes").GetString());
+        var intent = envelope.RootElement.GetProperty("Intent");
+        Assert.Equal(0, intent.GetProperty("AccountingId").GetInt32());
+        Assert.False(intent.TryGetProperty("Notes", out _));
         Assert.Equal("Отправленное значение", fixture.Service.LastAccountingDraft?.Notes);
         Assert.Equal("Более поздний ввод", draft.Notes);
         Assert.Single(context.JSInterop.Invocations["clayDraftStore.recordConfirmedOperation"]);
@@ -41,6 +45,9 @@ public sealed partial class EquipmentFormTests
         await using var context = fixture.Context;
         var page = context.Render<EquipmentForm>();
         WaitForSn(page, "CLAY_TEST_7");
+        SetPrivate(page.Instance, "_canViewAccounts", true);
+        SetPrivate(page.Instance, "_selectedType", new EquipmentType { MacAddressCount = 1 });
+        SetActiveChildDraft(page.Instance, nameof(EquipmentAccountDialog), string.Empty);
         var failCleanup = true;
         context.JSInterop.SetupVoid("clayDraftStore.commitOperation", _ => failCleanup)
             .SetException(new JSException("Тестовый отказ завершения журнала"));
@@ -51,10 +58,12 @@ public sealed partial class EquipmentFormTests
 
         using var envelope = ReadChildOperationEnvelope(context);
         var intent = envelope.RootElement.GetProperty("Intent");
-        Assert.Equal("test-login", intent.GetProperty("Login").GetString());
-        Assert.Equal(64, intent.GetProperty("SecretProof").GetString()!.Length);
+        Assert.Single(intent.EnumerateObject());
+        Assert.Equal(fixture.Service.AccountWriteBinding, intent.GetProperty("Binding").GetString());
+        Assert.Equal(64, fixture.Service.AccountWriteBinding!.Length);
         Assert.DoesNotContain(secret, envelope.RootElement.GetRawText(), StringComparison.Ordinal);
-        Assert.False(intent.TryGetProperty("Password", out _));
+        Assert.DoesNotContain("test-login", envelope.RootElement.GetRawText(), StringComparison.Ordinal);
+        Assert.DoesNotContain("Тестовая запись", envelope.RootElement.GetRawText(), StringComparison.Ordinal);
         Assert.Equal(1, fixture.Service.AddAccountCalls);
         var operation = Assert.IsType<ClayDraftOperation>(GetPrivate(page.Instance, "_draftOperation"));
         Assert.Equal(ClayDraftOperationStatus.Confirmed, operation.Status);
@@ -62,8 +71,17 @@ public sealed partial class EquipmentFormTests
         Assert.Single(context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
 
         failCleanup = false;
+        fixture.Service.AccountWriteReceipt = new InventoryOperationReceipt(fixture.Service.AccountWriteAttempt,
+            InventoryOperationState.Confirmed, 8);
+        await InvokeHandler(page, "ReconcileDraftOperationAsync");
+        Assert.True(PrivateBool(page.Instance, "_draftOperationUnresolved"));
+        Assert.Single(context.JSInterop.Invocations["clayDraftStore.commitOperation"]);
+
+        fixture.Service.AccountWriteReceipt = new InventoryOperationReceipt(fixture.Service.AccountWriteAttempt,
+            InventoryOperationState.Confirmed, 7);
         await InvokeHandler(page, "ReconcileDraftOperationAsync");
 
+        Assert.Equal(fixture.Service.AccountWriteAttempt, fixture.Service.AccountReadAttempt);
         Assert.Equal(1, fixture.Service.AddAccountCalls);
         Assert.Single(context.JSInterop.Invocations["clayDraftStore.recordConfirmedOperation"]);
         Assert.Equal(2, context.JSInterop.Invocations["clayDraftStore.commitOperation"].Count);
@@ -75,5 +93,12 @@ public sealed partial class EquipmentFormTests
         var begin = Assert.Single(context.JSInterop.Invocations["clayDraftStore.beginOperationIntent"]);
         using var intent = JsonDocument.Parse(Assert.IsType<string>(begin.Arguments[1]));
         return JsonDocument.Parse(intent.RootElement.GetProperty("data").GetString()!);
+    }
+
+    private static void SetActiveChildDraft(EquipmentForm form, string dialog, string? key)
+    {
+        var editorType = typeof(EquipmentForm).GetNestedType("EquipmentDraftEditor", BindingFlags.NonPublic)!;
+        var editor = editorType.GetConstructor([typeof(string), typeof(string), typeof(int?)])!.Invoke([dialog, key, null]);
+        SetPrivate(form, "_activeEditor", editor);
     }
 }

@@ -24,21 +24,26 @@ public sealed class Eq8DraftServiceTests
         js.NextRevision = 6;
         Assert.Equal(6, await service.BeginOperationAsync("operation-6"));
         await service.RejectOperationAsync(6);
-        await service.UnknownOperationAsync(6);
-        await service.CommitOperationAsync(6);
+        js.NextRevision = 7;
+        Assert.Equal(7, await service.BeginOperationAsync("operation-7"));
+        await service.UnknownOperationAsync(7);
+        await service.RecordConfirmedOperationAsync(7);
+        await service.CommitOperationAsync(7);
 
         AssertCall(js, 0, "clayDraftStore.register", "equipment-form", "7", "inventory:42", 3);
         AssertCall(js, 1, "clayDraftStore.saveTyped", "reg-1", "typed-5");
         AssertCall(js, 2, "clayDraftStore.applyRaw", "reg-1");
         AssertCall(js, 3, "clayDraftStore.beginOperation", "reg-1", "operation-6");
         AssertCall(js, 4, "clayDraftStore.rejectOperation", "reg-1", 6L);
-        AssertCall(js, 5, "clayDraftStore.unknownOperation", "reg-1", 6L);
-        AssertCall(js, 6, "clayDraftStore.commitOperation", "reg-1", 6L);
+        AssertCall(js, 5, "clayDraftStore.beginOperation", "reg-1", "operation-7");
+        AssertCall(js, 6, "clayDraftStore.unknownOperation", "reg-1", 7L);
+        AssertCall(js, 7, "clayDraftStore.recordConfirmedOperation", "reg-1", 7L);
+        AssertCall(js, 8, "clayDraftStore.commitOperation", "reg-1", 7L);
 
         await service.DiscardAsync();
-        AssertCall(js, 7, "clayDraftStore.discard", "reg-1");
+        AssertCall(js, 9, "clayDraftStore.discard", "reg-1");
         await service.DisposeAsync();
-        Assert.Equal(8, js.Calls.Count);
+        Assert.Equal(10, js.Calls.Count);
         await Assert.ThrowsAsync<InvalidOperationException>(() => service.SaveTypedAsync("late"));
     }
 

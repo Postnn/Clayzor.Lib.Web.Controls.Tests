@@ -24,7 +24,7 @@ public sealed class Eq8ReconnectServiceTests
         Assert.Equal(string.Empty, service.LastError);
     }
 
-    /// <summary>Неподтверждённый draft запрещает reload и объясняет отказ.</summary>
+    /// <summary>При сохранённом соединении редактор остаётся доступен без полной загрузки.</summary>
     [Fact]
     public async Task HealthyButDraftNotReloadable_DoesNotReload()
     {
@@ -35,13 +35,13 @@ public sealed class Eq8ReconnectServiceTests
         await InvokeLoop(service);
 
         Assert.Equal(0, nav.ForceLoadCount);
-        Assert.Equal(ReconnectState.Failed, service.State);
-        Assert.Contains("черновик ещё не сохранён", service.LastError);
+        Assert.Equal(ReconnectState.Idle, service.State);
+        Assert.Empty(service.LastError);
     }
 
-    /// <summary>JS failure fail-closed: reload отсутствует, пользователю остаётся LastError.</summary>
+    /// <summary>Сбой проверки защиты ввода также сохраняет документ после восстановления SQL.</summary>
     [Fact]
-    public async Task HealthyButCanReloadThrows_DoesNotReloadAndKeepsError()
+    public async Task HealthyButCanReloadThrows_DoesNotReloadAndReturnsToEditor()
     {
         var connection = new ScriptedConnection(new Queue<ScriptEntry>([Script.Scalar(1)]));
         var nav = new ReloadNavigationManager();
@@ -51,9 +51,22 @@ public sealed class Eq8ReconnectServiceTests
         await InvokeLoop(service);
 
         Assert.Equal(0, nav.ForceLoadCount);
-        Assert.Equal(ReconnectState.Failed, service.State);
-        Assert.False(string.IsNullOrWhiteSpace(service.LastError));
-        Assert.Contains("Автоматическая перезагрузка отменена", service.LastError);
+        Assert.Equal(ReconnectState.Idle, service.State);
+        Assert.Empty(service.LastError);
+    }
+
+    /// <summary>Кнопка переподключения использует ту же проверку перед полной загрузкой.</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ManualReload_RequiresSameGuard(bool canReload)
+    {
+        var connection = new ScriptedConnection(new Queue<ScriptEntry>());
+        var nav = new ReloadNavigationManager();
+        using var service = CreateService(connection, nav, new ReloadJsRuntime(canReload));
+
+        Assert.Equal(canReload, await service.TryReloadAsync());
+        Assert.Equal(canReload ? 1 : 0, nav.ForceLoadCount);
     }
 
     /// <summary>Прежний unsuccessful health-check остаётся false без reload и исключения наружу.</summary>
